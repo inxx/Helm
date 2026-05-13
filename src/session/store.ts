@@ -22,6 +22,9 @@ export type SessionRecord = {
   changedFiles?: string[];
   logPath?: string;
   diffPath?: string;
+  checkCommand?: string;
+  checkExitCode?: number;
+  checkLogPath?: string;
   commitHash?: string;
 };
 

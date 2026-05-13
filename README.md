@@ -24,6 +24,7 @@ node src/cli.ts agents
 node src/cli.ts run --agent codex --dry-run "현재 repo 상태 요약"
 node src/cli.ts status
 node src/cli.ts log
+node src/cli.ts commit <session> --check "npm run check" -m "테스트 실패 수정"
 ```
 
 ### 로컬 개발 설치
@@ -64,6 +65,16 @@ helm status
 helm diff
 helm commit -m "테스트 실패 수정"
 ```
+
+### commit check
+
+`helm commit`은 `--check "<command>"` 옵션으로 커밋 전 검증 명령을 실행할 수 있다. check 명령이 실패하면 Helm은 파일을 stage하지 않고 커밋을 중단하며, `.helm/sessions/<session>.check.log`에 stdout/stderr를 저장한다.
+
+```bash
+helm commit <session> --check "npm run check" -m "테스트 실패 수정"
+```
+
+첫 버전의 `--check`는 사용자가 넘긴 문자열을 shell command로 실행한다. 신뢰한 repo-local 명령에만 사용한다.
 
 ## 세션 저장
 

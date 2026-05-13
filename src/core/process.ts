@@ -43,6 +43,29 @@ export function runCommand(
   };
 }
 
+export function runShellCommand(command: string, options: RunCommandOptions): CommandResult {
+  const result = spawnSync(command, {
+    cwd: options.cwd,
+    input: options.input,
+    encoding: "utf8",
+    shell: true,
+  });
+
+  if (result.error) {
+    return {
+      code: 1,
+      stdout: "",
+      stderr: result.error.message,
+    };
+  }
+
+  return {
+    code: result.status ?? 0,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+  };
+}
+
 export function runCommandStream(
   command: string,
   args: string[],

@@ -79,6 +79,43 @@ describe("run command", () => {
     }
   });
 
+  it("stops safe commit when check command fails", () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "helm-commit-check-command-"));
+
+    try {
+      runCommand("git", ["init"], { cwd: repoPath });
+      writeFileSync(join(repoPath, "note.txt"), "hello\n");
+
+      const run = runCliWithContext(["run", "--agent", "codex", "--dry-run", "hello"], {
+        cwd: repoPath,
+      });
+      const sessionId = /Session: (?<id>\S+)/.exec(run.stdout ?? "")?.groups?.id;
+
+      assert.ok(sessionId);
+
+      const commit = runCliWithContext(
+        [
+          "commit",
+          sessionId,
+          "--check",
+          `${process.execPath} -e "process.exit(1)"`,
+          "-m",
+          "테스트",
+        ],
+        { cwd: repoPath },
+      );
+      const staged = runCommand("git", ["diff", "--cached", "--name-only"], {
+        cwd: repoPath,
+      });
+
+      assert.equal(commit.code, 1);
+      assert.match(commit.stderr ?? "", /Check failed/);
+      assert.equal(staged.stdout, "");
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
   it("streams agent output through the async run path", async () => {
     const repoPath = mkdtempSync(join(tmpdir(), "helm-stream-command-"));
     const stdout = new PassThrough();

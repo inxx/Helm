@@ -4,7 +4,7 @@ import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { buildAgentCommand, AGENTS, isAgentName, type AgentName } from "./harness/agents.ts";
-import { runCommand, runCommandStream } from "./core/process.ts";
+import { runCommand, runCommandStream, runShellCommand, type CommandResult } from "./core/process.ts";
 import {
   captureSnapshot,
   changedPaths,
@@ -38,6 +38,18 @@ type CliContext = {
   cwd: string;
   stdout?: Writable;
   stderr?: Writable;
+};
+
+type CommitArgs = {
+  sessionId?: string;
+  message: string;
+  dryRun: boolean;
+  checkCommand?: string;
+};
+
+type CommitCheckSummary = {
+  command: string;
+  logPath: string | null;
 };
 
 function formatHelp(): string {
@@ -151,7 +163,27 @@ function runCommit(args: string[], context: CliContext): CliResult {
     if (parsed.dryRun) {
       return {
         code: 0,
-        stdout: formatCommitSummary(session.id, files, parsed.message, null, true),
+        stdout: formatCommitSummary(
+          session.id,
+          files,
+          parsed.message,
+          null,
+          true,
+          parsed.checkCommand ? { command: parsed.checkCommand, logPath: null } : undefined,
+        ),
+      };
+    }
+
+    const checkSummary = parsed.checkCommand
+      ? runCommitCheck(repoPath, store, session, parsed.checkCommand)
+      : undefined;
+
+    if (checkSummary && session.checkExitCode !== 0) {
+      saveSession(store, session);
+
+      return {
+        code: 1,
+        stderr: formatCheckFailure(parsed.checkCommand, session.checkExitCode ?? 1, checkSummary.logPath),
       };
     }
 
@@ -166,23 +198,61 @@ function runCommit(args: string[], context: CliContext): CliResult {
 
     return {
       code: 0,
-      stdout: formatCommitSummary(session.id, stagedFiles, parsed.message, commitHash, false),
+      stdout: formatCommitSummary(
+        session.id,
+        stagedFiles,
+        parsed.message,
+        commitHash,
+        false,
+        checkSummary,
+      ),
     };
   } catch (error) {
     return { code: 1, stderr: `${formatError(error)}\n` };
   }
 }
 
-function parseCommitArgs(args: string[]): { sessionId?: string; message: string; dryRun: boolean } {
+function runCommitCheck(
+  repoPath: string,
+  store: ReturnType<typeof getSessionStore>,
+  session: NonNullable<ReturnType<typeof resolveSession>>,
+  command: string,
+): CommitCheckSummary {
+  const logPath = sessionArtifactPath(store, session.id, "check.log");
+  const result = runShellCommand(command, { cwd: repoPath });
+
+  writeFileSync(logPath, formatCheckLog(command, result));
+
+  session.checkCommand = command;
+  session.checkExitCode = result.code;
+  session.checkLogPath = logPath;
+  session.updatedAt = new Date().toISOString();
+
+  return { command, logPath };
+}
+
+function parseCommitArgs(args: string[]): CommitArgs {
   let sessionId: string | undefined;
   let message = "";
   let dryRun = false;
+  let checkCommand: string | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
 
     if (arg === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+
+    if (arg === "--check") {
+      checkCommand = args[index + 1] ?? "";
+      index += 1;
+      continue;
+    }
+
+    if (arg?.startsWith("--check=")) {
+      checkCommand = arg.slice("--check=".length);
       continue;
     }
 
@@ -211,7 +281,11 @@ function parseCommitArgs(args: string[]): { sessionId?: string; message: string;
     throw new Error("커밋 메시지가 필요합니다. 예: helm commit -m \"테스트 실패 수정\"");
   }
 
-  return { sessionId, message: message.trim(), dryRun };
+  if (checkCommand !== undefined && !checkCommand.trim()) {
+    throw new Error("check 명령이 필요합니다. 예: helm commit --check \"npm run check\" -m \"테스트 실패 수정\"");
+  }
+
+  return { sessionId, message: message.trim(), dryRun, checkCommand: checkCommand?.trim() };
 }
 
 function formatCommitSummary(
@@ -220,15 +294,43 @@ function formatCommitSummary(
   message: string,
   commitHash: string | null,
   dryRun: boolean,
+  check?: CommitCheckSummary,
 ): string {
-  return [
+  const rows = [
     dryRun ? "Commit dry-run:" : "Commit created:",
     `Session: ${sessionId}`,
     `Message: ${message}`,
     `Commit: ${commitHash ?? "(dry-run)"}`,
+  ];
+
+  if (check) {
+    rows.push(`Check: ${check.command}`);
+    rows.push(`Check log: ${check.logPath ?? "(dry-run)"}`);
+  }
+
+  return [...rows, "", "Files:", ...files.map((file) => `- ${file}`), ""].join("\n");
+}
+
+function formatCheckLog(command: string, result: CommandResult): string {
+  return [
+    `$ ${command}`,
+    `Exit: ${result.code}`,
     "",
-    "Files:",
-    ...files.map((file) => `- ${file}`),
+    "STDOUT:",
+    result.stdout || "(empty)",
+    "",
+    "STDERR:",
+    result.stderr || "(empty)",
+    "",
+  ].join("\n");
+}
+
+function formatCheckFailure(command: string, exitCode: number, logPath: string): string {
+  return [
+    "Check failed:",
+    `Command: ${command}`,
+    `Exit: ${exitCode}`,
+    `Log: ${logPath}`,
     "",
   ].join("\n");
 }
