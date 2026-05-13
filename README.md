@@ -27,6 +27,8 @@ node src/cli.ts log
 node src/cli.ts commit <session> --check "npm run check" -m "테스트 실패 수정"
 ```
 
+다음 작업 순서는 [docs/next-steps.md](docs/next-steps.md)에 정리한다.
+
 ### 로컬 개발 설치
 
 개발 중에는 repo 루트에서 npm link로 `helm` 명령을 연결할 수 있다.
