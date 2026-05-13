@@ -1,4 +1,4 @@
-import { runCommand } from "../core/process.ts";
+import { runCommand, type CommandResult } from "../core/process.ts";
 
 export type GitStatusEntry = {
   raw: string;
@@ -161,8 +161,48 @@ export function pushBranch(cwd: string, branch: string): void {
   const result = runCommand("git", ["push", "-u", "origin", branch], { cwd: repoPath });
 
   if (result.code !== 0) {
-    throw new Error(result.stderr.trim() || "git push 실행에 실패했습니다.");
+    throw new Error(formatPushBranchFailure(branch, result));
   }
+}
+
+function formatPushBranchFailure(branch: string, result: CommandResult): string {
+  const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+  const command = `git push -u origin ${branch}`;
+
+  if (/No such remote|does not appear to be a git repository|Could not read from remote repository/i.test(detail)) {
+    return [
+      "origin remote에 push하지 못했습니다.",
+      `Command: ${command}`,
+      "확인: git remote -v",
+      "origin이 없다면 실행: git remote add origin <repo-url>",
+      "권한 문제라면 GitHub 인증/저장소 접근 권한을 확인하세요.",
+      ...formatCommandFailureDetail(detail),
+    ].join("\n");
+  }
+
+  if (/failed to push some refs|non-fast-forward|fetch first|rejected/i.test(detail)) {
+    return [
+      "origin branch push가 거부되었습니다.",
+      `Command: ${command}`,
+      "확인: git fetch origin 후 원격 branch와 충돌 여부를 확인하세요.",
+      ...formatCommandFailureDetail(detail),
+    ].join("\n");
+  }
+
+  return [
+    "git push 실행에 실패했습니다.",
+    `Command: ${command}`,
+    "확인: origin remote, push 권한, 네트워크 상태를 확인하세요.",
+    ...formatCommandFailureDetail(detail),
+  ].join("\n");
+}
+
+function formatCommandFailureDetail(detail: string): string[] {
+  if (!detail) {
+    return [];
+  }
+
+  return ["", "원본 오류:", detail];
 }
 
 export function changedPaths(entries: GitStatusEntry[]): string[] {

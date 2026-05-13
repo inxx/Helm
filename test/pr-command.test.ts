@@ -90,34 +90,21 @@ describe("pr command", () => {
   });
 
   it("pushes the branch, creates a PR, and stores PR metadata", () => {
-    const repoPath = createGitRepo();
-    const remotePath = mkdtempSync(join(tmpdir(), "helm-pr-remote-"));
+    const { repoPath, remotePath, commitHash } = createRemoteBackedRepo();
     const binPath = mkdtempSync(join(tmpdir(), "helm-pr-bin-"));
     const originalPath = process.env.PATH;
 
     try {
-      writeFileSync(join(repoPath, "README.md"), "hello\n");
-      runCommand("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
-      runCommand("git", ["config", "user.name", "Test User"], { cwd: repoPath });
-      runCommand("git", ["add", "README.md"], { cwd: repoPath });
-      runCommand("git", ["commit", "-m", "테스트 커밋"], { cwd: repoPath });
-      runCommand("git", ["init", "--bare"], { cwd: remotePath });
-      runCommand("git", ["remote", "add", "origin", remotePath], { cwd: repoPath });
-
-      const commitHash = runCommand("git", ["rev-parse", "--short", "HEAD"], {
-        cwd: repoPath,
-      }).stdout.trim();
       const sessionId = saveTestSession(repoPath, { commitHash });
-      const ghPath = join(binPath, "gh");
 
-      writeFileSync(ghPath, "#!/bin/sh\nprintf '%s\\n' 'https://github.com/test/repo/pull/1'\n");
-      chmodSync(ghPath, 0o755);
+      writeSuccessfulGhStub(binPath, "https://github.com/test/repo/pull/1");
       process.env.PATH = `${binPath}:${originalPath ?? ""}`;
 
       const result = runCliWithContext(["pr", sessionId, "--base", "main", "--title", "테스트 PR"], {
         cwd: repoPath,
       });
       const session = readSession(getSessionStore(repoPath), sessionId);
+      const show = runCliWithContext(["show", sessionId], { cwd: repoPath });
 
       assert.equal(result.code, 0);
       assert.match(result.stdout ?? "", /PR created/);
@@ -125,10 +112,140 @@ describe("pr command", () => {
       assert.equal(session.prBase, "main");
       assert.equal(session.prTitle, "테스트 PR");
       assert.equal(session.prDraft, true);
+      assert.ok(session.prCreatedAt);
+      assert.equal(show.code, 0);
+      assert.match(show.stdout ?? "", /Pull request:/);
+      assert.match(show.stdout ?? "", /URL: https:\/\/github.com\/test\/repo\/pull\/1/);
+      assert.match(show.stdout ?? "", /Draft: yes/);
     } finally {
       process.env.PATH = originalPath;
       rmSync(repoPath, { recursive: true, force: true });
       rmSync(remotePath, { recursive: true, force: true });
+      rmSync(binPath, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a ready PR and stores draft=false metadata", () => {
+    const { repoPath, remotePath, commitHash } = createRemoteBackedRepo();
+    const binPath = mkdtempSync(join(tmpdir(), "helm-pr-bin-"));
+    const originalPath = process.env.PATH;
+
+    try {
+      const sessionId = saveTestSession(repoPath, { commitHash });
+
+      writeSuccessfulGhStub(binPath, "https://github.com/test/repo/pull/2");
+      process.env.PATH = `${binPath}:${originalPath ?? ""}`;
+
+      const result = runCliWithContext(
+        ["pr", sessionId, "--ready", "--base", "main", "--title", "테스트 ready PR"],
+        { cwd: repoPath },
+      );
+      const session = readSession(getSessionStore(repoPath), sessionId);
+
+      assert.equal(result.code, 0);
+      assert.match(result.stdout ?? "", /Draft: no/);
+      assert.doesNotMatch(result.stdout ?? "", /--draft/);
+      assert.equal(session.prUrl, "https://github.com/test/repo/pull/2");
+      assert.equal(session.prDraft, false);
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(repoPath, { recursive: true, force: true });
+      rmSync(remotePath, { recursive: true, force: true });
+      rmSync(binPath, { recursive: true, force: true });
+    }
+  });
+
+  it("prints a clear error when gh is unavailable", () => {
+    const repoPath = createGitRepo();
+    const binPath = mkdtempSync(join(tmpdir(), "helm-pr-bin-"));
+    const originalPath = process.env.PATH;
+
+    try {
+      const sessionId = saveTestSession(repoPath);
+      const ghPath = join(binPath, "gh");
+
+      writeFileSync(
+        ghPath,
+        "#!/bin/sh\nprintf '%s\\n' 'gh: command not found' >&2\nexit 127\n",
+      );
+      chmodSync(ghPath, 0o755);
+      process.env.PATH = `${binPath}:${originalPath ?? ""}`;
+
+      const result = runCliWithContext(["pr", sessionId, "--base", "main", "--title", "테스트 PR"], {
+        cwd: repoPath,
+      });
+
+      assert.equal(result.code, 1);
+      assert.match(result.stderr ?? "", /GitHub CLI\(gh\)를 실행할 수 없습니다/);
+      assert.match(result.stderr ?? "", /gh auth login/);
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(repoPath, { recursive: true, force: true });
+      rmSync(binPath, { recursive: true, force: true });
+    }
+  });
+
+  it("prints a clear error when gh is not authenticated", () => {
+    const repoPath = createGitRepo();
+    const binPath = mkdtempSync(join(tmpdir(), "helm-pr-bin-"));
+    const originalPath = process.env.PATH;
+
+    try {
+      const sessionId = saveTestSession(repoPath);
+      const ghPath = join(binPath, "gh");
+
+      writeFileSync(
+        ghPath,
+        [
+          "#!/bin/sh",
+          "if [ \"$1\" = \"--version\" ]; then",
+          "  printf '%s\\n' 'gh version test'",
+          "  exit 0",
+          "fi",
+          "printf '%s\\n' 'You are not logged into any GitHub hosts' >&2",
+          "exit 1",
+          "",
+        ].join("\n"),
+      );
+      chmodSync(ghPath, 0o755);
+      process.env.PATH = `${binPath}:${originalPath ?? ""}`;
+
+      const result = runCliWithContext(["pr", sessionId, "--base", "main", "--title", "테스트 PR"], {
+        cwd: repoPath,
+      });
+
+      assert.equal(result.code, 1);
+      assert.match(result.stderr ?? "", /GitHub CLI 인증이 필요합니다/);
+      assert.match(result.stderr ?? "", /gh auth status/);
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(repoPath, { recursive: true, force: true });
+      rmSync(binPath, { recursive: true, force: true });
+    }
+  });
+
+  it("prints a clear error when origin push fails", () => {
+    const repoPath = createGitRepo();
+    const binPath = mkdtempSync(join(tmpdir(), "helm-pr-bin-"));
+    const originalPath = process.env.PATH;
+
+    try {
+      const commitHash = createInitialCommit(repoPath);
+      const sessionId = saveTestSession(repoPath, { commitHash });
+
+      writeSuccessfulGhStub(binPath, "https://github.com/test/repo/pull/1");
+      process.env.PATH = `${binPath}:${originalPath ?? ""}`;
+
+      const result = runCliWithContext(["pr", sessionId, "--base", "main", "--title", "테스트 PR"], {
+        cwd: repoPath,
+      });
+
+      assert.equal(result.code, 1);
+      assert.match(result.stderr ?? "", /origin remote에 push하지 못했습니다/);
+      assert.match(result.stderr ?? "", /git remote -v/);
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(repoPath, { recursive: true, force: true });
       rmSync(binPath, { recursive: true, force: true });
     }
   });
@@ -141,6 +258,48 @@ function createGitRepo(): string {
   runCommand("git", ["checkout", "-b", "feature/test"], { cwd: repoPath });
 
   return repoPath;
+}
+
+function createInitialCommit(repoPath: string): string {
+  writeFileSync(join(repoPath, "README.md"), "hello\n");
+  runCommand("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
+  runCommand("git", ["config", "user.name", "Test User"], { cwd: repoPath });
+  runCommand("git", ["add", "README.md"], { cwd: repoPath });
+  runCommand("git", ["commit", "-m", "테스트 커밋"], { cwd: repoPath });
+
+  return runCommand("git", ["rev-parse", "--short", "HEAD"], { cwd: repoPath }).stdout.trim();
+}
+
+function createRemoteBackedRepo(): { repoPath: string; remotePath: string; commitHash: string } {
+  const repoPath = createGitRepo();
+  const remotePath = mkdtempSync(join(tmpdir(), "helm-pr-remote-"));
+  const commitHash = createInitialCommit(repoPath);
+
+  runCommand("git", ["init", "--bare"], { cwd: remotePath });
+  runCommand("git", ["remote", "add", "origin", remotePath], { cwd: repoPath });
+
+  return { repoPath, remotePath, commitHash };
+}
+
+function writeSuccessfulGhStub(binPath: string, url: string): void {
+  const ghPath = join(binPath, "gh");
+
+  writeFileSync(
+    ghPath,
+    [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"--version\" ]; then",
+      "  printf '%s\\n' 'gh version test'",
+      "  exit 0",
+      "fi",
+      "if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then",
+      "  exit 0",
+      "fi",
+      `printf '%s\\n' '${url}'`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(ghPath, 0o755);
 }
 
 function saveTestSession(

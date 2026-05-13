@@ -405,12 +405,13 @@ function runPr(args: string[], context: CliContext): CliResult {
       return { code: 0, stdout: formatPrSummary(plan, null, true) };
     }
 
+    ensureGitHubCliReady(repoPath);
     pushBranch(repoPath, plan.branch);
 
     const pr = runCommand("gh", plan.prCommand.slice(1), { cwd: repoPath });
 
     if (pr.code !== 0) {
-      throw new Error(pr.stderr.trim() || "gh pr create 실행에 실패했습니다.");
+      throw new Error(formatGhPrCreateFailure(pr));
     }
 
     const prUrl = (extractFirstUrl(pr.stdout) ?? pr.stdout.trim()) || "(url 확인 실패)";
@@ -582,6 +583,50 @@ function formatPrBody(session: NonNullable<ReturnType<typeof resolveSession>>): 
     "",
     ...changedFiles,
     "",
+  ].join("\n");
+}
+
+function ensureGitHubCliReady(repoPath: string): void {
+  const version = runCommand("gh", ["--version"], { cwd: repoPath });
+
+  if (version.code !== 0) {
+    throw new Error(formatGhUnavailable(version));
+  }
+
+  const auth = runCommand("gh", ["auth", "status"], { cwd: repoPath });
+
+  if (auth.code !== 0) {
+    throw new Error(formatGhAuthFailure(auth));
+  }
+}
+
+function formatGhUnavailable(result: CommandResult): string {
+  return [
+    "GitHub CLI(gh)를 실행할 수 없습니다.",
+    "확인: gh --version",
+    "설치 후 인증: gh auth login",
+    ...formatCommandFailureDetail(result),
+  ].join("\n");
+}
+
+function formatGhAuthFailure(result: CommandResult): string {
+  return [
+    "GitHub CLI 인증이 필요합니다.",
+    "실행: gh auth login",
+    "확인: gh auth status",
+    ...formatCommandFailureDetail(result),
+  ].join("\n");
+}
+
+function formatGhPrCreateFailure(result: CommandResult): string {
+  if (/not logged in|authentication|auth|401/i.test(commandFailureText(result))) {
+    return formatGhAuthFailure(result);
+  }
+
+  return [
+    "gh pr create 실행에 실패했습니다.",
+    "확인: base/head branch, GitHub 권한, 기존 PR 여부를 확인하세요.",
+    ...formatCommandFailureDetail(result),
   ].join("\n");
 }
 
@@ -804,6 +849,7 @@ function formatSessionSummary(session: NonNullable<ReturnType<typeof resolveSess
     `Created: ${session.createdAt}`,
     `Updated: ${session.updatedAt}`,
     `Check: ${check}`,
+    ...formatSessionPrRows(session),
     "",
     "Artifacts:",
     `Log: ${session.logPath ?? "-"}`,
@@ -817,6 +863,24 @@ function formatSessionSummary(session: NonNullable<ReturnType<typeof resolveSess
     ...changedFiles,
     "",
   ].join("\n");
+}
+
+function formatSessionPrRows(session: NonNullable<ReturnType<typeof resolveSession>>): string[] {
+  if (!session.prUrl && !session.prCreatedAt && !session.prBase && !session.prTitle) {
+    return [];
+  }
+
+  const draft = session.prDraft === undefined ? "-" : session.prDraft ? "yes" : "no";
+
+  return [
+    "",
+    "Pull request:",
+    `Base: ${session.prBase ?? "-"}`,
+    `Title: ${session.prTitle ?? "-"}`,
+    `Draft: ${draft}`,
+    `URL: ${session.prUrl ?? "-"}`,
+    `Created: ${session.prCreatedAt ?? "-"}`,
+  ];
 }
 
 function runDiff(args: string[], context: CliContext): CliResult {
@@ -959,6 +1023,20 @@ function formatRunSummary(
     ...files.map((file) => `- ${file}`),
     "",
   ].join("\n");
+}
+
+function formatCommandFailureDetail(result: CommandResult): string[] {
+  const detail = commandFailureText(result);
+
+  if (!detail) {
+    return [];
+  }
+
+  return ["", "원본 오류:", detail];
+}
+
+function commandFailureText(result: CommandResult): string {
+  return [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
 }
 
 function formatError(error: unknown): string {

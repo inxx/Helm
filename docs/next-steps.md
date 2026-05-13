@@ -259,18 +259,23 @@ inxx-helm pr <committed-session> --dry-run --title "Helm dogfood"
 
 ### Step 6. PR 명령 안정화
 
-상태: 다음 작업
+상태: 완료
 
 목표:
 
 - `inxx-helm pr`을 실제 repo에서 반복 사용해도 실패 원인을 명확히 알 수 있게 한다.
 
-후보 작업:
+구현:
 
-- `gh` 미설치/미인증 시 에러 메시지 개선
-- remote `origin` 없음 또는 upstream push 실패 시 안내 개선
-- PR 생성 후 session metadata 조회 테스트 보강
-- ready PR 생성 옵션 `--ready` 실제 출력/저장 검증 보강
+- PR 생성 전 `gh --version`, `gh auth status`를 확인해 미설치/미인증 원인을 먼저 출력한다.
+- remote `origin` 없음, push 거부, 일반 push 실패 메시지를 구분해 다음 확인 명령을 안내한다.
+- PR 생성 후 `inxx-helm show <session>`에서 저장된 PR metadata를 조회할 수 있게 했다.
+- ready PR 생성 옵션 `--ready`가 실제 생성 출력과 session metadata에 `Draft: no`로 남는지 테스트했다.
+
+검증 결과:
+
+- `npm run check`: 통과, 31 tests
+- `inxx-helm status`: 실행 성공
 
 ## 다음 세션 시작 체크
 
