@@ -5,7 +5,7 @@
   "description": "Personal Oz-like CLI agent hub.",
   "type": "module",
   "bin": {
-    "helm": "./src/cli.ts"
+    "inxx-helm": "./src/cli.ts"
   },
   "scripts": {
     "check": "node src/cli.ts --help >/dev/null && node --test",

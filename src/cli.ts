@@ -30,6 +30,7 @@ import {
 } from "./session/store.ts";
 
 const VERSION = "0.1.0";
+const CLI_COMMAND = "inxx-helm";
 
 type CliResult = {
   code: number;
@@ -81,7 +82,7 @@ function formatHelp(): string {
 개인용 Oz-like CLI agent hub.
 
 Usage:
-  helm <command> [options]
+  ${CLI_COMMAND} <command> [options]
 
 Commands:
   help              도움말을 출력합니다.
@@ -317,11 +318,11 @@ function parseCommitArgs(args: string[]): CommitArgs {
   }
 
   if (!message.trim()) {
-    throw new Error("커밋 메시지가 필요합니다. 예: helm commit -m \"테스트 실패 수정\"");
+    throw new Error(`커밋 메시지가 필요합니다. 예: ${CLI_COMMAND} commit -m "테스트 실패 수정"`);
   }
 
   if (checkCommand !== undefined && !checkCommand.trim()) {
-    throw new Error("check 명령이 필요합니다. 예: helm commit --check \"npm run check\" -m \"테스트 실패 수정\"");
+    throw new Error(`check 명령이 필요합니다. 예: ${CLI_COMMAND} commit --check "npm run check" -m "테스트 실패 수정"`);
   }
 
   return { sessionId, message: message.trim(), dryRun, checkCommand: checkCommand?.trim() };
@@ -490,11 +491,11 @@ function parsePrArgs(args: string[], defaultBase: string): PrArgs {
   }
 
   if (!base.trim()) {
-    throw new Error("base branch가 필요합니다. 예: helm pr --base main");
+    throw new Error(`base branch가 필요합니다. 예: ${CLI_COMMAND} pr --base main`);
   }
 
   if (title !== undefined && !title.trim()) {
-    throw new Error("PR title이 필요합니다. 예: helm pr --title \"테스트 실패 수정\"");
+    throw new Error(`PR title이 필요합니다. 예: ${CLI_COMMAND} pr --title "테스트 실패 수정"`);
   }
 
   return { sessionId, base: base.trim(), title: title?.trim(), draft, dryRun };
@@ -910,7 +911,7 @@ function parseRunArgs(args: string[]): { agent: AgentName; prompt: string; dryRu
   const prompt = promptParts.join(" ").trim();
 
   if (!prompt) {
-    throw new Error("prompt가 필요합니다. 예: helm run --agent codex \"테스트 실패 고쳐줘\"");
+    throw new Error(`prompt가 필요합니다. 예: ${CLI_COMMAND} run --agent codex "테스트 실패 고쳐줘"`);
   }
 
   return { agent, prompt, dryRun };

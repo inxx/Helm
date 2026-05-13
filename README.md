@@ -33,15 +33,15 @@ node src/cli.ts pr <session> --dry-run --base main --title "테스트 실패 수
 
 ### 로컬 개발 설치
 
-개발 중에는 repo 루트에서 npm link로 `helm` 명령을 연결할 수 있다.
+개발 중에는 repo 루트에서 npm link로 `inxx-helm` 명령을 연결할 수 있다.
 
 ```bash
 npm link
-helm --help
-helm run --agent codex --dry-run "현재 repo 상태 요약"
+inxx-helm --help
+inxx-helm run --agent codex --dry-run "현재 repo 상태 요약"
 ```
 
-`helm` 이름은 Kubernetes Helm과 충돌할 수 있다. 이미 다른 `helm` binary를 쓰는 환경에서는 `node src/cli.ts ...` 형태를 유지한다.
+실행 명령은 Kubernetes Helm과의 binary 이름 충돌을 피하기 위해 `inxx-helm`을 사용한다. `node src/cli.ts ...` 형태도 로컬 개발에서 그대로 사용할 수 있다.
 
 ### repo-local config
 
@@ -59,7 +59,7 @@ Helm은 repo-local `.helm/config.json`을 읽어 agent binary, 기본 commit che
 }
 ```
 
-CLI 옵션과 환경 변수는 config보다 우선한다. 예를 들어 `helm commit --check "npm test"`는 `defaultCheckCommand`를 덮어쓰고, `HELM_CODEX_BIN`은 `agentBinaries.codex`를 덮어쓴다.
+CLI 옵션과 환경 변수는 config보다 우선한다. 예를 들어 `inxx-helm commit --check "npm test"`는 `defaultCheckCommand`를 덮어쓰고, `HELM_CODEX_BIN`은 `agentBinaries.codex`를 덮어쓴다.
 
 ### agent binary 경로
 
@@ -82,31 +82,31 @@ HELM_GEMINI_BIN=/path/to/gemini node src/cli.ts run --agent gemini "리뷰해줘
 향후 목표 명령:
 
 ```bash
-helm run --agent codex "현재 repo 테스트 실패 고쳐줘"
-helm status
-helm diff
-helm commit -m "테스트 실패 수정"
+inxx-helm run --agent codex "현재 repo 테스트 실패 고쳐줘"
+inxx-helm status
+inxx-helm diff
+inxx-helm commit -m "테스트 실패 수정"
 ```
 
 ### commit check
 
-`helm commit`은 `--check "<command>"` 옵션으로 커밋 전 검증 명령을 실행할 수 있다. check 명령이 실패하면 Helm은 파일을 stage하지 않고 커밋을 중단하며, `.helm/sessions/<session>.check.log`에 stdout/stderr를 저장한다.
+`inxx-helm commit`은 `--check "<command>"` 옵션으로 커밋 전 검증 명령을 실행할 수 있다. check 명령이 실패하면 Helm은 파일을 stage하지 않고 커밋을 중단하며, `.helm/sessions/<session>.check.log`에 stdout/stderr를 저장한다.
 
 ```bash
-helm commit <session> --check "npm run check" -m "테스트 실패 수정"
+inxx-helm commit <session> --check "npm run check" -m "테스트 실패 수정"
 ```
 
-`.helm/config.json`에 `defaultCheckCommand`가 있으면 `--check`를 넘기지 않은 `helm commit`에도 같은 check가 적용된다.
+`.helm/config.json`에 `defaultCheckCommand`가 있으면 `--check`를 넘기지 않은 `inxx-helm commit`에도 같은 check가 적용된다.
 
 첫 버전의 `--check`는 사용자가 넘긴 문자열을 shell command로 실행한다. 신뢰한 repo-local 명령에만 사용한다.
 
 ### GitHub PR
 
-`helm pr`은 커밋된 세션의 branch를 `origin`에 push한 뒤 GitHub CLI로 draft PR을 만든다. PR 본문에는 세션 id, agent, prompt, commit hash, check 결과, artifact 경로, 변경 파일 목록을 포함한다.
+`inxx-helm pr`은 커밋된 세션의 branch를 `origin`에 push한 뒤 GitHub CLI로 draft PR을 만든다. PR 본문에는 세션 id, agent, prompt, commit hash, check 결과, artifact 경로, 변경 파일 목록을 포함한다.
 
 ```bash
-helm pr <session> --base main --title "테스트 실패 수정"
-helm pr <session> --dry-run --base main --title "테스트 실패 수정"
+inxx-helm pr <session> --base main --title "테스트 실패 수정"
+inxx-helm pr <session> --dry-run --base main --title "테스트 실패 수정"
 ```
 
 `.helm/config.json`에 `prBaseBranch`가 있으면 `--base`를 생략했을 때 해당 branch를 기본값으로 사용한다.
@@ -115,7 +115,7 @@ helm pr <session> --dry-run --base main --title "테스트 실패 수정"
 
 ## 세션 저장
 
-`helm run`은 repo-local `.helm/sessions`에 다음 파일을 남긴다.
+`inxx-helm run`은 repo-local `.helm/sessions`에 다음 파일을 남긴다.
 
 - `<session>.json`: 세션 metadata
 - `<session>.log`: agent stdout/stderr 로그

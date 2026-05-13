@@ -12,6 +12,7 @@ describe("runCli", () => {
 
     assert.equal(result.code, 0);
     assert.match(result.stdout ?? "", /Usage:/);
+    assert.match(result.stdout ?? "", /inxx-helm <command>/);
   });
 
   it("prints version", () => {
@@ -41,7 +42,7 @@ describe("runCli", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "helm-bin-link-"));
 
     try {
-      const binPath = join(tempDir, "helm");
+      const binPath = join(tempDir, "inxx-helm");
       symlinkSync(join(process.cwd(), "src/cli.ts"), binPath);
 
       const result = runCommand(binPath, ["version"], { cwd: tempDir });
