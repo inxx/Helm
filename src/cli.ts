@@ -3,6 +3,7 @@
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { loadHelmConfig } from "./config.ts";
 import { buildAgentCommand, AGENTS, isAgentName, type AgentName } from "./harness/agents.ts";
 import { runCommand, runCommandStream, runShellCommand, type CommandResult } from "./core/process.ts";
 import {
@@ -179,6 +180,8 @@ function runCommit(args: string[], context: CliContext): CliResult {
   try {
     const parsed = parseCommitArgs(args);
     const repoPath = findGitRoot(context.cwd);
+    const config = loadHelmConfig(repoPath);
+    const checkCommand = parsed.checkCommand ?? config.defaultCheckCommand;
     const store = getSessionStore(repoPath);
     const session = resolveSession(store, parsed.sessionId);
 
@@ -201,13 +204,13 @@ function runCommit(args: string[], context: CliContext): CliResult {
           parsed.message,
           null,
           true,
-          parsed.checkCommand ? { command: parsed.checkCommand, logPath: null } : undefined,
+          checkCommand ? { command: checkCommand, logPath: null } : undefined,
         ),
       };
     }
 
-    const checkSummary = parsed.checkCommand
-      ? runCommitCheck(repoPath, store, session, parsed.checkCommand)
+    const checkSummary = checkCommand
+      ? runCommitCheck(repoPath, store, session, checkCommand)
       : undefined;
 
     if (checkSummary && session.checkExitCode !== 0) {
@@ -215,7 +218,11 @@ function runCommit(args: string[], context: CliContext): CliResult {
 
       return {
         code: 1,
-        stderr: formatCheckFailure(parsed.checkCommand, session.checkExitCode ?? 1, checkSummary.logPath),
+        stderr: formatCheckFailure(
+          checkCommand,
+          session.checkExitCode ?? 1,
+          checkSummary.logPath,
+        ),
       };
     }
 
@@ -369,8 +376,9 @@ function formatCheckFailure(command: string, exitCode: number, logPath: string):
 
 function runPr(args: string[], context: CliContext): CliResult {
   try {
-    const parsed = parsePrArgs(args);
     const repoPath = findGitRoot(context.cwd);
+    const config = loadHelmConfig(repoPath);
+    const parsed = parsePrArgs(args, config.prBaseBranch ?? "main");
     const store = getSessionStore(repoPath);
     const session = resolveSession(store, parsed.sessionId);
 
@@ -420,9 +428,9 @@ function runPr(args: string[], context: CliContext): CliResult {
   }
 }
 
-function parsePrArgs(args: string[]): PrArgs {
+function parsePrArgs(args: string[], defaultBase: string): PrArgs {
   let sessionId: string | undefined;
-  let base = "main";
+  let base = defaultBase;
   let title: string | undefined;
   let draft = true;
   let dryRun = false;
@@ -616,9 +624,15 @@ function runAgent(args: string[], context: CliContext): CliResult {
   try {
     const parsed = parseRunArgs(args);
     const before = captureSnapshot(context.cwd);
+    const config = loadHelmConfig(before.repoPath);
     const store = createSessionStore(before.repoPath);
     const session = createSession(store, before);
-    const command = buildAgentCommand(parsed.agent, parsed.prompt);
+    const command = buildAgentCommand(
+      parsed.agent,
+      parsed.prompt,
+      process.env,
+      config.agentBinaries,
+    );
     const logPath = sessionArtifactPath(store, session.id, "log");
     const diffPath = sessionArtifactPath(store, session.id, "diff");
 
@@ -665,9 +679,15 @@ async function runAgentAsync(args: string[], context: CliContext): Promise<CliRe
   try {
     const parsed = parseRunArgs(args);
     const before = captureSnapshot(context.cwd);
+    const config = loadHelmConfig(before.repoPath);
     const store = createSessionStore(before.repoPath);
     const session = createSession(store, before);
-    const command = buildAgentCommand(parsed.agent, parsed.prompt);
+    const command = buildAgentCommand(
+      parsed.agent,
+      parsed.prompt,
+      process.env,
+      config.agentBinaries,
+    );
     const logPath = sessionArtifactPath(store, session.id, "log");
     const diffPath = sessionArtifactPath(store, session.id, "diff");
 

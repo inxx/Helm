@@ -29,4 +29,12 @@ describe("agents", () => {
       args: ["-p", "hello"],
     });
   });
+
+  it("uses configured binary overrides below environment overrides", () => {
+    assert.equal(resolveAgentBinary("claude", {}, { claude: "/repo/claude" }), "/repo/claude");
+    assert.equal(
+      resolveAgentBinary("claude", { HELM_CLAUDE_BIN: "/env/claude" }, { claude: "/repo/claude" }),
+      "/env/claude",
+    );
+  });
 });

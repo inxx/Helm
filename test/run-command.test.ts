@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -6,6 +6,7 @@ import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { runCommand, runCommandStream } from "../src/core/process.ts";
 import { runCliWithContext, runCliWithContextAsync } from "../src/cli.ts";
+import { getSessionStore, readSession } from "../src/session/store.ts";
 
 const tempDir = mkdtempSync(join(tmpdir(), "helm-run-command-"));
 
@@ -51,6 +52,29 @@ describe("run command", () => {
 
     assert.equal(status.code, 0);
     assert.match(status.stdout ?? "", /completed/);
+  });
+
+  it("uses repo config for agent binaries", () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "helm-config-agent-"));
+
+    try {
+      runCommand("git", ["init"], { cwd: repoPath });
+      mkdirSync(join(repoPath, ".helm"), { recursive: true });
+      writeFileSync(
+        join(repoPath, ".helm", "config.json"),
+        `${JSON.stringify({ agentBinaries: { gemini: "/repo/gemini" } }, null, 2)}\n`,
+      );
+
+      const run = runCliWithContext(["run", "--agent", "gemini", "--dry-run", "hello"], {
+        cwd: repoPath,
+      });
+      const sessionId = /Session: (?<id>\S+)/.exec(run.stdout ?? "")?.groups?.id;
+
+      assert.ok(sessionId);
+      assert.equal(readSession(getSessionStore(repoPath), sessionId).command?.[0], "/repo/gemini");
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
   });
 
   it("shows a single session summary", () => {
@@ -106,6 +130,36 @@ describe("run command", () => {
       assert.equal(commit.code, 0);
       assert.match(commit.stdout ?? "", /Commit dry-run/);
       assert.match(commit.stdout ?? "", /note\.txt/);
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it("uses repo config default check command for commit", () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "helm-commit-config-command-"));
+
+    try {
+      runCommand("git", ["init"], { cwd: repoPath });
+      mkdirSync(join(repoPath, ".helm"), { recursive: true });
+      writeFileSync(
+        join(repoPath, ".helm", "config.json"),
+        `${JSON.stringify({ defaultCheckCommand: "npm run check" }, null, 2)}\n`,
+      );
+      writeFileSync(join(repoPath, "note.txt"), "hello\n");
+
+      const run = runCliWithContext(["run", "--agent", "codex", "--dry-run", "hello"], {
+        cwd: repoPath,
+      });
+      const sessionId = /Session: (?<id>\S+)/.exec(run.stdout ?? "")?.groups?.id;
+
+      assert.ok(sessionId);
+
+      const commit = runCliWithContext(["commit", sessionId, "--dry-run", "-m", "테스트"], {
+        cwd: repoPath,
+      });
+
+      assert.equal(commit.code, 0);
+      assert.match(commit.stdout ?? "", /Check: npm run check/);
     } finally {
       rmSync(repoPath, { recursive: true, force: true });
     }

@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -62,6 +62,28 @@ describe("pr command", () => {
 
       assert.equal(result.code, 1);
       assert.match(result.stderr ?? "", /실패한 check/);
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it("uses repo config default PR base branch", () => {
+    const repoPath = createGitRepo();
+
+    try {
+      mkdirSync(join(repoPath, ".helm"), { recursive: true });
+      writeFileSync(
+        join(repoPath, ".helm", "config.json"),
+        `${JSON.stringify({ prBaseBranch: "develop" }, null, 2)}\n`,
+      );
+      const sessionId = saveTestSession(repoPath);
+      const result = runCliWithContext(["pr", sessionId, "--dry-run", "--title", "테스트 PR"], {
+        cwd: repoPath,
+      });
+
+      assert.equal(result.code, 0);
+      assert.match(result.stdout ?? "", /Base: develop/);
+      assert.match(result.stdout ?? "", /gh pr create --base develop --head feature\/test/);
     } finally {
       rmSync(repoPath, { recursive: true, force: true });
     }

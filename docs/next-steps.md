@@ -132,6 +132,8 @@ helm show
 
 ### Step 3. config 파일
 
+상태: 구현/검증 완료
+
 목표:
 
 - agent binary, default check command, PR base branch를 repo-local config로 관리한다.
@@ -146,6 +148,26 @@ helm show
 
 - `.helm/`은 현재 gitignore 대상이다.
 - 팀 공유 config가 필요해지면 `.helm.example.json` 같은 tracked 파일을 따로 둔다.
+
+구현된 config:
+
+```json
+{
+  "agentBinaries": {
+    "codex": "/opt/homebrew/bin/codex",
+    "claude": "/opt/homebrew/bin/claude",
+    "gemini": "/opt/homebrew/bin/gemini"
+  },
+  "defaultCheckCommand": "npm run check",
+  "prBaseBranch": "main"
+}
+```
+
+적용 우선순위:
+
+- agent binary: 환경 변수 > `.helm/config.json` > 내장 기본값
+- commit check: `--check` 옵션 > `.helm/config.json`
+- PR base: `--base` 옵션 > `.helm/config.json` > `main`
 
 ## 다음 세션 시작 체크
 

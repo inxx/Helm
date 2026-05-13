@@ -15,6 +15,7 @@ export type AgentCommand = {
 };
 
 type AgentEnvironment = Record<string, string | undefined>;
+type AgentBinaries = Partial<Record<AgentName, string>>;
 
 const AGENT_ENV_VARS: Record<AgentName, string> = {
   codex: "HELM_CODEX_BIN",
@@ -59,8 +60,9 @@ export function buildAgentCommand(
   agent: AgentName,
   prompt: string,
   env: AgentEnvironment = process.env,
+  configuredBinaries: AgentBinaries = {},
 ): AgentCommand {
-  const command = resolveAgentBinary(agent, env);
+  const command = resolveAgentBinary(agent, env, configuredBinaries);
 
   if (agent === "codex") {
     return { command, args: ["exec", prompt] };
@@ -73,11 +75,21 @@ export function buildAgentCommand(
   return { command, args: ["-p", prompt] };
 }
 
-export function resolveAgentBinary(agent: AgentName, env: AgentEnvironment = process.env): string {
+export function resolveAgentBinary(
+  agent: AgentName,
+  env: AgentEnvironment = process.env,
+  configuredBinaries: AgentBinaries = {},
+): string {
   const override = env[AGENT_ENV_VARS[agent]]?.trim();
 
   if (override) {
     return override;
+  }
+
+  const configuredBinary = configuredBinaries[agent]?.trim();
+
+  if (configuredBinary) {
+    return configuredBinary;
   }
 
   if (agent === "codex" && process.platform === "darwin" && existsSync(HOMEBREW_CODEX)) {

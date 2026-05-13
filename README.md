@@ -43,6 +43,24 @@ helm run --agent codex --dry-run "현재 repo 상태 요약"
 
 `helm` 이름은 Kubernetes Helm과 충돌할 수 있다. 이미 다른 `helm` binary를 쓰는 환경에서는 `node src/cli.ts ...` 형태를 유지한다.
 
+### repo-local config
+
+Helm은 repo-local `.helm/config.json`을 읽어 agent binary, 기본 commit check, 기본 PR base branch를 적용한다. `.helm/`은 개인 실행 기록과 설정 저장소로 git에 커밋하지 않는다.
+
+```json
+{
+  "agentBinaries": {
+    "codex": "/opt/homebrew/bin/codex",
+    "claude": "/opt/homebrew/bin/claude",
+    "gemini": "/opt/homebrew/bin/gemini"
+  },
+  "defaultCheckCommand": "npm run check",
+  "prBaseBranch": "main"
+}
+```
+
+CLI 옵션과 환경 변수는 config보다 우선한다. 예를 들어 `helm commit --check "npm test"`는 `defaultCheckCommand`를 덮어쓰고, `HELM_CODEX_BIN`은 `agentBinaries.codex`를 덮어쓴다.
+
 ### agent binary 경로
 
 기본 command는 `codex`, `claude`, `gemini`다. macOS에서 Homebrew Codex binary가 있으면 `/opt/homebrew/bin/codex`를 우선 사용한다.
@@ -78,6 +96,8 @@ helm commit -m "테스트 실패 수정"
 helm commit <session> --check "npm run check" -m "테스트 실패 수정"
 ```
 
+`.helm/config.json`에 `defaultCheckCommand`가 있으면 `--check`를 넘기지 않은 `helm commit`에도 같은 check가 적용된다.
+
 첫 버전의 `--check`는 사용자가 넘긴 문자열을 shell command로 실행한다. 신뢰한 repo-local 명령에만 사용한다.
 
 ### GitHub PR
@@ -88,6 +108,8 @@ helm commit <session> --check "npm run check" -m "테스트 실패 수정"
 helm pr <session> --base main --title "테스트 실패 수정"
 helm pr <session> --dry-run --base main --title "테스트 실패 수정"
 ```
+
+`.helm/config.json`에 `prBaseBranch`가 있으면 `--base`를 생략했을 때 해당 branch를 기본값으로 사용한다.
 
 실패한 check가 기록된 세션이나 아직 커밋되지 않은 세션은 PR 생성 대상에서 제외한다. 기본값은 draft PR이며, ready PR이 필요하면 `--ready`를 사용한다.
 
