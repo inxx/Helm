@@ -103,6 +103,10 @@ export function readWorktreeDiff(cwd: string): string {
   return chunks.join("\n");
 }
 
+export function changedPaths(entries: GitStatusEntry[]): string[] {
+  return [...new Set(entries.map((entry) => entry.path).filter(Boolean))].sort();
+}
+
 export function formatStatusEntries(entries: GitStatusEntry[]): string {
   if (entries.length === 0) {
     return "변경사항 없음";

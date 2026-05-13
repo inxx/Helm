@@ -68,6 +68,10 @@ export function saveSession(store: SessionStore, record: SessionRecord): void {
   writeFileSync(sessionFilePath(store, record.id), `${JSON.stringify(record, null, 2)}\n`);
 }
 
+export function sessionArtifactPath(store: SessionStore, id: string, extension: string): string {
+  return join(store.sessionsPath, `${id}.${extension}`);
+}
+
 export function readSession(store: SessionStore, id: string): SessionRecord {
   const raw = readFileSync(sessionFilePath(store, id), "utf8");
 
@@ -87,6 +91,10 @@ export function listSessions(store: SessionStore): SessionRecord[] {
 
 export function resolveSession(store: SessionStore, id?: string): SessionRecord | null {
   if (id) {
+    if (!existsSync(sessionFilePath(store, id))) {
+      return null;
+    }
+
     return readSession(store, id);
   }
 
