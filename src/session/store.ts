@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { GitSnapshot } from "../workspace/git.ts";
 
-export type SessionStatus = "created" | "running" | "completed" | "failed";
+export type SessionStatus = "created" | "running" | "completed" | "failed" | "committed";
 
 export type SessionRecord = {
   id: string;
@@ -22,6 +22,7 @@ export type SessionRecord = {
   changedFiles?: string[];
   logPath?: string;
   diffPath?: string;
+  commitHash?: string;
 };
 
 export type SessionStore = {

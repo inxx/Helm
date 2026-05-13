@@ -21,6 +21,9 @@ Node의 TypeScript type stripping을 사용하므로 별도 빌드 단계가 없
 npm run check
 node src/cli.ts --help
 node src/cli.ts agents
+node src/cli.ts run --agent codex --dry-run "현재 repo 상태 요약"
+node src/cli.ts status
+node src/cli.ts log
 ```
 
 향후 목표 명령:
@@ -31,3 +34,13 @@ helm status
 helm diff
 helm commit -m "테스트 실패 수정"
 ```
+
+## 세션 저장
+
+`helm run`은 repo-local `.helm/sessions`에 다음 파일을 남긴다.
+
+- `<session>.json`: 세션 metadata
+- `<session>.log`: agent stdout/stderr 로그
+- `<session>.diff`: 실행 후 git diff
+
+`.helm/`은 개인 실행 기록이므로 git에 커밋하지 않는다.

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -28,5 +28,31 @@ describe("run command", () => {
 
     assert.equal(status.code, 0);
     assert.match(status.stdout ?? "", /completed/);
+  });
+
+  it("prints safe commit dry-run for session files", () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "helm-commit-command-"));
+
+    try {
+      runCommand("git", ["init"], { cwd: repoPath });
+      writeFileSync(join(repoPath, "note.txt"), "hello\n");
+
+      const run = runCliWithContext(["run", "--agent", "codex", "--dry-run", "hello"], {
+        cwd: repoPath,
+      });
+      const sessionId = /Session: (?<id>\S+)/.exec(run.stdout ?? "")?.groups?.id;
+
+      assert.ok(sessionId);
+
+      const commit = runCliWithContext(["commit", sessionId, "--dry-run", "-m", "테스트"], {
+        cwd: repoPath,
+      });
+
+      assert.equal(commit.code, 0);
+      assert.match(commit.stdout ?? "", /Commit dry-run/);
+      assert.match(commit.stdout ?? "", /note\.txt/);
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
   });
 });

@@ -9,7 +9,10 @@ import {
   findGitRoot,
   formatStatusEntries,
   readStatus,
+  readStagedFiles,
   readWorktreeDiff,
+  stageFiles,
+  commitStaged,
 } from "./workspace/git.ts";
 import {
   createSession,
@@ -48,6 +51,7 @@ Commands:
   run               agent를 실행하고 세션을 기록합니다.
   status            현재 repo 상태와 최근 세션을 출력합니다.
   diff              세션 또는 현재 repo diff를 출력합니다.
+  commit            세션 변경사항만 stage/commit합니다.
   log               세션 로그를 출력합니다.
 
 Options:
@@ -96,6 +100,10 @@ export function runCliWithContext(argv: string[], context: CliContext): CliResul
     return runDiff(argv.slice(1), context);
   }
 
+  if (command === "commit") {
+    return runCommit(argv.slice(1), context);
+  }
+
   if (command === "log") {
     return runLog(argv.slice(1), context);
   }
@@ -104,6 +112,108 @@ export function runCliWithContext(argv: string[], context: CliContext): CliResul
     code: 1,
     stderr: `알 수 없는 명령입니다: ${command}\n\n${formatHelp()}`,
   };
+}
+
+function runCommit(args: string[], context: CliContext): CliResult {
+  try {
+    const parsed = parseCommitArgs(args);
+    const repoPath = findGitRoot(context.cwd);
+    const store = getSessionStore(repoPath);
+    const session = resolveSession(store, parsed.sessionId);
+
+    if (!session) {
+      return { code: 1, stderr: "커밋할 세션을 찾지 못했습니다.\n" };
+    }
+
+    const files = session.changedFiles ?? [];
+
+    if (files.length === 0) {
+      return { code: 1, stderr: "세션에 기록된 변경 파일이 없습니다.\n" };
+    }
+
+    if (parsed.dryRun) {
+      return {
+        code: 0,
+        stdout: formatCommitSummary(session.id, files, parsed.message, null, true),
+      };
+    }
+
+    stageFiles(repoPath, files);
+    const stagedFiles = readStagedFiles(repoPath);
+    const commitHash = commitStaged(repoPath, parsed.message);
+
+    session.status = "committed";
+    session.commitHash = commitHash;
+    session.updatedAt = new Date().toISOString();
+    saveSession(store, session);
+
+    return {
+      code: 0,
+      stdout: formatCommitSummary(session.id, stagedFiles, parsed.message, commitHash, false),
+    };
+  } catch (error) {
+    return { code: 1, stderr: `${formatError(error)}\n` };
+  }
+}
+
+function parseCommitArgs(args: string[]): { sessionId?: string; message: string; dryRun: boolean } {
+  let sessionId: string | undefined;
+  let message = "";
+  let dryRun = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+
+    if (arg === "-m" || arg === "--message") {
+      message = args[index + 1] ?? "";
+      index += 1;
+      continue;
+    }
+
+    if (arg?.startsWith("--message=")) {
+      message = arg.slice("--message=".length);
+      continue;
+    }
+
+    if (arg && !sessionId) {
+      sessionId = arg;
+      continue;
+    }
+
+    if (arg) {
+      throw new Error(`알 수 없는 commit 인자입니다: ${arg}`);
+    }
+  }
+
+  if (!message.trim()) {
+    throw new Error("커밋 메시지가 필요합니다. 예: helm commit -m \"테스트 실패 수정\"");
+  }
+
+  return { sessionId, message: message.trim(), dryRun };
+}
+
+function formatCommitSummary(
+  sessionId: string,
+  files: string[],
+  message: string,
+  commitHash: string | null,
+  dryRun: boolean,
+): string {
+  return [
+    dryRun ? "Commit dry-run:" : "Commit created:",
+    `Session: ${sessionId}`,
+    `Message: ${message}`,
+    `Commit: ${commitHash ?? "(dry-run)"}`,
+    "",
+    "Files:",
+    ...files.map((file) => `- ${file}`),
+    "",
+  ].join("\n");
 }
 
 function runAgent(args: string[], context: CliContext): CliResult {

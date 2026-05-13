@@ -103,6 +103,47 @@ export function readWorktreeDiff(cwd: string): string {
   return chunks.join("\n");
 }
 
+export function stageFiles(cwd: string, files: string[]): void {
+  if (files.length === 0) {
+    throw new Error("stage할 파일이 없습니다.");
+  }
+
+  const repoPath = findGitRoot(cwd);
+  const result = runCommand("git", ["add", "--", ...files], { cwd: repoPath });
+
+  if (result.code !== 0) {
+    throw new Error(result.stderr.trim() || "git add 실행에 실패했습니다.");
+  }
+}
+
+export function readStagedFiles(cwd: string): string[] {
+  const repoPath = findGitRoot(cwd);
+  const result = runCommand("git", ["diff", "--cached", "--name-only"], { cwd: repoPath });
+
+  if (result.code !== 0) {
+    throw new Error(result.stderr.trim() || "staged 파일 조회에 실패했습니다.");
+  }
+
+  return result.stdout.split("\n").filter(Boolean).sort();
+}
+
+export function commitStaged(cwd: string, message: string): string {
+  const repoPath = findGitRoot(cwd);
+  const commit = runCommand("git", ["commit", "-m", message], { cwd: repoPath });
+
+  if (commit.code !== 0) {
+    throw new Error(commit.stderr.trim() || "git commit 실행에 실패했습니다.");
+  }
+
+  const head = readHead(repoPath);
+
+  if (!head) {
+    throw new Error("커밋 hash를 확인하지 못했습니다.");
+  }
+
+  return head;
+}
+
 export function changedPaths(entries: GitStatusEntry[]): string[] {
   return [...new Set(entries.map((entry) => entry.path).filter(Boolean))].sort();
 }
