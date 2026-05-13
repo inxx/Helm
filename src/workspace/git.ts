@@ -65,7 +65,7 @@ export function readHead(cwd: string): string | null {
 }
 
 export function readStatus(cwd: string): GitStatusEntry[] {
-  const result = runCommand("git", ["status", "--short"], { cwd });
+  const result = runCommand("git", ["status", "--short", "--untracked-files=all"], { cwd });
 
   if (result.code !== 0) {
     throw new Error(result.stderr.trim() || "git status 실행에 실패했습니다.");
@@ -145,7 +145,23 @@ export function commitStaged(cwd: string, message: string): string {
 }
 
 export function changedPaths(entries: GitStatusEntry[]): string[] {
-  return [...new Set(entries.map((entry) => entry.path).filter(Boolean))].sort();
+  return [...new Set(entries.map((entry) => normalizeChangedPath(entry.path)).filter(Boolean))]
+    .filter((path) => !isHelmPath(path))
+    .sort();
+}
+
+function normalizeChangedPath(path: string): string {
+  const renameSeparator = " -> ";
+
+  if (path.includes(renameSeparator)) {
+    return path.slice(path.lastIndexOf(renameSeparator) + renameSeparator.length);
+  }
+
+  return path;
+}
+
+function isHelmPath(path: string): boolean {
+  return path === ".helm" || path.startsWith(".helm/");
 }
 
 export function formatStatusEntries(entries: GitStatusEntry[]): string {

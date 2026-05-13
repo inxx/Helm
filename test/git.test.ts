@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { formatStatusEntries, parseGitStatus } from "../src/workspace/git.ts";
+import { changedPaths, formatStatusEntries, parseGitStatus } from "../src/workspace/git.ts";
 
 describe("parseGitStatus", () => {
   it("parses short status lines", () => {
@@ -17,5 +17,15 @@ describe("parseGitStatus", () => {
 describe("formatStatusEntries", () => {
   it("prints an empty status message", () => {
     assert.equal(formatStatusEntries([]), "변경사항 없음");
+  });
+});
+
+describe("changedPaths", () => {
+  it("normalizes renamed paths and excludes Helm session files", () => {
+    const entries = parseGitStatus(
+      "R  old-name.txt -> new-name.txt\n?? .helm/sessions/session.json\n?? src/new/file.ts\n",
+    );
+
+    assert.deepEqual(changedPaths(entries), ["new-name.txt", "src/new/file.ts"]);
   });
 });
