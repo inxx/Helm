@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import type { Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { buildAgentCommand, AGENTS, isAgentName, type AgentName } from "./harness/agents.ts";
 import { runCommand, runCommandStream } from "./core/process.ts";
 import {
@@ -534,7 +535,19 @@ export async function main(argv: string[]): Promise<number> {
   return result.code;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isDirectRun(moduleUrl: string, argvPath: string | undefined): boolean {
+  if (!argvPath) {
+    return false;
+  }
+
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(argvPath);
+  } catch {
+    return moduleUrl === `file://${argvPath}`;
+  }
+}
+
+if (isDirectRun(import.meta.url, process.argv[1])) {
   const code = await main(process.argv.slice(2));
   process.exitCode = code;
 }

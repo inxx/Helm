@@ -26,6 +26,18 @@ node src/cli.ts status
 node src/cli.ts log
 ```
 
+### 로컬 개발 설치
+
+개발 중에는 repo 루트에서 npm link로 `helm` 명령을 연결할 수 있다.
+
+```bash
+npm link
+helm --help
+helm run --agent codex --dry-run "현재 repo 상태 요약"
+```
+
+`helm` 이름은 Kubernetes Helm과 충돌할 수 있다. 이미 다른 `helm` binary를 쓰는 환경에서는 `node src/cli.ts ...` 형태를 유지한다.
+
 ### agent binary 경로
 
 기본 command는 `codex`, `claude`, `gemini`다. macOS에서 Homebrew Codex binary가 있으면 `/opt/homebrew/bin/codex`를 우선 사용한다.
@@ -37,6 +49,12 @@ HELM_CODEX_BIN=/opt/homebrew/bin/codex node src/cli.ts run --agent codex "현재
 HELM_CLAUDE_BIN=/path/to/claude node src/cli.ts run --agent claude "계획 세워줘"
 HELM_GEMINI_BIN=/path/to/gemini node src/cli.ts run --agent gemini "리뷰해줘"
 ```
+
+2026-05-13 현재 로컬 검증 결과:
+
+- Codex `/opt/homebrew/bin/codex`: `exec "<prompt>"` 호출 성공
+- Claude `/opt/homebrew/bin/claude`: `-p "<prompt>"` 옵션은 유효하나 로컬 인증 401로 실행 실패
+- Gemini `/opt/homebrew/bin/gemini`: `-p "<prompt>"` 호출 성공
 
 향후 목표 명령:
 
@@ -54,5 +72,7 @@ helm commit -m "테스트 실패 수정"
 - `<session>.json`: 세션 metadata
 - `<session>.log`: agent stdout/stderr 로그
 - `<session>.diff`: 실행 후 git diff
+
+실제 agent 실행 중 stdout/stderr는 터미널에도 실시간으로 전달되며, 동일 내용이 세션 로그에 저장된다.
 
 `.helm/`은 개인 실행 기록이므로 git에 커밋하지 않는다.
