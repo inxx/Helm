@@ -26,6 +26,11 @@ export type SessionRecord = {
   checkExitCode?: number;
   checkLogPath?: string;
   commitHash?: string;
+  prBase?: string;
+  prTitle?: string;
+  prDraft?: boolean;
+  prUrl?: string;
+  prCreatedAt?: string;
 };
 
 export type SessionStore = {

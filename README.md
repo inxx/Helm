@@ -25,6 +25,7 @@ node src/cli.ts run --agent codex --dry-run "현재 repo 상태 요약"
 node src/cli.ts status
 node src/cli.ts log
 node src/cli.ts commit <session> --check "npm run check" -m "테스트 실패 수정"
+node src/cli.ts pr <session> --dry-run --base main --title "테스트 실패 수정"
 ```
 
 다음 작업 순서는 [docs/next-steps.md](docs/next-steps.md)에 정리한다.
@@ -77,6 +78,17 @@ helm commit <session> --check "npm run check" -m "테스트 실패 수정"
 ```
 
 첫 버전의 `--check`는 사용자가 넘긴 문자열을 shell command로 실행한다. 신뢰한 repo-local 명령에만 사용한다.
+
+### GitHub PR
+
+`helm pr`은 커밋된 세션의 branch를 `origin`에 push한 뒤 GitHub CLI로 draft PR을 만든다. PR 본문에는 세션 id, agent, prompt, commit hash, check 결과, artifact 경로, 변경 파일 목록을 포함한다.
+
+```bash
+helm pr <session> --base main --title "테스트 실패 수정"
+helm pr <session> --dry-run --base main --title "테스트 실패 수정"
+```
+
+실패한 check가 기록된 세션이나 아직 커밋되지 않은 세션은 PR 생성 대상에서 제외한다. 기본값은 draft PR이며, ready PR이 필요하면 `--ready`를 사용한다.
 
 ## 세션 저장
 

@@ -64,6 +64,18 @@ export function readHead(cwd: string): string | null {
   return result.stdout.trim();
 }
 
+export function readCommitSubject(cwd: string, commitHash: string): string | null {
+  const repoPath = findGitRoot(cwd);
+  const result = runCommand("git", ["show", "-s", "--format=%s", commitHash], { cwd: repoPath });
+  const subject = result.stdout.trim();
+
+  if (result.code !== 0 || !subject) {
+    return null;
+  }
+
+  return subject;
+}
+
 export function readStatus(cwd: string): GitStatusEntry[] {
   const result = runCommand("git", ["status", "--short", "--untracked-files=all"], { cwd });
 
@@ -142,6 +154,15 @@ export function commitStaged(cwd: string, message: string): string {
   }
 
   return head;
+}
+
+export function pushBranch(cwd: string, branch: string): void {
+  const repoPath = findGitRoot(cwd);
+  const result = runCommand("git", ["push", "-u", "origin", branch], { cwd: repoPath });
+
+  if (result.code !== 0) {
+    throw new Error(result.stderr.trim() || "git push 실행에 실패했습니다.");
+  }
 }
 
 export function changedPaths(entries: GitStatusEntry[]): string[] {

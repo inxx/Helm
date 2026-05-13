@@ -13,8 +13,10 @@ import {
   readStatus,
   readStagedFiles,
   readWorktreeDiff,
+  readCommitSubject,
   stageFiles,
   commitStaged,
+  pushBranch,
 } from "./workspace/git.ts";
 import {
   createSession,
@@ -52,6 +54,26 @@ type CommitCheckSummary = {
   logPath: string | null;
 };
 
+type PrArgs = {
+  sessionId?: string;
+  base: string;
+  title?: string;
+  draft: boolean;
+  dryRun: boolean;
+};
+
+type PrPlan = {
+  sessionId: string;
+  branch: string;
+  base: string;
+  title: string;
+  draft: boolean;
+  commitHash: string;
+  body: string;
+  pushCommand: string[];
+  prCommand: string[];
+};
+
 function formatHelp(): string {
   return `Helm ${VERSION}
 
@@ -68,6 +90,7 @@ Commands:
   status            현재 repo 상태와 최근 세션을 출력합니다.
   diff              세션 또는 현재 repo diff를 출력합니다.
   commit            세션 변경사항만 stage/commit합니다.
+  pr                세션 커밋 branch를 push하고 GitHub draft PR을 만듭니다.
   log               세션 로그를 출력합니다.
 
 Options:
@@ -118,6 +141,10 @@ export function runCliWithContext(argv: string[], context: CliContext): CliResul
 
   if (command === "commit") {
     return runCommit(argv.slice(1), context);
+  }
+
+  if (command === "pr") {
+    return runPr(argv.slice(1), context);
   }
 
   if (command === "log") {
@@ -333,6 +360,251 @@ function formatCheckFailure(command: string, exitCode: number, logPath: string):
     `Log: ${logPath}`,
     "",
   ].join("\n");
+}
+
+function runPr(args: string[], context: CliContext): CliResult {
+  try {
+    const parsed = parsePrArgs(args);
+    const repoPath = findGitRoot(context.cwd);
+    const store = getSessionStore(repoPath);
+    const session = resolveSession(store, parsed.sessionId);
+
+    if (!session) {
+      return { code: 1, stderr: "PR을 만들 세션을 찾지 못했습니다.\n" };
+    }
+
+    if (!session.commitHash) {
+      return { code: 1, stderr: "커밋된 세션만 PR을 만들 수 있습니다.\n" };
+    }
+
+    if (session.checkExitCode !== undefined && session.checkExitCode !== 0) {
+      return { code: 1, stderr: "실패한 check가 기록된 세션은 PR을 만들 수 없습니다.\n" };
+    }
+
+    const title =
+      parsed.title ??
+      readCommitSubject(repoPath, session.commitHash) ??
+      `Helm session ${session.id}`;
+    const plan = buildPrPlan(session, parsed, title);
+
+    if (parsed.dryRun) {
+      return { code: 0, stdout: formatPrSummary(plan, null, true) };
+    }
+
+    pushBranch(repoPath, plan.branch);
+
+    const pr = runCommand("gh", plan.prCommand.slice(1), { cwd: repoPath });
+
+    if (pr.code !== 0) {
+      throw new Error(pr.stderr.trim() || "gh pr create 실행에 실패했습니다.");
+    }
+
+    const prUrl = (extractFirstUrl(pr.stdout) ?? pr.stdout.trim()) || "(url 확인 실패)";
+
+    session.prBase = plan.base;
+    session.prTitle = plan.title;
+    session.prDraft = plan.draft;
+    session.prUrl = prUrl;
+    session.prCreatedAt = new Date().toISOString();
+    session.updatedAt = session.prCreatedAt;
+    saveSession(store, session);
+
+    return { code: 0, stdout: formatPrSummary(plan, prUrl, false) };
+  } catch (error) {
+    return { code: 1, stderr: `${formatError(error)}\n` };
+  }
+}
+
+function parsePrArgs(args: string[]): PrArgs {
+  let sessionId: string | undefined;
+  let base = "main";
+  let title: string | undefined;
+  let draft = true;
+  let dryRun = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+
+    if (arg === "--draft") {
+      draft = true;
+      continue;
+    }
+
+    if (arg === "--ready") {
+      draft = false;
+      continue;
+    }
+
+    if (arg === "--base") {
+      base = readOptionValue(args, index, "--base");
+      index += 1;
+      continue;
+    }
+
+    if (arg?.startsWith("--base=")) {
+      base = arg.slice("--base=".length);
+      continue;
+    }
+
+    if (arg === "--title") {
+      title = readOptionValue(args, index, "--title");
+      index += 1;
+      continue;
+    }
+
+    if (arg?.startsWith("--title=")) {
+      title = arg.slice("--title=".length);
+      continue;
+    }
+
+    if (arg?.startsWith("-")) {
+      throw new Error(`알 수 없는 pr 인자입니다: ${arg}`);
+    }
+
+    if (arg && !sessionId) {
+      sessionId = arg;
+      continue;
+    }
+
+    if (arg) {
+      throw new Error(`알 수 없는 pr 인자입니다: ${arg}`);
+    }
+  }
+
+  if (!base.trim()) {
+    throw new Error("base branch가 필요합니다. 예: helm pr --base main");
+  }
+
+  if (title !== undefined && !title.trim()) {
+    throw new Error("PR title이 필요합니다. 예: helm pr --title \"테스트 실패 수정\"");
+  }
+
+  return { sessionId, base: base.trim(), title: title?.trim(), draft, dryRun };
+}
+
+function readOptionValue(args: string[], index: number, option: string): string {
+  const value = args[index + 1];
+
+  if (!value || value.startsWith("-")) {
+    throw new Error(`${option} 값이 필요합니다.`);
+  }
+
+  return value;
+}
+
+function buildPrPlan(
+  session: NonNullable<ReturnType<typeof resolveSession>>,
+  parsed: PrArgs,
+  title: string,
+): PrPlan {
+  const body = formatPrBody(session);
+  const prCommand = [
+    "gh",
+    "pr",
+    "create",
+    "--base",
+    parsed.base,
+    "--head",
+    session.branch,
+    "--title",
+    title,
+    "--body",
+    body,
+  ];
+
+  if (parsed.draft) {
+    prCommand.push("--draft");
+  }
+
+  return {
+    sessionId: session.id,
+    branch: session.branch,
+    base: parsed.base,
+    title,
+    draft: parsed.draft,
+    commitHash: session.commitHash ?? "",
+    body,
+    pushCommand: ["git", "push", "-u", "origin", session.branch],
+    prCommand,
+  };
+}
+
+function formatPrBody(session: NonNullable<ReturnType<typeof resolveSession>>): string {
+  const changedFiles =
+    session.changedFiles && session.changedFiles.length > 0
+      ? session.changedFiles.map((file) => `- ${file}`)
+      : ["- 변경 파일 없음"];
+  const check =
+    session.checkCommand === undefined
+      ? "미실행"
+      : `${session.checkCommand} (exit ${session.checkExitCode ?? "unknown"})`;
+
+  return [
+    "## Helm session",
+    "",
+    `- Session: \`${session.id}\``,
+    `- Agent: ${session.agent ?? "-"}`,
+    `- Branch: \`${session.branch}\``,
+    `- Commit: \`${session.commitHash ?? "-"}\``,
+    `- Exit: ${session.exitCode ?? "-"}`,
+    `- Check: ${check}`,
+    "",
+    "## Prompt",
+    "",
+    session.prompt ?? "-",
+    "",
+    "## Artifacts",
+    "",
+    `- Log: ${session.logPath ?? "-"}`,
+    `- Diff: ${session.diffPath ?? "-"}`,
+    `- Check log: ${session.checkLogPath ?? "-"}`,
+    "",
+    "## Changed files",
+    "",
+    ...changedFiles,
+    "",
+  ].join("\n");
+}
+
+function formatPrSummary(plan: PrPlan, prUrl: string | null, dryRun: boolean): string {
+  return [
+    dryRun ? "PR dry-run:" : "PR created:",
+    `Session: ${plan.sessionId}`,
+    `Branch: ${plan.branch}`,
+    `Base: ${plan.base}`,
+    `Title: ${plan.title}`,
+    `Draft: ${plan.draft ? "yes" : "no"}`,
+    `Commit: ${plan.commitHash}`,
+    `URL: ${prUrl ?? "(dry-run)"}`,
+    "",
+    "Commands:",
+    `$ ${formatCommand(plan.pushCommand)}`,
+    `$ ${formatCommand(plan.prCommand.map((part) => (part === plan.body ? "<generated body>" : part)))}`,
+    "",
+    "Body:",
+    plan.body,
+  ].join("\n");
+}
+
+function formatCommand(command: string[]): string {
+  return command.map(formatCommandPart).join(" ");
+}
+
+function formatCommandPart(part: string): string {
+  if (/^[A-Za-z0-9_./:=@-]+$/.test(part)) {
+    return part;
+  }
+
+  return JSON.stringify(part);
+}
+
+function extractFirstUrl(output: string): string | null {
+  return /https?:\/\/\S+/.exec(output)?.[0] ?? null;
 }
 
 function runAgent(args: string[], context: CliContext): CliResult {
