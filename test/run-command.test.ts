@@ -53,6 +53,38 @@ describe("run command", () => {
     assert.match(status.stdout ?? "", /completed/);
   });
 
+  it("shows a single session summary", () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "helm-show-command-"));
+
+    try {
+      runCommand("git", ["init"], { cwd: repoPath });
+      writeFileSync(join(repoPath, "note.txt"), "hello\n");
+
+      const run = runCliWithContext(["run", "--agent", "codex", "--dry-run", "hello"], {
+        cwd: repoPath,
+      });
+      const sessionId = /Session: (?<id>\S+)/.exec(run.stdout ?? "")?.groups?.id;
+
+      assert.ok(sessionId);
+
+      const show = runCliWithContext(["show", sessionId], { cwd: repoPath });
+
+      assert.equal(show.code, 0);
+      assert.match(show.stdout ?? "", new RegExp(`Session: ${sessionId}`));
+      assert.match(show.stdout ?? "", /Agent: codex/);
+      assert.match(show.stdout ?? "", /Exit: 0/);
+      assert.match(show.stdout ?? "", /Branch:/);
+      assert.match(show.stdout ?? "", /Head:/);
+      assert.match(show.stdout ?? "", /Log:/);
+      assert.match(show.stdout ?? "", /Diff:/);
+      assert.match(show.stdout ?? "", /Check log: -/);
+      assert.match(show.stdout ?? "", /Prompt:\nhello/);
+      assert.match(show.stdout ?? "", /- note\.txt/);
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
   it("prints safe commit dry-run for session files", () => {
     const repoPath = mkdtempSync(join(tmpdir(), "helm-commit-command-"));
 

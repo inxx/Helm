@@ -23,6 +23,7 @@ node src/cli.ts --help
 node src/cli.ts agents
 node src/cli.ts run --agent codex --dry-run "현재 repo 상태 요약"
 node src/cli.ts status
+node src/cli.ts show <session>
 node src/cli.ts log
 node src/cli.ts commit <session> --check "npm run check" -m "테스트 실패 수정"
 node src/cli.ts pr <session> --dry-run --base main --title "테스트 실패 수정"

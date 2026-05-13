@@ -15,6 +15,7 @@ Helm CLI MVP는 로컬 single-agent 실행과 safe commit 흐름까지 닫힌 �
 - `helm run --agent codex|claude|gemini "<prompt>"`
 - `helm run --dry-run`
 - `helm status`
+- `helm show [session]`
 - `helm diff [session]`
 - `helm log [session]`
 - `helm commit [session] -m "..."`
@@ -103,6 +104,8 @@ helm pr <session> --dry-run --base main --title "..."
 
 ### Step 2. session summary
 
+상태: 구현/검증 완료
+
 목표:
 
 - `helm status`보다 자세한 단일 세션 요약을 제공한다.
@@ -119,6 +122,13 @@ helm show <session>
 - branch, head, changedFiles
 - log/diff/check log path
 - commit hash
+
+구현된 명령:
+
+```bash
+helm show <session>
+helm show
+```
 
 ### Step 3. config 파일
 

@@ -88,6 +88,7 @@ Commands:
   agents            지원 agent 목록을 출력합니다.
   run               agent를 실행하고 세션을 기록합니다.
   status            현재 repo 상태와 최근 세션을 출력합니다.
+  show              단일 세션 요약을 출력합니다.
   diff              세션 또는 현재 repo diff를 출력합니다.
   commit            세션 변경사항만 stage/commit합니다.
   pr                세션 커밋 branch를 push하고 GitHub draft PR을 만듭니다.
@@ -133,6 +134,10 @@ export function runCliWithContext(argv: string[], context: CliContext): CliResul
 
   if (command === "status") {
     return runStatus(context);
+  }
+
+  if (command === "show") {
+    return runShow(argv.slice(1), context);
   }
 
   if (command === "diff") {
@@ -739,6 +744,58 @@ function runStatus(context: CliContext): CliResult {
   } catch (error) {
     return { code: 1, stderr: `${formatError(error)}\n` };
   }
+}
+
+function runShow(args: string[], context: CliContext): CliResult {
+  try {
+    const repoPath = findGitRoot(context.cwd);
+    const store = getSessionStore(repoPath);
+    const session = resolveSession(store, args[0]);
+
+    if (!session) {
+      return { code: 0, stdout: "세션이 없습니다.\n" };
+    }
+
+    return { code: 0, stdout: formatSessionSummary(session) };
+  } catch (error) {
+    return { code: 1, stderr: `${formatError(error)}\n` };
+  }
+}
+
+function formatSessionSummary(session: NonNullable<ReturnType<typeof resolveSession>>): string {
+  const changedFiles =
+    session.changedFiles && session.changedFiles.length > 0
+      ? session.changedFiles.map((file) => `- ${file}`)
+      : ["- 변경 파일 없음"];
+  const check =
+    session.checkCommand === undefined
+      ? "미실행"
+      : `${session.checkCommand} (exit ${session.checkExitCode ?? "unknown"})`;
+
+  return [
+    `Session: ${session.id}`,
+    `Status: ${session.status}`,
+    `Agent: ${session.agent ?? "-"}`,
+    `Exit: ${session.exitCode ?? "-"}`,
+    `Branch: ${session.branch}`,
+    `Head: ${session.head ?? "-"}`,
+    `Commit: ${session.commitHash ?? "-"}`,
+    `Created: ${session.createdAt}`,
+    `Updated: ${session.updatedAt}`,
+    `Check: ${check}`,
+    "",
+    "Artifacts:",
+    `Log: ${session.logPath ?? "-"}`,
+    `Diff: ${session.diffPath ?? "-"}`,
+    `Check log: ${session.checkLogPath ?? "-"}`,
+    "",
+    "Prompt:",
+    session.prompt ?? "-",
+    "",
+    "Changed files:",
+    ...changedFiles,
+    "",
+  ].join("\n");
 }
 
 function runDiff(args: string[], context: CliContext): CliResult {
