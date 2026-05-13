@@ -26,6 +26,18 @@ node src/cli.ts status
 node src/cli.ts log
 ```
 
+### agent binary 경로
+
+기본 command는 `codex`, `claude`, `gemini`다. macOS에서 Homebrew Codex binary가 있으면 `/opt/homebrew/bin/codex`를 우선 사용한다.
+
+전역 npm 설치본이 깨졌거나 PATH가 다른 binary를 먼저 잡으면 환경 변수로 명시한다.
+
+```bash
+HELM_CODEX_BIN=/opt/homebrew/bin/codex node src/cli.ts run --agent codex "현재 repo 상태 요약"
+HELM_CLAUDE_BIN=/path/to/claude node src/cli.ts run --agent claude "계획 세워줘"
+HELM_GEMINI_BIN=/path/to/gemini node src/cli.ts run --agent gemini "리뷰해줘"
+```
+
 향후 목표 명령:
 
 ```bash
