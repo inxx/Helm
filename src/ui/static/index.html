@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Helm</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">H</span>
+          <div>
+            <strong>Helm</strong>
+            <span>agent hub</span>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="views">
+          <button class="nav-item active" type="button">Sessions</button>
+          <button class="nav-item" type="button">Workspace</button>
+          <button class="nav-item" type="button">Pull Requests</button>
+        </nav>
+
+        <section class="side-section">
+          <h2>Repo</h2>
+          <dl class="repo-facts">
+            <div>
+              <dt>branch</dt>
+              <dd id="repo-branch">-</dd>
+            </div>
+            <div>
+              <dt>changes</dt>
+              <dd id="repo-dirty">-</dd>
+            </div>
+          </dl>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">local workspace</p>
+            <h1 id="repo-path">-</h1>
+          </div>
+          <div class="top-actions">
+            <button id="refresh-button" class="icon-button" type="button" title="새로고침" aria-label="새로고침">
+              ↻
+            </button>
+          </div>
+        </header>
+
+        <section class="metrics" aria-label="summary">
+          <div class="metric">
+            <span>sessions</span>
+            <strong id="metric-sessions">0</strong>
+          </div>
+          <div class="metric">
+            <span>committed</span>
+            <strong id="metric-committed">0</strong>
+          </div>
+          <div class="metric">
+            <span>failed</span>
+            <strong id="metric-failed">0</strong>
+          </div>
+          <div class="metric">
+            <span>pull requests</span>
+            <strong id="metric-prs">0</strong>
+          </div>
+        </section>
+
+        <section class="input-dock" aria-label="command input">
+          <div class="mode-switch" role="tablist" aria-label="mode">
+            <button class="mode active" type="button">Agent</button>
+            <button class="mode" type="button">Terminal</button>
+          </div>
+          <textarea
+            id="prompt-input"
+            rows="2"
+            placeholder="Codex에게 맡길 작업을 입력하세요"
+            spellcheck="false"
+          ></textarea>
+          <div class="input-tools">
+            <select id="agent-select" aria-label="agent">
+              <option value="codex">codex</option>
+              <option value="claude">claude</option>
+              <option value="gemini">gemini</option>
+            </select>
+            <button class="primary-button" type="button" disabled>Run</button>
+          </div>
+        </section>
+
+        <section class="content-grid">
+          <div class="blocks-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">blocks</p>
+                <h2>Session history</h2>
+              </div>
+              <input id="session-filter" type="search" placeholder="검색" aria-label="세션 검색" />
+            </div>
+            <div id="session-list" class="session-list" aria-live="polite"></div>
+          </div>
+
+          <aside class="detail-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">selected</p>
+                <h2>Details</h2>
+              </div>
+            </div>
+            <div id="session-detail" class="detail-empty">세션을 선택하세요.</div>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <script src="/assets/app.js" type="module"></script>
+  </body>
+</html>

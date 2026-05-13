@@ -31,6 +31,14 @@ describe("runCli", () => {
     assert.match(result.stdout ?? "", /gemini/);
   });
 
+  it("prints ui command help without starting a server", () => {
+    const result = runCli(["ui", "--help"]);
+
+    assert.equal(result.code, 0);
+    assert.match(result.stdout ?? "", /inxx-helm ui/);
+    assert.match(result.stdout ?? "", /--port/);
+  });
+
   it("rejects unknown commands", () => {
     const result = runCli(["missing"]);
 

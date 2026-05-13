@@ -27,6 +27,7 @@ node src/cli.ts show <session>
 node src/cli.ts log
 node src/cli.ts commit <session> --check "npm run check" -m "테스트 실패 수정"
 node src/cli.ts pr <session> --dry-run --base main --title "테스트 실패 수정"
+node src/cli.ts ui
 ```
 
 다음 작업 순서는 [docs/next-steps.md](docs/next-steps.md)에 정리한다.
@@ -39,6 +40,7 @@ node src/cli.ts pr <session> --dry-run --base main --title "테스트 실패 수
 npm link
 inxx-helm --help
 inxx-helm run --agent codex --dry-run "현재 repo 상태 요약"
+inxx-helm ui
 ```
 
 실행 명령은 Kubernetes Helm과의 binary 이름 충돌을 피하기 위해 `inxx-helm`을 사용한다. `node src/cli.ts ...` 형태도 로컬 개발에서 그대로 사용할 수 있다.
@@ -112,6 +114,17 @@ inxx-helm pr <session> --dry-run --base main --title "테스트 실패 수정"
 `.helm/config.json`에 `prBaseBranch`가 있으면 `--base`를 생략했을 때 해당 branch를 기본값으로 사용한다.
 
 실패한 check가 기록된 세션이나 아직 커밋되지 않은 세션은 PR 생성 대상에서 제외한다. 기본값은 draft PR이며, ready PR이 필요하면 `--ready`를 사용한다.
+
+### 로컬 UI
+
+`inxx-helm ui`는 repo-local `.helm/sessions`를 읽어 세션을 블록 단위로 보여주는 로컬 대시보드를 띄운다. 기본 주소는 `http://127.0.0.1:4789`다.
+
+```bash
+inxx-helm ui
+inxx-helm ui --port 4790
+```
+
+첫 UI 범위는 세션 히스토리, 로그/diff preview, check/commit/PR metadata 조회다. agent 실행은 기존 CLI 명령을 사용한다.
 
 ## 세션 저장
 

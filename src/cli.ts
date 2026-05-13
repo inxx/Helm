@@ -28,9 +28,11 @@ import {
   saveSession,
   sessionArtifactPath,
 } from "./session/store.ts";
+import { startUiServer } from "./ui/server.ts";
 
 const VERSION = "0.1.0";
 const CLI_COMMAND = "inxx-helm";
+let activeUiClose: (() => Promise<void>) | null = null;
 
 type CliResult = {
   code: number;
@@ -76,6 +78,12 @@ type PrPlan = {
   prCommand: string[];
 };
 
+type UiArgs = {
+  host: string;
+  port: number;
+  help: boolean;
+};
+
 function formatHelp(): string {
   return `Helm ${VERSION}
 
@@ -94,6 +102,7 @@ Commands:
   diff              세션 또는 현재 repo diff를 출력합니다.
   commit            세션 변경사항만 stage/commit합니다.
   pr                세션 커밋 branch를 push하고 GitHub draft PR을 만듭니다.
+  ui                로컬 세션 대시보드를 엽니다.
   log               세션 로그를 출력합니다.
 
 Options:
@@ -109,6 +118,17 @@ function formatAgents(): string {
   );
 
   return ["Agents:", ...rows, ""].join("\n");
+}
+
+function formatUiHelp(): string {
+  return `Usage:
+  ${CLI_COMMAND} ui [--host 127.0.0.1] [--port 4789]
+
+Options:
+  --host <host>      바인딩할 host입니다. 기본값: 127.0.0.1
+  --port <port>      바인딩할 port입니다. 기본값: 4789
+  -h, --help         도움말을 출력합니다.
+`;
 }
 
 export function runCli(argv: string[]): CliResult {
@@ -154,6 +174,10 @@ export function runCliWithContext(argv: string[], context: CliContext): CliResul
     return runPr(argv.slice(1), context);
   }
 
+  if (command === "ui") {
+    return { code: 0, stdout: formatUiHelp() };
+  }
+
   if (command === "log") {
     return runLog(argv.slice(1), context);
   }
@@ -172,6 +196,10 @@ export async function runCliWithContextAsync(
 
   if (command === "run") {
     return runAgentAsync(argv.slice(1), context);
+  }
+
+  if (command === "ui") {
+    return runUi(argv.slice(1), context);
   }
 
   return runCliWithContext(argv, context);
@@ -428,6 +456,98 @@ function runPr(args: string[], context: CliContext): CliResult {
   } catch (error) {
     return { code: 1, stderr: `${formatError(error)}\n` };
   }
+}
+
+async function runUi(args: string[], context: CliContext): Promise<CliResult> {
+  try {
+    const parsed = parseUiArgs(args);
+
+    if (parsed.help) {
+      return { code: 0, stdout: formatUiHelp() };
+    }
+
+    const repoPath = findGitRoot(context.cwd);
+    const handle = await startUiServer({
+      repoPath,
+      host: parsed.host,
+      port: parsed.port,
+    });
+
+    activeUiClose = handle.close;
+    installUiShutdownHandler();
+
+    return {
+      code: 0,
+      stdout: [
+        "Helm UI started:",
+        `URL: ${handle.url}`,
+        `Repo: ${repoPath}`,
+        "",
+      ].join("\n"),
+    };
+  } catch (error) {
+    return { code: 1, stderr: `${formatError(error)}\n` };
+  }
+}
+
+function parseUiArgs(args: string[]): UiArgs {
+  let host = "127.0.0.1";
+  let port = 4789;
+  let help = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "-h" || arg === "--help") {
+      help = true;
+      continue;
+    }
+
+    if (arg === "--host") {
+      host = readOptionValue(args, index, "--host");
+      index += 1;
+      continue;
+    }
+
+    if (arg?.startsWith("--host=")) {
+      host = arg.slice("--host=".length);
+      continue;
+    }
+
+    if (arg === "--port") {
+      port = parsePort(readOptionValue(args, index, "--port"));
+      index += 1;
+      continue;
+    }
+
+    if (arg?.startsWith("--port=")) {
+      port = parsePort(arg.slice("--port=".length));
+      continue;
+    }
+
+    if (arg) {
+      throw new Error(`알 수 없는 ui 인자입니다: ${arg}`);
+    }
+  }
+
+  return { host, port, help };
+}
+
+function parsePort(value: string): number {
+  const port = Number(value);
+
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`port 값이 올바르지 않습니다: ${value}`);
+  }
+
+  return port;
+}
+
+function installUiShutdownHandler(): void {
+  process.once("SIGINT", async () => {
+    await activeUiClose?.();
+    process.exit(0);
+  });
 }
 
 function parsePrArgs(args: string[], defaultBase: string): PrArgs {
