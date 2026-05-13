@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import type { Writable } from "node:stream";
 import { buildAgentCommand, AGENTS, isAgentName, type AgentName } from "./harness/agents.ts";
-import { runCommand } from "./core/process.ts";
+import { runCommand, runCommandStream } from "./core/process.ts";
 import {
   captureSnapshot,
   changedPaths,
@@ -34,6 +35,8 @@ type CliResult = {
 
 type CliContext = {
   cwd: string;
+  stdout?: Writable;
+  stderr?: Writable;
 };
 
 function formatHelp(): string {
@@ -112,6 +115,19 @@ export function runCliWithContext(argv: string[], context: CliContext): CliResul
     code: 1,
     stderr: `알 수 없는 명령입니다: ${command}\n\n${formatHelp()}`,
   };
+}
+
+export async function runCliWithContextAsync(
+  argv: string[],
+  context: CliContext,
+): Promise<CliResult> {
+  const [command] = argv;
+
+  if (command === "run") {
+    return runAgentAsync(argv.slice(1), context);
+  }
+
+  return runCliWithContext(argv, context);
 }
 
 function runCommit(args: string[], context: CliContext): CliResult {
@@ -259,6 +275,59 @@ function runAgent(args: string[], context: CliContext): CliResult {
       code: result.code,
       stdout: formatRunSummary(session.id, parsed.agent, result.code, logPath, diff.trim() ? diffPath : null, session.changedFiles),
       stderr: result.stderr && result.code !== 0 ? result.stderr : undefined,
+    };
+  } catch (error) {
+    return { code: 1, stderr: `${formatError(error)}\n` };
+  }
+}
+
+async function runAgentAsync(args: string[], context: CliContext): Promise<CliResult> {
+  try {
+    const parsed = parseRunArgs(args);
+    const before = captureSnapshot(context.cwd);
+    const store = createSessionStore(before.repoPath);
+    const session = createSession(store, before);
+    const command = buildAgentCommand(parsed.agent, parsed.prompt);
+    const logPath = sessionArtifactPath(store, session.id, "log");
+    const diffPath = sessionArtifactPath(store, session.id, "diff");
+
+    session.status = "running";
+    session.agent = parsed.agent;
+    session.prompt = parsed.prompt;
+    session.command = [command.command, ...command.args];
+    session.logPath = logPath;
+    session.diffPath = diffPath;
+    session.updatedAt = new Date().toISOString();
+    saveSession(store, session);
+
+    const result = parsed.dryRun
+      ? { code: 0, stdout: "dry-run: agent 실행을 건너뜁니다.\n", stderr: "" }
+      : await runCommandStream(command.command, command.args, {
+          cwd: before.repoPath,
+          stdout: context.stdout,
+          stderr: context.stderr,
+        });
+    const after = captureSnapshot(before.repoPath);
+    const diff = readWorktreeDiff(before.repoPath);
+    const log = formatRunLog(command, parsed.prompt, result.stdout, result.stderr);
+
+    writeFileSync(logPath, log);
+
+    if (diff.trim()) {
+      writeFileSync(diffPath, `${diff}\n`);
+    }
+
+    session.status = result.code === 0 ? "completed" : "failed";
+    session.exitCode = result.code;
+    session.after = after;
+    session.changedFiles = changedPaths(after.status);
+    session.updatedAt = new Date().toISOString();
+    saveSession(store, session);
+
+    return {
+      code: result.code,
+      stdout: formatRunSummary(session.id, parsed.agent, result.code, logPath, diff.trim() ? diffPath : null, session.changedFiles),
+      stderr: parsed.dryRun || result.code === 0 || context.stderr ? undefined : result.stderr,
     };
   } catch (error) {
     return { code: 1, stderr: `${formatError(error)}\n` };
@@ -448,7 +517,11 @@ function formatError(error: unknown): string {
 }
 
 export async function main(argv: string[]): Promise<number> {
-  const result = runCli(argv);
+  const result = await runCliWithContextAsync(argv, {
+    cwd: process.cwd(),
+    stdout: process.stdout,
+    stderr: process.stderr,
+  });
 
   if (result.stdout) {
     process.stdout.write(result.stdout);
