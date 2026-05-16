@@ -919,7 +919,7 @@ Phase 1 UI는 장기 UI의 축소판이 아니다. 실제로 동작하는 프로
 막힘
 ```
 
-상단 상태바에는 프로젝트명, branch, 전체 진행률, 승인 대기 수, 실행 중 AI 작업자, 추정 token 소진률, 터미널 실행 수를 표시한다.
+상단 상태바에는 장기적으로 프로젝트명, branch, 전체 진행률, 승인 대기 수, 실행 중 AI 작업자, 추정 token 소진률, 터미널 실행 수를 표시한다. Phase 1에서는 `docs/phase-0-1-implementation-plan.md`를 우선해 프로젝트명, branch, head, dirty count, 태스크 수, 완료 수만 표시하고 아직 backend model이 없는 값은 숨긴다.
 
 ### 깃 화면
 

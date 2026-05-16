@@ -99,6 +99,13 @@ Phase 1 desktop 구현 전 확인 항목:
 - SQLite migration 테스트 가능 환경
 - 기존 CLI 검증이 필요할 경우 Node 25로 실행한다는 명시
 
+2026-05-17 로컬 점검 결과:
+
+- 현재 shell의 Node.js는 `v20.12.2`다. 따라서 root legacy CLI의 `npm run check`는 `.ts` 직접 실행 단계에서 실패하는 것이 정상이다.
+- Rust는 `rustc 1.95.0`, `cargo 1.95.0`이 설치되어 있다.
+- `cargo tauri` CLI는 아직 설치되어 있지 않다.
+- Phase 1 구현 gate는 root `npm run check`가 아니라 `apps/desktop` 전용 build/test와 Rust backend test로 둔다. root legacy CLI 회귀 확인이 필요할 때만 Node.js 25 이상에서 별도로 실행한다.
+
 ## 2. Tauri 전환 전략
 
 ### 기본 결정
@@ -211,21 +218,25 @@ apps/desktop/
 
 ### 3.2 Rust backend command layer
 
+Phase 1 command는 Rust 함수명은 snake_case로 두고, frontend `api.ts`에서 `project.open` 같은 namespace wrapper로 감싼다. Tauri invoke 이름에 dot 표기를 직접 쓰지 않는다.
+
 Phase 1 Tauri command:
 
 ```text
-project.open(path)
-project.getSnapshot(projectId)
-settings.getEffective(projectId)
-settings.updateProject(projectId, patch)
-task.list(projectId)
-task.create(projectId, input)
-task.updateStatus(taskId, status)
-audit.list(projectId)
-git.getRepositoryState(projectId)
-git.getLocalBranches(projectId)
-git.getRecentCommits(projectId, limit)
-git.getChangedFiles(projectId)
+open_project(path)
+get_project_snapshot(project_id)
+get_effective_settings(project_id)
+update_project_settings(project_id, patch)
+list_epics(project_id)
+create_epic(project_id, input)
+list_tasks(project_id)
+create_task(project_id, input)
+update_task_status(project_id, task_id, status, status_reason)
+list_audit_logs(project_id, limit)
+get_repository_state(project_id)
+get_local_branches(project_id)
+get_recent_commits(project_id, limit)
+get_changed_files(project_id)
 ```
 
 Phase 4 이후 Git command 후보:
@@ -239,10 +250,33 @@ git.getFileDiff(projectId, path)
 규칙:
 
 - frontend에는 generic shell execute를 노출하지 않는다.
+- directory picker가 필요하면 frontend는 Tauri dialog plugin으로 경로만 선택하고, repo 검증과 파일/DB 생성은 backend command가 담당한다.
 - git 상태 조회는 backend에서만 수행한다.
 - Phase 1에서는 쓰기 작업을 `repo/.helm/helm.sqlite`와 `repo/.helm/artifacts/` 생성으로 제한한다.
 - project root 파일 수정, agent 실행, merge, Jira/Slack API 호출은 Phase 1에서 금지한다.
 - Git command는 read-only 조회만 허용한다. checkout, commit, merge, push, fetch는 Phase 1에서 금지한다.
+- backend는 열린 프로젝트를 app state의 `project_id -> root_path/db_path` registry에 보관한다. registry에 없는 `project_id` command는 `ProjectNotOpen` 오류로 실패한다.
+
+Phase 1 공통 오류 형식:
+
+```text
+CommandError {
+  code: "InvalidProjectPath" | "NotGitRepository" | "BareRepositoryUnsupported" | "ProjectNotOpen" | "DatabaseOpenFailed" | "MigrationFailed" | "SchemaTooNew" | "GitCommandFailed" | "ValidationFailed" | "IoFailed",
+  message: 한국어 사용자 표시 문구,
+  details: optional debug string
+}
+```
+
+Rust command는 `Result<T, CommandError>`만 반환하고, frontend는 `code`로 UI 상태를 분기한다. `message`는 사용자에게 그대로 표시해도 어색하지 않은 한국어 문장으로 둔다.
+
+Phase 1 핵심 DTO:
+
+- `ProjectSummary`: `id`, `rootPath`, `name`, `baseBranch|null`, `createdAt`, `updatedAt`
+- `ProjectSnapshot`: `project`, `settings`, `repository`, `epics`, `tasks`, `taskCounts`, `auditTail`
+- `EffectiveSettings`: `rolePresets`, `worktreeRoot`, `obsidianVaultPath`, `tokenBudget`, `artifactRetentionDays`
+- `EpicSummary`: `id`, `projectId`, `title`, `status`, `planPath`, `createdAt`, `updatedAt`
+- `TaskSummary`: `id`, `projectId`, `epicId`, `title`, `description`, `status`, `statusReason`, `sortOrder`, `createdAt`, `updatedAt`, `lastTransitionAt`
+- `AuditLogEntry`: `id`, `projectId`, `entityType`, `entityId`, `eventType`, `payload`, `createdAt`
 
 Phase 1 Git DTO:
 
@@ -266,7 +300,7 @@ audit_logs
 
 최소 컬럼:
 
-- `projects`: `id`, `rootPath`, `name`, `baseBranch`, `createdAt`, `updatedAt`
+- `projects`: `id`, `rootPath`, `name`, `baseBranch|null`, `createdAt`, `updatedAt`
 - `project_settings`: `projectId`, `key`, `valueJson`, `updatedAt`
 - `epics`: `id`, `projectId`, `title`, `status`, `planPath`, `createdAt`, `updatedAt`
 - `tasks`: `id`, `projectId`, `epicId`, `title`, `description`, `status`, `statusReason`, `sortOrder`, `createdAt`, `updatedAt`, `lastTransitionAt`
@@ -285,7 +319,7 @@ CREATE TABLE projects (
   id TEXT PRIMARY KEY,
   root_path TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
-  base_branch TEXT NOT NULL,
+  base_branch TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -347,7 +381,16 @@ CREATE TABLE audit_logs (
 CREATE INDEX idx_audit_logs_project_created ON audit_logs(project_id, created_at);
 ```
 
-ID는 Rust backend에서 UUID v7 문자열로 생성한다. 시간은 RFC3339 UTC 문자열로 저장한다. SQLite connection은 `PRAGMA foreign_keys = ON`을 켠 뒤 사용한다.
+ID는 Rust backend에서 UUID v7 문자열로 생성한다. 시간은 RFC3339 UTC 문자열로 저장한다. SQLite connection은 `PRAGMA foreign_keys = ON`을 켠 뒤 사용한다. `base_branch`는 현재 branch나 사용자가 고른 기준 branch를 알 수 있을 때만 채운다. detached HEAD, empty repo, branch가 없는 repo에서는 `NULL`을 허용하고 UI에서 기준 branch 미설정 상태로 표시한다.
+
+Migration runner 규칙:
+
+- migration 파일은 `apps/desktop/src-tauri/migrations/0001_phase1.sql`부터 순번을 올린다.
+- 앱이 지원하는 최신 schema version보다 DB의 `schema_migrations.version` 최댓값이 크면 `SchemaTooNew`로 프로젝트 열기를 중단한다.
+- migration은 transaction 안에서 실행하고, 성공 시 같은 transaction에서 `schema_migrations`에 version/name/applied_at을 기록한다.
+- fresh DB처럼 `schema_migrations`가 없으면 version `0`으로 본다.
+- migration 실패 시 DB 파일을 삭제하거나 재생성하지 않는다.
+- 모든 DB 쓰기 command는 성공/실패가 부분 반영되지 않도록 transaction을 사용한다.
 
 `status_reason`은 `Blocked`나 사용자가 직접 상태를 바꾼 이유처럼 UI에 설명이 필요한 경우에만 채운다. 상태 변경은 모두 `audit_logs`에 `entity_type`, `entity_id`, `event_type`, `payload_json`으로 남긴다. Phase 1에서는 별도 transition table을 만들지 않고 audit log를 상태 변경 이력의 기준으로 사용한다.
 
@@ -360,6 +403,13 @@ Phase 1 기본 상태:
 - Task board 컬럼: `Planned`, `Ready`, `Coding`, `PlanVerification`, `CodeReview`, `Testing`, `MergeWaiting`, `Merged`, `Done`, `Blocked`
 
 `AgentRun`, `Approval`, `ExternalSync`, `Jira`, `Slack`, `Worktree` schema는 Phase 2 이후에 추가한다.
+
+Phase 1 상태 변경 규칙:
+
+- `create_epic`은 `Drafting`, `create_task`는 `Planned`를 기본값으로 쓴다.
+- `update_task_status`는 위 canonical `TaskStatus` enum에 속한 값만 허용한다.
+- Phase 1에서는 전체 상태 머신을 강제하지 않는다. 사용자가 skeleton에서 상태를 수동 변경할 수 있게 하되, 변경 전/후 상태와 `status_reason`을 audit log에 남긴다.
+- Phase 2에서 role run과 approval model이 추가되면 자동 상태 전이 규칙을 migration 없이 얹을 수 있어야 한다.
 
 ### 3.4 Project open flow
 
@@ -441,6 +491,18 @@ Git 구현 규칙:
 - `.helm/` 내부 파일은 dirty count와 변경 파일 목록에서 제외한다.
 - detached HEAD, empty repo, upstream 없음, git user 미설정은 오류가 아니라 표시 가능한 상태로 둔다.
 
+Phase 1 Git command 구현 기준:
+
+- repo root 확인: `git -C <path> rev-parse --show-toplevel`
+- bare repo 확인: `git -C <root> rev-parse --is-bare-repository`
+- 현재 branch 확인: `git -C <root> symbolic-ref --quiet --short HEAD`; 실패하면 detached 또는 empty repo로 본다.
+- HEAD 확인: `git -C <root> rev-parse --verify HEAD`; empty repo에서 실패하면 `head=null`로 둔다.
+- 변경 파일: `git -C <root> status --porcelain=v1 -z`를 파싱한다.
+- branch 목록: `git for-each-ref`의 machine-readable format을 사용하고, upstream 없음은 `null`로 둔다.
+- 최근 commit: `git log -n <limit>`의 custom format을 사용하고, empty repo에서는 빈 배열을 반환한다.
+- 사용자 정보: `git config --get user.name`, `git config --get user.email`; 미설정이면 `null`로 둔다.
+- `.helm/` 제외는 Git command 인자에만 의존하지 말고 backend DTO 생성 직전에 `path === ".helm" || path.startsWith(".helm/")` 기준으로 한 번 더 필터링한다. rename은 이전/이후 path 둘 다 검사한다.
+
 Phase 1에서 intentionally 없는 것:
 
 - checkout
@@ -474,6 +536,16 @@ Phase 1 설정은 저장 구조만 만든다.
 Phase 1에서는 project override만 `project_settings`에 저장한다. global default 저장소는 만들지 않고 built-in default를 fallback으로 사용한다. 전역 설정 영속화는 Phase 2 이후 Tauri app data directory에 추가한다.
 
 Jira/Slack/API token 입력 UI와 Keychain 저장은 Phase 5/6에서 구현한다.
+
+Phase 1 project setting key:
+
+- `rolePresets`
+- `worktreeRoot`
+- `obsidianVaultPath`
+- `tokenBudget`
+- `artifactRetentionDays`
+
+위 값은 모두 non-secret metadata로만 취급한다. API token, Slack/Jira token, provider credential 입력 UI는 Phase 1에 만들지 않는다. `update_project_settings`는 알 수 없는 key를 저장하지 않고 `ValidationFailed`를 반환한다.
 
 ### 3.7 Phase 1 완료 기준
 
@@ -511,17 +583,17 @@ Phase 1은 실제 agent 실행, terminal PTY, worktree 생성, Jira/Slack/Obsidi
 
 `docs/orchestrator-design.md`의 TaskStatus, 이 문서의 board column, React status label mapping은 같은 enum 집합을 사용해야 한다.
 
-### 3. SQLite schema와 DTO 구체화
+### 3. SQLite schema와 DTO 결정
 
-Phase 1 구현 전에 아래를 코드로 옮긴다.
+Phase 1 구현에서는 아래 결정을 그대로 코드로 옮긴다.
 
 1. DB migration SQL과 파일명: `apps/desktop/src-tauri/migrations/0001_phase1.sql`
 2. id 생성 방식: Rust backend UUID v7 문자열
 3. foreign key와 unique constraint: 위 SQL 기준
 4. timestamp 저장 형식: RFC3339 UTC 문자열
 5. `recent projects` 저장 위치: Phase 1에서는 영속화하지 않고 app memory state로만 처리
-6. Rust model과 Tauri command response DTO
-7. React 화면 state shape
+6. Rust model과 Tauri command response DTO: `ProjectSummary`, `ProjectSnapshot`, `EffectiveSettings`, `EpicSummary`, `TaskSummary`, `AuditLogEntry`, Git DTO 기준
+7. React 화면 state shape: `ProjectSnapshot`을 화면 source of truth로 두고, create/update 이후 snapshot을 다시 조회한다.
 
 최소 schema는 `schema_migrations`, `projects`, `project_settings`, `epics`, `tasks`, `audit_logs`를 유지한다. `AgentRun`, `Approval`, `ExternalSync`, `Jira`, `Slack`, `Worktree`는 Phase 2 이후 migration으로 추가한다.
 
@@ -569,11 +641,26 @@ Phase 1 완료 전 최소한 아래 시나리오를 확인한다.
 13. agent 실행, terminal PTY, Jira/Slack, worktree/merge가 아직 동작하지 않는 것이 정상으로 보인다.
 14. root CLI 검증이 필요하면 Node.js 25 이상에서 실행한다.
 
+검증 명령 기준:
+
+- `cd apps/desktop && npm run typecheck`
+- `cd apps/desktop && npm run build`
+- `cd apps/desktop/src-tauri && cargo test`
+- `cd apps/desktop/src-tauri && cargo check`
+- `cd apps/desktop && npm run tauri dev`로 수동 smoke test를 실행한다.
+- root legacy CLI의 `npm run check`는 현재 shell이 Node.js 25 이상일 때만 Phase 1 부가 검증으로 실행한다.
+
+테스트 fixture 기준:
+
+- Rust DB 테스트는 임시 git repo와 임시 `.helm/helm.sqlite`를 만들어 migration idempotency, schema-too-new, foreign key, audit log를 확인한다.
+- Rust Git 테스트는 clean repo, dirty repo, staged/unstaged/untracked, detached HEAD, empty repo, upstream 없음, git user 미설정, 공백/한글/rename 파일명을 fixture로 둔다.
+- React 테스트는 프로젝트 없음, repo open 오류, task/epic empty state, task card, Git empty/dirty state가 깨지지 않는지 확인한다.
+
 ### 7. 구현 전 정리 순서
 
 우선순위:
 
-1. 기존 static UI uncommitted 변경분 처리 방침 확정
+1. 기존 static UI uncommitted 변경분 처리
 2. Phase 1 TaskStatus enum과 board column 확정
 3. Phase 1 UI 노출 규칙 확정
 4. DB migration SQL 확정
@@ -582,4 +669,4 @@ Phase 1 완료 전 최소한 아래 시나리오를 확인한다.
 7. Phase 1 acceptance test 목록 확정
 8. Phase 2 이후 품질 게이트 결과 schema와 artifact metadata audit 설계
 
-기존 static UI 변경분 처리 결정: `src/ui/server.ts`, `src/ui/static/app.js`, `src/ui/static/index.html`의 현재 uncommitted 변경은 Phase 1 Tauri UI로 가져가지 않는다. 구현 시작 전에는 별도 legacy patch로 저장하거나 원복한다. 이 결정 전까지 해당 파일에 새 기능을 덧붙이지 않는다.
+기존 static UI 변경분 처리 결정: `src/ui/server.ts`, `src/ui/static/app.js`, `src/ui/static/index.html`의 현재 uncommitted 변경은 Phase 1 Tauri UI로 가져가지 않는다. 구현 시작 전 main 작업 트리에서는 원복한다. 보관이 필요하면 원복 전에 별도 patch 파일이나 legacy branch로 저장한다. 이 결정 전까지 해당 파일에 새 기능을 덧붙이지 않는다.
