@@ -1,21 +1,72 @@
 # Helm
 
-Helm은 개인용 Oz-like CLI agent hub다. 첫 범위는 Warp/Oz를 복제하는 것이 아니라, 로컬 git repo에서 Codex, Claude, Gemini 같은 CLI agent 실행을 추적하고 diff/commit 흐름을 안전하게 관리하는 것이다.
+Helm은 로컬 CLI agent hub MVP에서 **AI 개발 작업을 운영하는 데스크톱 control plane**으로 재설계 중인 프로젝트다.
 
-## 원칙
+목표는 또 하나의 채팅창을 만드는 것이 아니다. Helm은 로컬 프로젝트 안에서 에픽, 태스크, 역할별 AI 작업자, 승인, Git 상태, 산출물, 감사 로그를 관리하는 결정론적 오케스트레이터가 되어야 한다.
 
-- Warp 코드는 참고만 하고 복사하지 않는다.
-- 첫 MVP는 로컬 single-agent 실행, 세션 로그, git diff, safe commit에 집중한다.
-- 외부 패키지 없이 Node 내장 모듈로 시작한다.
-- repo-local `.helm/`은 실행 기록 저장소로 쓰며 git에 커밋하지 않는다.
+```text
+AI 작업자 -> Helm에 결과 보고
+Helm -> 다음 허용 상태 전이 결정
+Helm -> 승인된 다음 role 실행
+```
 
-## 요구사항
+AI 작업자는 다른 AI 작업자를 직접 호출하지 않는다. 상태 머신과 실행 순서는 Helm이 소유한다.
+
+## 현재 상태
+
+이 저장소에는 현재 두 층이 함께 있다.
+
+- `src/`: legacy Node CLI MVP reference
+- `docs/`: 새 데스크톱 오케스트레이터 설계와 Phase 0-1 구현 계획
+
+다음 제품 구현은 `apps/desktop/` 아래에 새 Tauri 데스크톱 앱으로 만든다. Phase 1에서는 기존 Node CLI를 감싸거나 runtime dependency로 import하지 않는다.
+
+## 제품 방향
+
+Helm의 목표 UX는 한국어 우선 로컬 데스크톱 앱이다. 최상위 화면은 세 가지로 둔다.
+
+- `태스크`: 에픽, 태스크, 승인, role 실행, 리뷰/테스트/머지 상태
+- `깃`: 처음에는 read-only local Git 상태, 이후 branch/commit graph
+- `터미널`: 이후 프로젝트 root와 task worktree 터미널
+
+핵심 원칙:
+
+- 오케스트레이터는 AI가 아니라 결정론적 프로그램이다.
+- 계획 승인과 merge 승인은 사용자가 명시적으로 한다.
+- AI 출력은 산출물이고, 실제 Git diff/status는 Helm backend가 직접 계산한 값을 기준으로 삼는다.
+- frontend에는 generic shell execute 권한을 열지 않는다.
+- 기존 CLI 코드는 참고 자료이며 새 제품 기반 코드가 아니다.
+
+## 문서 입구
+
+먼저 읽을 문서:
+
+- [Orchestrator Design](docs/orchestrator-design.md): 장기 제품 아키텍처
+- [Phase 0-1 Implementation Plan](docs/phase-0-1-implementation-plan.md): 즉시 구현 범위의 source of truth
+- [Next Steps](docs/next-steps.md): legacy CLI MVP 완료 기록
+
+Phase 1은 의도적으로 작게 닫는다.
+
+- `apps/desktop` 생성
+- Git 프로젝트 열기
+- `repo/.helm/helm.sqlite` 생성/열기
+- 프로젝트 설정 skeleton 저장/로드
+- 한국어 라이트 태스크 보드 skeleton 표시
+- read-only local Git snapshot 표시
+
+Phase 1에서는 agent 실행, terminal PTY, worktree, Jira/Slack, Obsidian backfill, Keychain, merge, quality gate를 구현하지 않는다.
+
+## Legacy Node CLI
+
+기존 CLI는 Git 상태, 세션 artifact, agent binary resolution, safe commit, PR dry-run/create 흐름을 검증한 reference로 남긴다.
+
+Legacy CLI 요구사항:
 
 - Node.js 25 이상
 
-Node의 TypeScript type stripping을 사용하므로 별도 빌드 단계가 없다.
+현재 CLI는 Node의 TypeScript type stripping을 사용한다. Node 20에서는 `node src/cli.ts`를 직접 실행할 수 없다.
 
-## 사용
+주요 명령:
 
 ```bash
 npm run check
@@ -24,30 +75,24 @@ node src/cli.ts agents
 node src/cli.ts run --agent codex --dry-run "현재 repo 상태 요약"
 node src/cli.ts status
 node src/cli.ts show <session>
-node src/cli.ts log
 node src/cli.ts commit <session> --check "npm run check" -m "테스트 실패 수정"
 node src/cli.ts pr <session> --dry-run --base main --title "테스트 실패 수정"
 node src/cli.ts ui
 ```
 
-다음 작업 순서는 [docs/next-steps.md](docs/next-steps.md)에 정리한다.
-
-### 로컬 개발 설치
-
-개발 중에는 repo 루트에서 npm link로 `inxx-helm` 명령을 연결할 수 있다.
+로컬 개발 중에는 `npm link`로 `inxx-helm` 명령을 연결할 수 있다. Kubernetes Helm과 binary 이름 충돌을 피하기 위해 `helm`이 아니라 `inxx-helm`을 사용한다.
 
 ```bash
 npm link
 inxx-helm --help
 inxx-helm run --agent codex --dry-run "현재 repo 상태 요약"
-inxx-helm ui
 ```
 
-실행 명령은 Kubernetes Helm과의 binary 이름 충돌을 피하기 위해 `inxx-helm`을 사용한다. `node src/cli.ts ...` 형태도 로컬 개발에서 그대로 사용할 수 있다.
+Legacy 실행 기록은 `.helm/` 아래에 저장하며 git에 커밋하지 않는다.
 
-### repo-local config
+## Repo-Local Config
 
-Helm은 repo-local `.helm/config.json`을 읽어 agent binary, 기본 commit check, 기본 PR base branch를 적용한다. `.helm/`은 개인 실행 기록과 설정 저장소로 git에 커밋하지 않는다.
+Legacy CLI는 `.helm/config.json`에서 agent binary, 기본 commit check, PR base branch를 읽는다.
 
 ```json
 {
@@ -61,79 +106,8 @@ Helm은 repo-local `.helm/config.json`을 읽어 agent binary, 기본 commit che
 }
 ```
 
-CLI 옵션과 환경 변수는 config보다 우선한다. 예를 들어 `inxx-helm commit --check "npm test"`는 `defaultCheckCommand`를 덮어쓰고, `HELM_CODEX_BIN`은 `agentBinaries.codex`를 덮어쓴다.
+CLI 옵션과 환경 변수는 이 파일보다 우선한다. 예를 들어 `HELM_CODEX_BIN`은 `agentBinaries.codex`를 덮어쓴다.
 
-### agent binary 경로
+## Cleanup Note
 
-기본 command는 `codex`, `claude`, `gemini`다. macOS에서 Homebrew Codex binary가 있으면 `/opt/homebrew/bin/codex`를 우선 사용한다.
-
-전역 npm 설치본이 깨졌거나 PATH가 다른 binary를 먼저 잡으면 환경 변수로 명시한다.
-
-```bash
-HELM_CODEX_BIN=/opt/homebrew/bin/codex node src/cli.ts run --agent codex "현재 repo 상태 요약"
-HELM_CLAUDE_BIN=/path/to/claude node src/cli.ts run --agent claude "계획 세워줘"
-HELM_GEMINI_BIN=/path/to/gemini node src/cli.ts run --agent gemini "리뷰해줘"
-```
-
-2026-05-13 현재 로컬 검증 결과:
-
-- Codex `/opt/homebrew/bin/codex`: `exec "<prompt>"` 호출 성공
-- Claude `/opt/homebrew/bin/claude`: `-p "<prompt>"` 옵션은 유효하나 로컬 인증 401로 실행 실패
-- Gemini `/opt/homebrew/bin/gemini`: `-p "<prompt>"` 호출 성공
-
-향후 목표 명령:
-
-```bash
-inxx-helm run --agent codex "현재 repo 테스트 실패 고쳐줘"
-inxx-helm status
-inxx-helm diff
-inxx-helm commit -m "테스트 실패 수정"
-```
-
-### commit check
-
-`inxx-helm commit`은 `--check "<command>"` 옵션으로 커밋 전 검증 명령을 실행할 수 있다. check 명령이 실패하면 Helm은 파일을 stage하지 않고 커밋을 중단하며, `.helm/sessions/<session>.check.log`에 stdout/stderr를 저장한다.
-
-```bash
-inxx-helm commit <session> --check "npm run check" -m "테스트 실패 수정"
-```
-
-`.helm/config.json`에 `defaultCheckCommand`가 있으면 `--check`를 넘기지 않은 `inxx-helm commit`에도 같은 check가 적용된다.
-
-첫 버전의 `--check`는 사용자가 넘긴 문자열을 shell command로 실행한다. 신뢰한 repo-local 명령에만 사용한다.
-
-### GitHub PR
-
-`inxx-helm pr`은 커밋된 세션의 branch를 `origin`에 push한 뒤 GitHub CLI로 draft PR을 만든다. PR 본문에는 세션 id, agent, prompt, commit hash, check 결과, artifact 경로, 변경 파일 목록을 포함한다.
-
-```bash
-inxx-helm pr <session> --base main --title "테스트 실패 수정"
-inxx-helm pr <session> --dry-run --base main --title "테스트 실패 수정"
-```
-
-`.helm/config.json`에 `prBaseBranch`가 있으면 `--base`를 생략했을 때 해당 branch를 기본값으로 사용한다.
-
-실패한 check가 기록된 세션이나 아직 커밋되지 않은 세션은 PR 생성 대상에서 제외한다. 기본값은 draft PR이며, ready PR이 필요하면 `--ready`를 사용한다.
-
-### 로컬 UI
-
-`inxx-helm ui`는 repo-local `.helm/sessions`를 읽어 세션을 블록 단위로 보여주는 로컬 대시보드를 띄운다. 기본 주소는 `http://127.0.0.1:4789`다.
-
-```bash
-inxx-helm ui
-inxx-helm ui --port 4790
-```
-
-첫 UI 범위는 세션 히스토리, 로그/diff preview, check/commit/PR metadata 조회다. agent 실행은 기존 CLI 명령을 사용한다.
-
-## 세션 저장
-
-`inxx-helm run`은 repo-local `.helm/sessions`에 다음 파일을 남긴다.
-
-- `<session>.json`: 세션 metadata
-- `<session>.log`: agent stdout/stderr 로그
-- `<session>.diff`: 실행 후 git diff
-
-실제 agent 실행 중 stdout/stderr는 터미널에도 실시간으로 전달되며, 동일 내용이 세션 로그에 저장된다.
-
-`.helm/`은 개인 실행 기록이므로 git에 커밋하지 않는다.
+현재 `src/ui/` 아래의 uncommitted static UI 변경은 미래 Tauri 앱의 기반이 아니다. `apps/desktop` 구현을 시작하기 전에 legacy patch로 보관하거나 원복 대상으로 다룬다.
