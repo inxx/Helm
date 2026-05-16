@@ -3,6 +3,8 @@
 작성일: 2026-05-13
 브랜치: `feature/helm-cli-mvp`
 
+> 2026-05-16 업데이트: 이 문서는 기존 Node CLI MVP의 완료 기록으로 유지한다. 새 Tauri 데스크톱 오케스트레이터 구현 계획은 [orchestrator-design.md](orchestrator-design.md)와 [phase-0-1-implementation-plan.md](phase-0-1-implementation-plan.md)를 기준으로 한다.
+
 ## 현재 완료 상태
 
 Helm CLI MVP는 로컬 single-agent 실행, safe commit, GitHub PR dry-run/생성, repo-local config 흐름까지 닫힌 상태다.

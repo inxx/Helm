@@ -1,0 +1,889 @@
+# Helm Orchestrator Design
+
+작성일: 2026-05-16
+
+## 목적
+
+Helm의 오케스트레이터는 AI가 아니다. Helm은 로컬 프로젝트에서 여러 AI 작업자를 역할별로 실행하고, 상태 전환과 승인 게이트를 관리하는 결정론적 프로그램이다.
+
+핵심 목표는 다음 구조를 유지하는 것이다.
+
+```text
+AI 작업자 -> 직접 다른 AI 호출 금지
+AI 작업자 -> Helm에 결과 보고
+Helm -> 다음 role 실행 여부 결정
+Helm -> 필요한 AI 작업자 실행
+```
+
+따라서 `Claude -> Codex`처럼 AI가 AI를 직접 부르는 구조가 아니라, 항상 `Claude -> Helm -> Codex` 구조를 사용한다.
+
+## 제품 재설계 범위
+
+Helm은 기존 CLI agent hub MVP에서 로컬 AI 개발 조직 운영 데스크톱 앱으로 재설계한다. 기존 CLI는 참고 구현으로 남기되, 새 제품의 기본 사용 경험은 데스크톱 앱이 맡는다.
+
+1차 제품 목표:
+
+- 프로젝트별 에픽, 태스크, 서브태스크 관리
+- 역할별 AI 작업자 설정과 실행
+- 계획 승인, 코딩, 계획 준수 검토, 코드 리뷰, 테스트, merge 승인 흐름 관리
+- 태스크별 git worktree 격리
+- Markdown/Obsidian 계획 문서 연동
+- Jira 티켓 생성/상태 동기화
+- Slack 업무 신호 수집과 승인 후 답장
+- 독립 터미널 화면과 분할 터미널
+- 감사 로그, 권한 제한, 로컬 백업
+
+## 기술 스택 방향
+
+기존 Node CLI 기술 스택을 유지할 필요는 없다. 새 기본 스택은 다음을 목표로 한다.
+
+- Desktop shell: Tauri v2
+- Backend: Rust command layer
+- Frontend: React, Vite, TypeScript
+- Local state: SQLite
+- Terminal: xterm.js + Rust PTY service
+- Secret storage: macOS Keychain
+- Git integration: git CLI 기반 worktree/branch/status/merge 관리
+
+Tauri를 선택한 이유는 로컬 데스크톱 앱으로 가볍게 배포하면서도 파일 시스템, 프로세스 실행, secure storage, 네이티브 창 제어를 다룰 수 있기 때문이다. agent 실행, git 조작, 터미널 PTY는 UI가 직접 수행하지 않고 backend command layer가 담당한다.
+
+## 역할 분리
+
+### Helm이 담당하는 일
+
+- 현재 프로젝트, 에픽, 태스크 상태 관리
+- 다음 단계 실행 여부 결정
+- 역할별 AI 설정 조회
+- Context Pack 구성
+- agent command 실행
+- stdout/stderr, diff, test 결과, review 결과 저장
+- 승인 대기 상태 생성
+- 실패/충돌/권한 차단 시 중단
+- 토큰 추정 사용량 집계
+- 감사 로그 기록
+
+### AI 작업자가 담당하는 일
+
+- 설계 초안 작성
+- 코드 수정
+- 계획 준수 검토
+- 코드 퀄리티 리뷰
+- 테스트 실행 또는 테스트 실패 분석
+- 충돌 해결 제안 작성
+
+AI 작업자는 다음 단계로 누구를 실행할지 결정하지 않는다. 다음 실행자는 Helm의 상태 머신이 결정한다.
+
+## 기본 역할
+
+역할은 설정창에서 변경할 수 있다.
+
+```text
+설계자        Planner
+구현자        Coder
+계획 검토자    Plan Verifier
+코드 리뷰어    Code Reviewer
+테스트 담당자  Tester
+```
+
+예시 설정:
+
+```text
+설계자        Codex
+구현자        Claude
+계획 검토자    Codex
+코드 리뷰어    Gemini
+테스트 담당자  Codex
+```
+
+설정 항목:
+
+- provider
+- model
+- command template
+- system prompt
+- token budget
+- 허용 명령 규칙
+
+오케스트레이터 자체에는 AI provider/model을 설정하지 않는다.
+
+## 상태 머신
+
+상태는 하나의 선형 enum으로 합치지 않는다. 에픽 상태, 태스크 진행 상태, agent 실행 상태, 승인 상태, 외부 연동 상태를 분리해야 실제 작업 중 생기는 부분 실패를 표현할 수 있다.
+
+### EpicStatus
+
+```text
+Drafting
+AwaitingPlanApproval
+Approved
+Splitting
+Active
+Done
+Archived
+```
+
+에픽 계획 승인 전에는 태스크 코딩을 시작할 수 없다.
+
+### TaskStatus
+
+기본 흐름:
+
+```text
+Planned
+-> Ready
+-> Coding
+-> PlanVerification
+-> CodeReview
+-> Testing
+-> MergeWaiting
+-> Merged
+-> Done
+Blocked
+```
+
+`TaskStatus`는 코드와 DB에서는 위 enum ID를 그대로 사용하고, UI에서는 한국어 라벨로만 변환한다.
+
+```text
+Planned          계획됨
+Ready            준비됨
+Coding           코딩중
+PlanVerification 계획 검토
+CodeReview       코드 리뷰
+Testing          테스트
+MergeWaiting     머지 대기
+Merged           머지됨
+Done             완료
+Blocked          막힘
+```
+
+실행 실패, 테스트 실패, 리뷰 실패, 권한 차단, merge conflict, 토큰 예산 초과는 Task를 `Blocked`로 전환한다. Blocked 상태에서는 Helm이 자동 진행하지 않는다. 사용자가 승인하거나 재시도해야 한다.
+
+### AgentRunStatus
+
+```text
+Queued
+-> Running
+-> Succeeded | Failed | Canceled | TimedOut | NeedsInspection
+```
+
+AgentRun은 Task와 독립적으로 기록한다. Task가 `코드 리뷰` 상태여도 이전 Coder run이 `Succeeded`, Reviewer run이 `Failed`일 수 있다.
+
+### ApprovalStatus
+
+```text
+Pending
+Approved
+Rejected
+Expired
+```
+
+계획 승인, merge 승인, Jira 생성/수정 승인, Slack 답장 승인, 위험 명령 승인은 모두 Approval로 기록한다.
+
+### ExternalSyncStatus
+
+```text
+NotLinked
+Linked
+SyncPending
+Synced
+Stale
+SyncFailed
+```
+
+Jira와 Slack은 Task 상태를 대체하지 않는다. Jira/Slack 연결 상태는 별도 sync 상태로 표시한다.
+
+## 실행 규칙
+
+### 자동 다음 단계가 꺼져 있을 때
+
+기본값은 수동 실행이다.
+
+```text
+구현자 실행 완료
+-> 태스크 상태: 계획 검토 대기
+-> 사용자가 [계획 검토 실행] 클릭
+-> Helm이 계획 검토자 role 실행
+```
+
+### 자동 다음 단계가 켜져 있을 때
+
+특정 프로젝트 또는 에픽에서만 선택적으로 켤 수 있다.
+
+```text
+구현자 실행 완료
+-> Helm이 변경사항과 exit code 확인
+-> Context Pack 생성
+-> 계획 검토자 role 실행
+```
+
+자동 진행이 켜져 있어도 다음 상태는 항상 멈춘다.
+
+- 에픽 계획 승인 전
+- merge 전
+- 권한 위험 작업 발생
+- 충돌 발생
+- 테스트/review 실패
+
+## Role Adapter 계약
+
+AI 작업자는 Helm을 직접 호출하지 않는다. Helm이 role adapter를 통해 command를 실행하고 산출물을 수집한다.
+
+Helm은 각 role 실행 전에 wrapper 입력을 만든다.
+
+```text
+artifactDir: repo/.helm/artifacts/runs/<agent-run-id>/
+contextPackPath: <artifactDir>/context-pack.md
+contextManifestPath: <artifactDir>/context-pack.json
+resultPath: <artifactDir>/structured-result.json
+summaryPath: <artifactDir>/summary.md
+schemaPath: <artifactDir>/structured-result.schema.json
+timeout: role 설정값
+```
+
+role command는 항상 task worktree를 cwd로 실행한다. command template에는 다음 placeholder를 사용할 수 있다.
+
+```text
+{artifactDir}
+{contextPackPath}
+{contextManifestPath}
+{resultPath}
+{summaryPath}
+{schemaPath}
+{worktreePath}
+{taskId}
+{roleId}
+```
+
+Helm wrapper는 같은 값을 환경 변수로도 제공한다.
+
+```text
+HELM_ARTIFACT_DIR
+HELM_CONTEXT_PACK
+HELM_CONTEXT_MANIFEST
+HELM_RESULT_PATH
+HELM_SUMMARY_PATH
+HELM_SCHEMA_PATH
+HELM_WORKTREE_PATH
+HELM_TASK_ID
+HELM_ROLE_ID
+```
+
+모든 role 실행 입력:
+
+- role id
+- task id
+- worktree path
+- Context Pack path
+- Context Pack manifest path
+- system prompt
+- user instruction
+- allowed command policy
+
+모든 role 실행 출력은 `artifactDir`에 남긴다.
+
+- exit code
+- stdout/stderr log
+- changed files
+- token estimate
+- `summary.md`
+- `structured-result.json`
+
+`summary.md`와 `structured-result.json`은 필수 산출물이다. Helm wrapper는 실행 후 `resultPath`의 JSON schema를 검증한다.
+
+`structured-result.json`의 최소 필드:
+
+```json
+{
+  "status": "pass | fail | needs_changes",
+  "summary": "human readable summary",
+  "changedFiles": [],
+  "risks": [],
+  "nextActions": []
+}
+```
+
+역할별 판정:
+
+- Coder: exit code와 changed files를 기록한다. 변경 파일이 없으면 `needs_changes`로 처리할 수 있다.
+- Plan Verifier: 승인된 계획과 diff를 비교해 `pass | needs_changes | fail`을 반환한다.
+- Code Reviewer: 유지보수성, 위험, 스타일, 누락 테스트를 검토해 `pass | needs_changes | fail`을 반환한다.
+- Tester: test command exit code와 실패 로그를 기반으로 `pass | fail`을 반환한다.
+
+structured result가 없거나 schema validation에 실패하면 Helm은 stdout/stderr 요약만 저장하고 해당 run을 `AgentRunStatus=NeedsInspection`으로 기록한다.
+
+## Context Pack
+
+Helm은 각 role 실행 전에 작업에 필요한 컨텍스트를 묶어 전달한다. AI가 repo 전체를 무작위로 훑는 구조를 피하고, 작업 품질과 토큰 사용량을 안정화하기 위해서다.
+
+Context Pack은 항상 두 파일로 생성한다.
+
+```text
+context-pack.md    AI 작업자에게 전달하는 사람이 읽을 수 있는 본문
+context-pack.json  재현과 검증을 위한 manifest
+```
+
+`context-pack.json`에는 최소한 다음 정보를 기록한다.
+
+- `taskId`
+- `roleId`
+- `generatedAt`
+- `tokenBudget`
+- `sources`
+- `includedFiles`
+- `fileHashes`
+- `baseBranch`
+- `diffRef`
+- `isStale`
+- `staleReason`
+
+포함된 파일, diff 기준, 승인된 계획이 바뀌면 기존 Context Pack은 stale로 본다. 자동 다음 단계 실행 전 Context Pack이 stale이면 Helm은 재생성하거나 사용자 확인을 요구한다.
+
+포함 대상:
+
+- 에픽 계획
+- 태스크와 서브태스크 설명
+- acceptance criteria
+- 관련 Obsidian 문서
+- README, docs, AGENTS.md
+- 관련 소스 파일 목록
+- 이전 agent run 요약
+- 현재 diff
+- 테스트 결과
+- 리뷰 결과
+
+역할별 Context Pack은 달라야 한다.
+
+```text
+설계자: 문서, 기존 프로젝트 구조, 사용자 의도 중심
+구현자: 승인된 계획, 관련 파일, acceptance criteria 중심
+계획 검토자: 승인 계획과 실제 diff 비교 중심
+코드 리뷰어: diff, 스타일, 위험 지점, 유지보수성 중심
+테스트 담당자: 변경 파일, test command, 실패 로그 중심
+```
+
+## 계획과 문서 흐름
+
+계획 작업은 에픽 단위로 시작한다. Planner role은 사용자와 대화하면서 기존 프로젝트와 Obsidian 문서를 먼저 검토하고, 승인 가능한 에픽 설계 문서를 만든다.
+
+계획 흐름:
+
+```text
+프로젝트 선택
+-> Obsidian/README/docs/AGENTS/context scan
+-> Planner와 에픽 설계
+-> 사용자 승인
+-> 태스크/서브태스크 분해
+-> Coder role에 전달
+```
+
+계획 문서에는 목표, 범위, acceptance criteria, 태스크 목록, 위험, 관련 문서/파일, Jira/Slack 연결 정보를 담는다. 승인된 계획은 Helm DB에 metadata를 저장하고, Markdown/Obsidian 문서에는 사람이 읽을 수 있는 원본 설계를 유지한다.
+
+## Jira 연동
+
+Helm은 Markdown/Helm 계획을 기준 소스로 유지하고, Jira는 실행 추적과 협업 티켓 시스템으로 연결한다. 기존 업무 흐름처럼 사용자가 MD 설계 문서를 만든 뒤 수동으로 Jira 티켓을 따는 과정을 Helm 안에서 초안 생성, 승인, 생성, 상태 동기화 흐름으로 줄인다.
+
+1차 범위:
+
+```text
+MD/Helm 계획
+-> Jira 티켓 초안
+-> 사용자 검토/수정
+-> 사용자 승인 후 Jira 생성
+-> 생성 key를 Helm DB와 MD 문서에 backfill
+-> Jira status, assignee, updated time, URL 동기화
+```
+
+### 기준 소스
+
+- Helm과 MD 문서가 에픽, 태스크, 서브태스크 구조의 원본이다.
+- Jira는 실행 상태와 협업 추적을 위한 외부 시스템이다.
+- 1차에서는 Jira에서 바뀐 티켓 구조를 Helm 태스크 구조로 역변환하지 않는다.
+- Jira 상태, 담당자, 갱신 시각, URL은 Helm에 동기화하되, 설계 의도와 acceptance criteria는 Helm/MD를 기준으로 본다.
+
+### 모델
+
+Jira 연동에는 다음 모델을 둔다.
+
+- `JiraConnection`: site URL, 인증 상태, 사용자 계정, 권한 확인 결과
+- `JiraProjectMapping`: project key, issue type mapping, parent/epic field mapping, 기본 labels/components/assignee
+- `JiraTicketDraft`: 생성 전 사용자가 검토하는 ticket 초안
+- `JiraIssueLink`: Helm task/subtask와 Jira issue key/URL 연결
+- `JiraSyncState`: 마지막 동기화 시각, Jira status, assignee, updated time, 동기화 오류
+
+### 계층 매핑
+
+Jira issue type과 parent hierarchy는 프로젝트마다 다르므로 설정 가능해야 한다. 기본 사용 사례는 기존 Jira Epic이 이미 만들어져 있고, Helm이 Task 또는 Story부터 생성하는 흐름이다.
+
+지원해야 할 매핑:
+
+- 기존 Epic 연결: `existingEpicKey`를 선택하면 새 Epic을 만들지 않고 Helm Task를 해당 Epic 아래 Jira Task/Story로 생성한다.
+- Task 중심 생성: Helm Task를 Jira Task 또는 Story로 만든다.
+- Subtask 생성: Jira parent key가 있는 경우에만 Helm Subtask를 Jira Sub-task로 만든다.
+- 새 Epic 생성: 프로젝트 설정에서 허용한 경우에만 Helm Epic을 Jira Epic으로 만든다.
+
+### UI 반영
+
+태스크 상세에 `Jira` 탭을 추가한다.
+
+표시/동작:
+
+- `Jira 초안 만들기`
+- `Jira에 생성`
+- `Jira 동기화`
+- `Jira에서 열기`
+- Jira key
+- Jira status
+- Jira assignee
+- 마지막 동기화 시각
+- 동기화 오류
+
+태스크 카드에는 Jira key, Jira status, 동기화 상태를 작게 표시한다. Jira 생성은 사용자 승인 액션으로만 수행한다.
+
+### MD backfill
+
+Jira 생성 후 Helm은 생성된 key와 URL을 MD 문서에 기록한다. 기존 문서 형식을 깨지 않도록 frontmatter의 `helm` namespace 또는 Helm managed block만 갱신한다. 사용자가 작성한 자유 문단과 표는 자동 수정하지 않는다.
+
+기록 대상:
+
+- `jiraKey`
+- `jiraUrl`
+- `jiraStatus`
+- `lastSyncedAt`
+
+### 권한과 보안
+
+- Jira URL, project key, issue type mapping은 설정에 저장한다.
+- Jira API token은 평문 DB에 저장하지 않고 macOS Keychain에 저장한다. DB에는 token 값이 아니라 keychain reference만 저장한다.
+- Jira 생성/수정은 사용자 승인 액션으로만 실행한다.
+- 필수 field 누락, 인증 실패, 권한 부족, custom field mismatch는 사용자가 수정 가능한 오류로 보여준다.
+- Jira status 동기화는 수동 버튼으로만 실행한다.
+- 앱 시작 시 자동 refresh와 주기 polling은 1차 범위에서 제외한다.
+
+### API 기준
+
+기본 대상은 Jira Cloud REST API v3다. issue 생성, bulk create, create metadata, issue link, remote issue link, transition/status 조회를 사용한다. Data Center나 회사별 custom field 차이는 mapping layer로 분리한다.
+
+Jira 구현 규칙:
+
+- 티켓 생성 전 create metadata를 조회해 issue type별 required field와 custom field를 검증한다.
+- Markdown description은 Jira Cloud의 Atlassian Document Format(ADF)으로 변환한다.
+- ADF 변환에 실패하면 Jira 생성 전 사용자 수정 가능한 오류로 보여준다.
+- Sub-task 생성은 Jira parent key와 subtask issue type이 모두 확인된 경우에만 허용한다.
+- bulk create는 일부 성공/일부 실패를 고려해 성공 issue key는 저장하고 실패 draft는 재시도 가능하게 남긴다.
+- Jira transition 변경은 1차 범위에서 자동 수행하지 않는다. status 동기화만 기본으로 한다.
+
+참고 공식 문서:
+
+- Jira Cloud REST API v3 Issues: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/
+- Jira Cloud REST API v3 Issue links: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-links/
+- Jira Cloud REST API v3 Issue remote links: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/
+
+## Slack 연동
+
+Slack은 실행 주체가 아니라 업무 신호 수집과 결과 회신 채널이다. Slack에서 들어온 메시지는 바로 agent 실행으로 가지 않고 Helm Inbox를 거친다.
+
+1차 범위:
+
+```text
+Slack message shortcut 또는 Helm bot mention
+-> Helm Inbox 수집
+-> Slack Inbox Epic 아래 Task draft 생성
+-> 사용자 확인/지시 추가
+-> Helm 오케스트레이터가 role chain 실행
+-> Slack reply draft 생성
+-> 사용자 승인 후 원본 Slack thread에 답장
+```
+
+### 모델
+
+Slack 연동에는 다음 모델을 둔다.
+
+- `SlackConnection`: workspace, bot user, token 상태, Socket Mode 연결 상태
+- `SlackInboxItem`: Slack에서 들어온 원본 알림, 멘션, shortcut 항목
+- `SlackSourceRef`: channel, thread timestamp, message timestamp, user, permalink
+- `SlackTaskLink`: Helm task와 Slack 원본 thread 연결
+- `SlackReplyDraft`: 작업 결과를 Slack에 답장하기 전 사용자 검토용 초안
+
+### 수집 정책
+
+- 기본 입력은 message shortcut과 Helm bot mention이다.
+- 선택 채널 상시 감시, DM 전체 수집, 키워드 기반 넓은 수집은 1차 범위에서 제외한다.
+- Slack에서 온 항목은 기본적으로 `Slack Inbox Epic` 아래에 모으고, 사용자가 나중에 기존 에픽으로 이동할 수 있다.
+- 앱이 참여하지 않은 채널 또는 권한이 없는 private channel의 메시지는 수집하지 않는다.
+- 데스크톱 앱이 실행 중일 때만 Socket Mode 이벤트를 수신한다. 백그라운드 helper는 1차 범위에서 제외한다.
+- 앱이 꺼져 있을 때 들어온 shortcut/mention 처리는 Helm이 보장하지 않는다.
+
+### UI 반영
+
+태스크 화면에 `Slack Inbox` 필터 또는 섹션을 추가한다. 태스크 상세에는 `Slack` 탭을 추가한다.
+
+표시/동작:
+
+- `태스크로 만들기`
+- `에픽으로 이동`
+- `답장 초안 만들기`
+- `Slack에 답장`
+- `Slack에서 열기`
+- 원본 channel/thread/user/permalink
+- reply draft 상태
+- Slack API 오류와 권한 오류
+
+Slack 답장은 항상 사용자 승인 후 게시한다. 완료, 실패, 승인 대기 요약을 원본 thread에 답장할 수 있지만 자동 답장은 기본값이 아니다.
+
+Slack message shortcut에는 threaded message에서 시작된 shortcut이 원본 thread로 직접 publish되지 못하는 플랫폼 제한이 있다. Helm은 `SlackSourceRef`에 입력 종류와 thread 여부를 저장하고, thread shortcut의 답장 대상은 다음 우선순위를 따른다.
+
+```text
+1. 원본 thread 답장 가능하면 thread에 게시
+2. 불가능하면 부모 conversation에 답장 초안 게시 대상으로 표시
+3. 사용자가 원하면 수동 복사용 답장문만 제공
+```
+
+### 권한과 보안
+
+- Slack bot token과 app token은 평문 DB에 저장하지 않고 macOS Keychain에 저장한다. DB에는 token 값이 아니라 keychain reference만 저장한다.
+- 로컬 데스크톱 앱은 외부 공개 Request URL 없이 동작하도록 Socket Mode를 기본 수신 방식으로 사용한다.
+- Slack API rate limit, token 만료, Socket Mode 재연결 실패는 복구 가능한 오류로 UI에 표시한다.
+
+참고 공식 문서:
+
+- Slack Socket Mode: https://api.slack.com/apis/connections/socket
+- Slack app_mention event: https://api.slack.com/events/app_mention
+- Slack Shortcuts: https://api.slack.com/interactivity/shortcuts/using
+- Slack chat.postMessage: https://docs.slack.dev/reference/methods/chat.postMessage
+
+## Worktree와 Merge
+
+각 태스크는 별도 git worktree와 branch에서 수행한다.
+
+```text
+project root
+task branch
+task worktree
+agent runs
+artifacts
+merge approval
+git merge
+```
+
+기본 머지 방식은 Git Merge다. merge conflict가 발생하면 태스크는 Blocked로 전환되고, Guided Resolver 화면에서 처리한다.
+
+기본 정책:
+
+- worktree root 기본값: `<project-parent>/.helm-worktrees/<project-slug>/`
+- task branch 기본값: `helm/task/<task-id>-<slug>`
+- merge target 기본값: 프로젝트를 열 때 선택한 base branch
+- main worktree가 dirty이면 merge를 시작하지 않고 사용자에게 정리/보류를 요구한다.
+- task branch merge 전 local base branch 기준으로 dirty 여부와 divergence를 확인한다.
+- 자동 fetch는 1차 범위에서 제외한다.
+- remote 최신화가 필요하면 사용자가 터미널에서 직접 수행한다.
+- 기본 merge 방식은 merge commit이다. squash/rebase는 1차 범위에서 제외한다.
+- merge conflict 해결 후에는 Plan Verifier, Code Reviewer, Tester를 다시 실행해야 merge approval을 받을 수 있다.
+
+Guided Resolver는 다음 정보를 보여준다.
+
+- 충돌 파일 목록
+- base/current/incoming diff
+- 태스크 의도
+- AI 해결 제안
+- 사용자 승인/반려
+
+## 권한 모델
+
+Helm은 Scoped Allowlist를 사용한다.
+
+허용 범위는 실행 컨텍스트별로 다르다.
+
+- agent runner: 해당 task worktree만 writable, project root는 read-only
+- backend command: 승인된 작업에 한해 project root, `.helm/`, 설정된 Obsidian 출력 경로 writable
+- 사용자 터미널: 사용자가 직접 조작하는 shell이므로 agent allowlist 제한 대상에서 제외
+
+위험 작업:
+
+- `rm`
+- `git reset`
+- force push
+- credential 접근
+- 외부 네트워크 명령
+- allowlist 밖 파일 쓰기
+
+위험 작업은 자동 실행하지 않고 승인 대기 상태로 전환한다.
+
+네트워크 권한은 두 종류로 나눈다.
+
+- 허용된 connector 네트워크: Jira, Slack, AI provider/CLI 등 사용자가 설정한 connector가 필요한 네트워크
+- 임의 shell 네트워크: `curl`, `wget`, 임의 API 호출, package install 등 agent가 shell에서 직접 수행하는 네트워크
+
+허용된 connector 네트워크는 설정된 connector 권한으로 관리하고, 임의 shell 네트워크는 위험 작업으로 승인 대기 처리한다.
+
+Tauri 보안 원칙:
+
+- frontend에 generic shell execute 권한을 열지 않는다.
+- Tauri capabilities에는 좁은 Rust command만 노출한다.
+- 예: `agent.run`, `git.status`, `git.worktreeCreate`, `git.mergeApproved`, `terminal.spawn`, `jira.createTickets`, `slack.postApprovedReply`
+- allowlist 검증은 frontend가 아니라 backend command layer에서 수행한다.
+- agent command는 사용자 터미널과 분리된 controlled runner에서만 실행한다.
+
+## 온보딩과 설정
+
+첫 실행 경험은 별도 온보딩 흐름으로 둔다.
+
+필수 단계:
+
+- 프로젝트 열기
+- git repo 감지
+- Obsidian vault 연결
+- worktree root 설정
+- 역할별 AI preset 설정
+- 테스트 명령 자동 감지 또는 수동 입력
+- Jira/Slack 연결은 선택 설정으로 제공
+- 권한 allowlist 초기값 확인
+
+설정 화면에는 역할별 AI, 권한 allowlist, Obsidian, Jira, Slack, worktree, token budget, backup/export 설정을 둔다.
+
+설정 저장 우선순위는 다음과 같이 고정한다.
+
+```text
+project override > global default > built-in default
+```
+
+- 전역 기본값은 Tauri app data directory에 저장한다.
+- 프로젝트별 override는 `repo/.helm/helm.sqlite`에 저장한다.
+- 역할별 AI, Jira/Slack mapping, worktree root, token budget, artifact retention은 프로젝트별 override가 가능하다.
+- UI preference와 최근 프로젝트 목록은 전역 설정에 둔다.
+- secret 값은 어느 설정 저장소에도 평문으로 저장하지 않고 macOS Keychain에만 저장한다.
+
+## 데이터 보존과 복구
+
+Helm은 로컬 앱이므로 데이터 보존과 복구가 중요하다.
+
+- SQLite에는 프로젝트, 에픽, 태스크, 상태, 링크, 설정 metadata를 저장한다.
+- 프로젝트 DB 위치는 `repo/.helm/helm.sqlite`로 고정한다.
+- repo-local `.helm/`에는 해당 프로젝트와 함께 이동되어야 하는 metadata와 artifact를 저장한다.
+- 앱 data directory에는 전역 설정, 최근 프로젝트 목록, macOS Keychain reference, UI preference를 저장한다.
+- 큰 로그, diff, review, test output, Context Pack snapshot은 repo-local `.helm/artifacts`에 저장한다.
+- Jira/Slack/API token 값은 SQLite나 artifact에 저장하지 않는다. macOS Keychain에 저장하고 DB에는 reference만 둔다.
+- 주기적 local backup/export 기능을 둔다.
+- 오래된 terminal scrollback, agent logs, artifact는 보존 기간을 설정할 수 있어야 한다.
+- 앱 재시작 후 running으로 남은 agent/terminal/worktree 상태를 복구하거나 orphan 상태로 표시한다.
+- agent run은 취소, 재시도, 보류가 가능해야 한다.
+
+## MD backfill 정책
+
+Helm이 사용자 Markdown 문서를 수정할 때는 문서 손상을 피하기 위해 관리 영역을 제한한다.
+
+기본 정책:
+
+- frontmatter는 `helm` namespace 아래 key만 수정한다.
+- 본문은 Helm managed block만 수정한다.
+- 사용자가 작성한 자유 문단과 표는 자동 수정하지 않는다.
+
+관리 블록 형식:
+
+```md
+<!-- HELM:BEGIN task-id -->
+...
+<!-- HELM:END task-id -->
+```
+
+Jira/Slack key, URL, sync status, last synced time은 frontmatter `helm` namespace 또는 managed block에만 기록한다.
+
+frontmatter 예시:
+
+```yaml
+helm:
+  taskId: T-24
+  lastSyncedAt: "2026-05-16T12:00:00+09:00"
+  jira:
+    key: PROJ-123
+    url: https://example.atlassian.net/browse/PROJ-123
+    status: In Progress
+  slack:
+    channelId: C123
+    threadTs: "1715840000.000000"
+    permalink: https://example.slack.com/archives/C123/p1715840000000000
+```
+
+## UI 반영
+
+UI는 한국어 라이트 테마 고정이다. 메뉴는 두 개로 단순화한다.
+
+```text
+태스크
+터미널
+```
+
+### 태스크 화면
+
+기본 화면이다.
+
+- 에픽/태스크 보드
+- 승인 대기
+- 진행률
+- 각 AI 작업자 상태
+- 선택 태스크 상세
+- 계획, 실행 기록, 변경사항, 리뷰, 테스트, Jira, Slack, 머지 정보
+
+보드 컬럼:
+
+```text
+계획됨
+준비됨
+코딩중
+계획 검토
+코드 리뷰
+테스트
+머지 대기
+완료
+막힘
+```
+
+상단 상태바에는 프로젝트명, branch, 전체 진행률, 승인 대기 수, 실행 중 AI 작업자, 추정 token 소진률, 터미널 실행 수를 표시한다.
+
+### 터미널 화면
+
+터미널은 별도 메뉴에서 관리한다.
+
+- 여러 터미널 세션 생성
+- 프로젝트 root 또는 task worktree cwd 선택
+- 탭 지원
+- 좌우 분할
+- 상하 분할
+- pane 크기 조절
+- pane focus 이동
+- 태스크 화면에서 `작업 터미널 열기`로 연결
+
+터미널 canvas는 가독성을 위해 어두운 팔레트를 사용할 수 있지만, 앱 전체 테마는 라이트로 고정한다.
+
+### 디자인 원칙
+
+- 앱 전체는 라이트 테마만 제공한다.
+- 다크 모드 토글은 1차 범위에서 제외한다.
+- 정보 밀도는 높게 유지하되 카드 남발을 피하고, 보드, 테이블, split pane, 상태 pill, diff viewer, terminal pane 중심으로 구성한다.
+- 큰 hero, 마케팅식 랜딩 페이지, 보라/파랑 그라데이션 중심 디자인은 피한다.
+- UI 문구는 한국어를 기본으로 하되, branch, task id, agent role id, 파일 경로, 로그, diff는 원문을 유지한다.
+- 참고 디자인 방향: interface-design의 dashboard/tool craft, frontend-design의 비제너릭 미감 원칙을 Helm 전용 시각 언어로 번역한다.
+
+### 키보드와 상태 UX
+
+- Command palette를 제공한다.
+- 빠른 task 검색, approval inbox 이동, terminal focus 전환, run/retry/cancel 단축키를 둔다.
+- 계획 승인 대기, merge 승인 대기, 테스트 실패, 충돌 발생, token 예산 초과, agent 완료는 알림과 inbox로 노출한다.
+- 프로젝트 없음, 에픽 없음, task 없음, agent 설정 없음, Obsidian/Jira/Slack 연결 실패, worktree 생성 실패, git 충돌 같은 빈 상태와 오류 상태를 별도 화면으로 설계한다.
+
+## 감사 로그
+
+Helm은 모든 중요한 전환을 기록한다.
+
+- 어떤 역할이 실행되었는지
+- 어떤 provider/model/command가 사용되었는지
+- 어떤 Context Pack을 사용했는지
+- 어떤 파일이 변경되었는지
+- 어떤 check/review/test 결과가 있었는지
+- 누가 어떤 승인을 했는지
+- 어떤 branch/worktree가 merge되었는지
+- 어떤 Jira 초안/issue 생성/backfill/sync가 실행되었는지
+- Jira 동기화 실패와 충돌이 있었는지
+- 어떤 Slack inbox item/task 승격/reply draft/post가 실행되었는지
+- Slack API 실패와 권한 실패가 있었는지
+
+이 로그는 나중에 "왜 이 변경이 들어갔는가"를 추적하기 위한 제품의 핵심 데이터다.
+
+## 검증 계획
+
+구현 시 다음 검증을 포함한다.
+
+- 상태 머신: 계획 승인 전 코딩 불가, 실패 시 Blocked, merge 전 승인 필수, enum ID와 UI 라벨 분리 확인
+- 역할 실행: 역할별 command template, placeholder, env var, cwd, Context Pack이 올바르게 구성되는지 확인
+- Context Pack: `context-pack.md`와 `context-pack.json` 생성, file hash, stale 판정, 재생성 흐름 확인
+- 설정: project override, global default, built-in default 우선순위 확인
+- worktree: 태스크별 branch/worktree 생성, status, merge, conflict 처리
+- Jira: 초안 생성, 기존 Epic 연결, issue 생성, key backfill, 수동 status sync
+- Slack: shortcut/mention 수집, Inbox 승격, reply draft, 승인 후 thread 답장
+- 터미널: 탭, 좌우/상하 분할, pane resize/focus, cwd 선택
+- 보안: macOS Keychain reference 저장, token 평문 DB 저장 금지, allowlist 밖 명령/파일 쓰기 차단, agent/user terminal 권한 분리
+- 복구: 앱 재시작 후 orphan run/terminal/worktree 표시
+- UI: 한국어 라이트 테마, task 중심 메뉴, empty/error states, overflow 없는 반응형 화면
+
+## 구현 순서
+
+Phase 0과 Phase 1의 세부 구현 계획은 [phase-0-1-implementation-plan.md](phase-0-1-implementation-plan.md)를 기준으로 한다.
+
+### Phase 0. 문서와 기존 상태 정리
+
+- 이전 UI 임시 변경분 원복 또는 폐기
+- 기존 CLI MVP에서 재사용할 개념과 버릴 구현 분리
+- repo-local `.helm/` 저장 정책 확정
+- 완료 기준: 새 데스크톱 앱 기준 설계 문서가 최신이고, 기존 CLI/UI 임시 변경분 처리 방침이 결정되어 있다.
+
+### Phase 1. Desktop shell과 기본 DB
+
+- Tauri v2 앱 생성
+- React/Vite/TypeScript UI shell
+- SQLite schema와 migration
+- 프로젝트 열기, 온보딩, 설정 skeleton
+- 한국어 라이트 태스크 보드 skeleton
+- 완료 기준: 앱이 프로젝트를 열고 `repo/.helm/helm.sqlite`를 생성/열며, 태스크 보드 skeleton과 설정 저장/로드가 동작한다. Agent 실행은 포함하지 않는다.
+
+### Phase 2. Task/Approval/AgentRun 상태 머신
+
+- Epic/Task/Subtask 모델
+- Approval queue
+- Role preset 설정
+- Role adapter 계약과 stub adapter
+- 감사 로그
+- 완료 기준: 상태 전이, 승인 대기, 감사 로그, stub adapter run 기록이 DB와 UI에 일관되게 반영된다.
+
+### Phase 3. Worktree와 agent 실행
+
+- git worktree/branch 생성
+- agent command 실행
+- Context Pack 생성
+- log/diff/artifact 저장
+- Plan Verifier, Code Reviewer, Tester chain
+- 완료 기준: task worktree에서 controlled runner가 실행되고, Context Pack, stdout/stderr, summary, structured result, diff artifact가 저장되며 검토/리뷰/테스트 chain이 상태 머신을 전환한다.
+
+### Phase 4. UI 완성
+
+- 한국어 라이트 태스크 화면
+- 상세 탭: 계획, 실행 기록, 변경사항, 리뷰, 테스트, Jira, Slack, 머지
+- 터미널 화면: 탭, 좌우/상하 분할, pane resize/focus
+- empty/error states와 command palette
+- 완료 기준: 사용자가 태스크 중심으로 승인, 실행, 결과 검토, 터미널 이동을 처리할 수 있고 주요 empty/error state가 깨지지 않는다.
+
+### Phase 5. Jira 연동
+
+- Jira 설정과 secure token 저장
+- create metadata 조회
+- ticket draft 생성
+- 사용자 승인 후 issue 생성
+- key backfill과 status sync
+- 완료 기준: 승인된 Helm/MD 계획에서 Jira draft를 만들고, 사용자 승인 후 issue를 생성하며, key backfill과 수동 status sync가 동작한다.
+
+### Phase 6. Slack 연동
+
+- Slack 설정과 Socket Mode 연결
+- shortcut/mention Inbox 수집
+- Task 승격
+- reply draft 생성
+- 사용자 승인 후 thread 또는 fallback target에 답장
+- 완료 기준: 앱 실행 중 shortcut/mention이 Inbox로 들어오고, 사용자가 task로 승격한 뒤 reply draft를 승인해야 Slack에 게시된다.
+
+### Phase 7. 백업과 복구
+
+- local backup/export
+- orphan run/terminal/worktree recovery
+- artifact retention 설정
+- 완료 기준: 앱 재시작 후 orphan run/terminal/worktree를 식별하고, backup/export와 artifact retention 설정이 동작한다.
+
+## 원칙
+
+- 오케스트레이터는 AI가 아니라 상태 머신이다.
+- AI는 자기 다음 작업자를 직접 호출하지 않는다.
+- 모든 실행은 Helm을 거친다.
+- 계획 승인 전에는 코딩하지 않는다.
+- merge 전에는 반드시 사용자 승인을 받는다.
+- Jira 생성/수정 전에는 반드시 사용자 승인을 받는다.
+- Slack 답장 게시 전에는 반드시 사용자 승인을 받는다.
+- Helm과 MD 문서를 계획/태스크 구조의 기준 소스로 유지한다.
+- 실패와 충돌은 자동으로 숨기지 않고 Blocked로 노출한다.
+- 토큰과 권한은 중앙에서 추적한다.
