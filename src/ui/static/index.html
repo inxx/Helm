@@ -8,22 +8,35 @@
   </head>
   <body>
     <div class="app-shell">
-      <aside class="sidebar">
+      <aside class="rail">
         <div class="brand">
           <span class="brand-mark">H</span>
           <div>
             <strong>Helm</strong>
-            <span>agent hub</span>
+            <span>local agent ops</span>
           </div>
         </div>
 
-        <nav class="nav-list" aria-label="views">
-          <button class="nav-item active" type="button">Sessions</button>
-          <button class="nav-item" type="button">Workspace</button>
-          <button class="nav-item" type="button">Pull Requests</button>
+        <nav class="view-nav" aria-label="session filters">
+          <button class="view-item active" type="button" data-view="all">
+            <span>All</span>
+            <strong id="nav-all">0</strong>
+          </button>
+          <button class="view-item" type="button" data-view="review">
+            <span>Review</span>
+            <strong id="nav-review">0</strong>
+          </button>
+          <button class="view-item" type="button" data-view="ship">
+            <span>Ship</span>
+            <strong id="nav-ship">0</strong>
+          </button>
+          <button class="view-item" type="button" data-view="repair">
+            <span>Repair</span>
+            <strong id="nav-repair">0</strong>
+          </button>
         </nav>
 
-        <section class="side-section">
+        <section class="rail-section" aria-label="repository">
           <h2>Repo</h2>
           <dl class="repo-facts">
             <div>
@@ -31,86 +44,91 @@
               <dd id="repo-branch">-</dd>
             </div>
             <div>
-              <dt>changes</dt>
-              <dd id="repo-dirty">-</dd>
+              <dt>head</dt>
+              <dd id="repo-head">-</dd>
+            </div>
+            <div>
+              <dt>state</dt>
+              <dd id="repo-state">-</dd>
             </div>
           </dl>
         </section>
       </aside>
 
       <main class="workspace">
-        <header class="topbar">
-          <div>
-            <p class="eyebrow">local workspace</p>
-            <h1 id="repo-path">-</h1>
+        <header class="hero-bar">
+          <div class="hero-copy">
+            <p class="eyebrow">control room</p>
+            <h1>Helm</h1>
+            <p id="repo-path" class="repo-path">-</p>
           </div>
-          <div class="top-actions">
-            <button id="refresh-button" class="icon-button" type="button" title="새로고침" aria-label="새로고침">
-              ↻
-            </button>
-          </div>
+          <button id="refresh-button" class="icon-button" type="button" title="새로고침" aria-label="새로고침">
+            ↻
+          </button>
         </header>
 
-        <section class="metrics" aria-label="summary">
-          <div class="metric">
+        <section class="workflow-strip" id="workflow-strip" aria-label="workflow"></section>
+
+        <section class="summary-band" aria-label="summary">
+          <div class="signal large">
+            <span>workspace</span>
+            <strong id="metric-dirty">0</strong>
+          </div>
+          <div class="signal">
             <span>sessions</span>
             <strong id="metric-sessions">0</strong>
           </div>
-          <div class="metric">
-            <span>committed</span>
-            <strong id="metric-committed">0</strong>
+          <div class="signal">
+            <span>review</span>
+            <strong id="metric-review">0</strong>
           </div>
-          <div class="metric">
-            <span>failed</span>
-            <strong id="metric-failed">0</strong>
+          <div class="signal">
+            <span>ship</span>
+            <strong id="metric-ship">0</strong>
           </div>
-          <div class="metric">
-            <span>pull requests</span>
+          <div class="signal">
+            <span>prs</span>
             <strong id="metric-prs">0</strong>
           </div>
         </section>
 
-        <section class="input-dock" aria-label="command input">
-          <div class="mode-switch" role="tablist" aria-label="mode">
-            <button class="mode active" type="button">Agent</button>
-            <button class="mode" type="button">Terminal</button>
-          </div>
-          <textarea
-            id="prompt-input"
-            rows="2"
-            placeholder="Codex에게 맡길 작업을 입력하세요"
-            spellcheck="false"
-          ></textarea>
-          <div class="input-tools">
-            <select id="agent-select" aria-label="agent">
-              <option value="codex">codex</option>
-              <option value="claude">claude</option>
-              <option value="gemini">gemini</option>
-            </select>
-            <button class="primary-button" type="button" disabled>Run</button>
-          </div>
-        </section>
-
-        <section class="content-grid">
-          <div class="blocks-panel">
-            <div class="panel-header">
+        <section class="ops-layout">
+          <section class="session-column" aria-label="sessions">
+            <div class="section-head">
               <div>
-                <p class="eyebrow">blocks</p>
-                <h2>Session history</h2>
+                <p class="eyebrow">sessions</p>
+                <h2>Agent Runs</h2>
               </div>
               <input id="session-filter" type="search" placeholder="검색" aria-label="세션 검색" />
             </div>
             <div id="session-list" class="session-list" aria-live="polite"></div>
-          </div>
+          </section>
 
-          <aside class="detail-panel">
-            <div class="panel-header">
-              <div>
-                <p class="eyebrow">selected</p>
-                <h2>Details</h2>
+          <aside class="inspect-column" aria-label="inspection">
+            <section class="workspace-panel">
+              <div class="section-head compact">
+                <div>
+                  <p class="eyebrow">workspace</p>
+                  <h2>Git State</h2>
+                </div>
+                <span id="captured-at" class="stamp">-</span>
               </div>
-            </div>
-            <div id="session-detail" class="detail-empty">세션을 선택하세요.</div>
+              <div id="status-list" class="status-list"></div>
+            </section>
+
+            <section class="detail-panel">
+              <div class="section-head compact">
+                <div>
+                  <p class="eyebrow">selected</p>
+                  <h2>Session</h2>
+                </div>
+                <div class="artifact-tabs" role="tablist" aria-label="artifact preview">
+                  <button class="artifact-tab active" type="button" data-artifact="log">Log</button>
+                  <button class="artifact-tab" type="button" data-artifact="diff">Diff</button>
+                </div>
+              </div>
+              <div id="session-detail" class="detail-empty">-</div>
+            </section>
           </aside>
         </section>
       </main>

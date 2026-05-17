@@ -2,20 +2,33 @@ const state = {
   snapshot: null,
   selectedId: null,
   filter: "",
+  view: "all",
+  artifact: "log",
 };
 
 const elements = {
   repoPath: document.querySelector("#repo-path"),
   repoBranch: document.querySelector("#repo-branch"),
-  repoDirty: document.querySelector("#repo-dirty"),
+  repoHead: document.querySelector("#repo-head"),
+  repoState: document.querySelector("#repo-state"),
+  capturedAt: document.querySelector("#captured-at"),
+  metricDirty: document.querySelector("#metric-dirty"),
   metricSessions: document.querySelector("#metric-sessions"),
-  metricCommitted: document.querySelector("#metric-committed"),
-  metricFailed: document.querySelector("#metric-failed"),
+  metricReview: document.querySelector("#metric-review"),
+  metricShip: document.querySelector("#metric-ship"),
   metricPrs: document.querySelector("#metric-prs"),
+  navAll: document.querySelector("#nav-all"),
+  navReview: document.querySelector("#nav-review"),
+  navShip: document.querySelector("#nav-ship"),
+  navRepair: document.querySelector("#nav-repair"),
+  workflow: document.querySelector("#workflow-strip"),
   refreshButton: document.querySelector("#refresh-button"),
   filter: document.querySelector("#session-filter"),
   list: document.querySelector("#session-list"),
+  statusList: document.querySelector("#status-list"),
   detail: document.querySelector("#session-detail"),
+  viewButtons: Array.from(document.querySelectorAll("[data-view]")),
+  artifactTabs: Array.from(document.querySelectorAll("[data-artifact]")),
 };
 
 elements.refreshButton.addEventListener("click", () => {
@@ -27,18 +40,39 @@ elements.filter.addEventListener("input", (event) => {
   render();
 });
 
+for (const button of elements.viewButtons) {
+  button.addEventListener("click", () => {
+    state.view = button.dataset.view ?? "all";
+    state.selectedId = null;
+    render();
+  });
+}
+
+for (const tab of elements.artifactTabs) {
+  tab.addEventListener("click", () => {
+    state.artifact = tab.dataset.artifact ?? "log";
+    render();
+  });
+}
+
 loadOverview();
 
 async function loadOverview() {
-  const response = await fetch("/api/overview", { cache: "no-store" });
+  elements.refreshButton.disabled = true;
 
-  if (!response.ok) {
-    throw new Error(`overview request failed: ${response.status}`);
+  try {
+    const response = await fetch("/api/overview", { cache: "no-store" });
+
+    if (!response.ok) {
+      throw new Error(`overview request failed: ${response.status}`);
+    }
+
+    state.snapshot = await response.json();
+    state.selectedId = state.selectedId ?? filteredSessions()[0]?.id ?? null;
+    render();
+  } finally {
+    elements.refreshButton.disabled = false;
   }
-
-  state.snapshot = await response.json();
-  state.selectedId = state.selectedId ?? state.snapshot.sessions[0]?.id ?? null;
-  render();
 }
 
 function render() {
@@ -46,23 +80,100 @@ function render() {
     return;
   }
 
+  renderShell();
+  renderWorkflow();
+  renderStatusList();
+  renderSessions();
+}
+
+function renderShell() {
   const { repo, totals } = state.snapshot;
+  const repairCount = state.snapshot.sessions.filter((session) => session.nextAction.key === "repair").length;
 
   elements.repoPath.textContent = repo.path;
   elements.repoBranch.textContent = repo.branch;
-  elements.repoDirty.textContent = repo.dirtyCount === 0 ? "clean" : `${repo.dirtyCount} changed`;
+  elements.repoHead.textContent = repo.head ?? "-";
+  elements.repoState.textContent = repo.dirtyCount === 0 ? "clean" : `${repo.dirtyCount} changed`;
+  elements.capturedAt.textContent = formatDateTime(repo.capturedAt);
+  elements.metricDirty.textContent = repo.dirtyCount;
   elements.metricSessions.textContent = totals.sessions;
-  elements.metricCommitted.textContent = totals.committed;
-  elements.metricFailed.textContent = totals.failed;
+  elements.metricReview.textContent = totals.needsReview;
+  elements.metricShip.textContent = totals.readyToShip;
   elements.metricPrs.textContent = totals.withPullRequest;
+  elements.navAll.textContent = totals.sessions;
+  elements.navReview.textContent = totals.needsReview;
+  elements.navShip.textContent = totals.readyToShip;
+  elements.navRepair.textContent = repairCount;
 
+  for (const button of elements.viewButtons) {
+    button.classList.toggle("active", button.dataset.view === state.view);
+  }
+
+  for (const tab of elements.artifactTabs) {
+    tab.classList.toggle("active", tab.dataset.artifact === state.artifact);
+  }
+}
+
+function renderWorkflow() {
+  elements.workflow.replaceChildren(
+    ...state.snapshot.workflow.map((step, index) => {
+      const item = document.createElement("div");
+      item.className = `workflow-step ${step.tone}`;
+
+      const number = document.createElement("span");
+      number.className = "workflow-index";
+      number.textContent = String(index + 1).padStart(2, "0");
+
+      const label = document.createElement("span");
+      label.textContent = step.label;
+
+      const count = document.createElement("strong");
+      count.textContent = step.count;
+
+      item.append(number, label, count);
+      return item;
+    }),
+  );
+}
+
+function renderStatusList() {
+  const rows = state.snapshot.repo.status;
+
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "clean";
+    elements.statusList.replaceChildren(empty);
+    return;
+  }
+
+  elements.statusList.replaceChildren(
+    ...rows.slice(0, 8).map((entry) => {
+      const row = document.createElement("div");
+      row.className = "status-row";
+
+      const code = document.createElement("span");
+      code.className = "status-code";
+      code.textContent = entry.code;
+
+      const path = document.createElement("strong");
+      path.textContent = entry.path;
+
+      row.append(code, path);
+      return row;
+    }),
+  );
+}
+
+function renderSessions() {
   const sessions = filteredSessions();
+
   elements.list.replaceChildren(...sessions.map(renderSessionBlock));
 
   if (sessions.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "표시할 세션이 없습니다.";
+    empty.textContent = "empty";
     elements.list.replaceChildren(empty);
   }
 
@@ -72,35 +183,40 @@ function render() {
 }
 
 function filteredSessions() {
-  const sessions = state.snapshot.sessions;
-
-  if (!state.filter) {
-    return sessions;
+  if (!state.snapshot) {
+    return [];
   }
 
-  return sessions.filter((session) =>
-    [
-      session.id,
-      session.status,
-      session.agent,
-      session.prompt,
-      session.branch,
-      session.commitHash,
-      session.pullRequest.title,
-      session.pullRequest.url,
-      session.changedFiles.join(" "),
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase()
-      .includes(state.filter),
-  );
+  return state.snapshot.sessions
+    .filter((session) => state.view === "all" || session.nextAction.key === state.view)
+    .filter((session) => {
+      if (!state.filter) {
+        return true;
+      }
+
+      return [
+        session.id,
+        session.status,
+        session.agent,
+        session.prompt,
+        session.branch,
+        session.commitHash,
+        session.nextAction.label,
+        session.pullRequest.title,
+        session.pullRequest.url,
+        session.changedFiles.join(" "),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(state.filter);
+    });
 }
 
 function renderSessionBlock(session) {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = `session-block ${session.status}`;
+  button.className = `session-block ${session.nextAction.tone}`;
 
   if (session.id === state.selectedId) {
     button.classList.add("selected");
@@ -111,121 +227,151 @@ function renderSessionBlock(session) {
     render();
   });
 
-  const head = document.createElement("div");
-  head.className = "block-head";
+  const top = document.createElement("div");
+  top.className = "block-top";
 
-  const title = document.createElement("div");
-  title.className = "block-title";
+  const prompt = document.createElement("strong");
+  prompt.className = "block-prompt";
+  prompt.textContent = session.prompt;
 
-  const command = document.createElement("p");
-  command.className = "block-command";
-  command.textContent = session.prompt;
+  const action = document.createElement("span");
+  action.className = `pill ${session.nextAction.tone}`;
+  action.textContent = session.nextAction.label;
+
+  top.append(prompt, action);
 
   const meta = document.createElement("div");
   meta.className = "block-meta";
   meta.append(
     pill(session.agent, "agent"),
-    pill(session.status, statusClass(session)),
-    pill(formatTime(session.updatedAt)),
+    pill(session.status, statusTone(session)),
+    pill(formatDateTime(session.updatedAt)),
   );
 
   if (session.commitHash) {
-    meta.append(pill(session.commitHash));
+    meta.append(pill(session.commitHash, "mono"));
   }
 
   if (session.pullRequest.url) {
-    meta.append(pill("PR", "ok"));
+    meta.append(pill("PR", "accent"));
   }
 
-  title.append(command, meta);
+  const files = document.createElement("div");
+  files.className = "file-strip";
+  files.textContent =
+    session.changedFiles.length === 0
+      ? "no changed files"
+      : session.changedFiles.slice(0, 4).join(" / ");
 
-  const exit = document.createElement("span");
-  exit.className = `pill ${statusClass(session)}`;
-  exit.textContent = session.exitCode === null ? "-" : `exit ${session.exitCode}`;
+  const preview = document.createElement("pre");
+  preview.className = "block-preview";
+  preview.textContent = previewOutput(session);
 
-  head.append(title, exit);
-
-  const output = document.createElement("pre");
-  output.className = "block-output";
-  output.textContent = previewOutput(session);
-
-  button.append(head, output);
+  button.append(top, meta, files, preview);
   return button;
 }
 
 function renderDetail(session) {
   if (!session) {
     elements.detail.className = "detail-empty";
-    elements.detail.textContent = "세션을 선택하세요.";
+    elements.detail.textContent = "-";
     return;
   }
 
   elements.detail.className = "detail-body";
   elements.detail.replaceChildren(
-    section("Session", [
-      kv("id", session.id),
-      kv("status", session.status),
-      kv("agent", session.agent),
-      kv("branch", session.branch),
-      kv("head", session.head),
-      kv("commit", session.commitHash ?? "-"),
+    summaryBlock(session),
+    fieldGrid([
+      ["id", session.id],
+      ["agent", session.agent],
+      ["branch", session.branch],
+      ["head", session.head],
+      ["exit", session.exitCode ?? "-"],
+      ["commit", session.commitHash ?? "-"],
+      ["check", formatCheck(session)],
+      ["pr", session.pullRequest.url ?? "-"],
     ]),
-    section("Check", [
-      kv("command", session.check.command ?? "-"),
-      kv("exit", session.check.exitCode ?? "-"),
-      kv("log", session.check.logPath ?? "-"),
-    ]),
-    section("Pull request", [
-      kv("title", session.pullRequest.title ?? "-"),
-      kv("base", session.pullRequest.base ?? "-"),
-      kv("draft", formatDraft(session.pullRequest.draft)),
-      kv("url", session.pullRequest.url ?? "-"),
-    ]),
-    section("Files", session.changedFiles.length > 0 ? session.changedFiles.map((file) => item(file)) : [item("-")]),
-    preSection("Log", session.artifacts.logPreview || "-"),
-    preSection("Diff", session.artifacts.diffPreview || "-"),
+    fileList(session),
+    artifactPreview(session),
   );
 }
 
-function section(title, rows) {
+function summaryBlock(session) {
   const wrapper = document.createElement("section");
-  wrapper.className = "detail-section";
+  wrapper.className = "detail-summary";
+
+  const action = document.createElement("span");
+  action.className = `pill ${session.nextAction.tone}`;
+  action.textContent = session.nextAction.label;
+
+  const title = document.createElement("h3");
+  title.textContent = session.prompt;
+
+  const meta = document.createElement("p");
+  meta.textContent = `${session.status} / ${formatDateTime(session.updatedAt)}`;
+
+  wrapper.append(action, title, meta);
+  return wrapper;
+}
+
+function fieldGrid(rows) {
+  const list = document.createElement("dl");
+  list.className = "field-grid";
+
+  for (const [label, value] of rows) {
+    const group = document.createElement("div");
+    const term = document.createElement("dt");
+    const detail = document.createElement("dd");
+    term.textContent = label;
+
+    if (label === "pr" && typeof value === "string" && value.startsWith("http")) {
+      const link = document.createElement("a");
+      link.href = value;
+      link.textContent = value;
+      link.rel = "noreferrer";
+      detail.append(link);
+    } else {
+      detail.textContent = String(value);
+    }
+
+    group.append(term, detail);
+    list.append(group);
+  }
+
+  return list;
+}
+
+function fileList(session) {
+  const wrapper = document.createElement("section");
+  wrapper.className = "changed-files";
   const heading = document.createElement("h3");
-  heading.textContent = title;
+  heading.textContent = "Files";
   const list = document.createElement("ul");
-  list.className = "detail-list";
-  list.append(...rows);
+
+  if (session.changedFiles.length === 0) {
+    list.append(listItem("-"));
+  } else {
+    list.append(...session.changedFiles.map(listItem));
+  }
+
   wrapper.append(heading, list);
   return wrapper;
 }
 
-function preSection(title, text) {
-  const wrapper = document.createElement("section");
-  wrapper.className = "detail-section";
-  const heading = document.createElement("h3");
-  heading.textContent = title;
+function artifactPreview(session) {
   const pre = document.createElement("pre");
-  pre.className = "detail-pre";
-  pre.textContent = text;
-  wrapper.append(heading, pre);
-  return wrapper;
+  pre.className = "artifact-preview";
+  pre.textContent =
+    state.artifact === "diff"
+      ? session.artifacts.diffPreview || "-"
+      : session.artifacts.logPreview || "-";
+  return pre;
 }
 
-function kv(label, value) {
-  const row = document.createElement("li");
-  row.className = "kv-row";
-  const key = document.createElement("span");
-  key.textContent = label;
-  const val = document.createElement("strong");
-  val.textContent = String(value);
-  row.append(key, val);
-  return row;
-}
-
-function item(value) {
-  const row = document.createElement("li");
-  row.textContent = value;
-  return row;
+function listItem(text) {
+  const item = document.createElement("li");
+  item.textContent = text;
+  return item;
 }
 
 function pill(text, className = "") {
@@ -235,36 +381,40 @@ function pill(text, className = "") {
   return element;
 }
 
-function statusClass(session) {
+function statusTone(session) {
   if (session.status === "failed" || session.exitCode > 0) {
     return "error";
   }
 
-  if (session.status === "completed") {
+  if (session.status === "completed" || session.status === "committed") {
     return "ok";
   }
 
-  return "";
+  if (session.status === "running") {
+    return "accent";
+  }
+
+  return "muted";
 }
 
 function previewOutput(session) {
-  const source = session.artifacts.logPreview || session.artifacts.diffPreview || session.prompt;
-  return source.split("\n").slice(0, 10).join("\n");
+  const source = session.artifacts.diffPreview || session.artifacts.logPreview || session.prompt;
+  return source.split("\n").slice(0, 7).join("\n");
 }
 
-function formatTime(value) {
+function formatCheck(session) {
+  if (!session.check.command) {
+    return "-";
+  }
+
+  return `${session.check.command} / exit ${session.check.exitCode ?? "?"}`;
+}
+
+function formatDateTime(value) {
   return new Intl.DateTimeFormat("ko-KR", {
     hour: "2-digit",
     minute: "2-digit",
     month: "2-digit",
     day: "2-digit",
   }).format(new Date(value));
-}
-
-function formatDraft(value) {
-  if (value === null) {
-    return "-";
-  }
-
-  return value ? "yes" : "no";
 }

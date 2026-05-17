@@ -47,6 +47,11 @@ type UiSession = {
     logPreview: string;
     diffPreview: string;
   };
+  nextAction: {
+    key: string;
+    label: string;
+    tone: string;
+  };
 };
 
 export type UiSnapshot = {
@@ -56,15 +61,28 @@ export type UiSnapshot = {
     head: string | null;
     dirtyCount: number;
     statusText: string;
+    status: {
+      code: string;
+      path: string;
+    }[];
     capturedAt: string;
   };
   totals: {
     sessions: number;
+    running: number;
     completed: number;
     failed: number;
     committed: number;
+    needsReview: number;
+    readyToShip: number;
     withPullRequest: number;
   };
+  workflow: {
+    key: string;
+    label: string;
+    count: number;
+    tone: string;
+  }[];
   sessions: UiSession[];
 };
 
@@ -75,6 +93,16 @@ export function createUiSnapshot(repoPath: string, now = new Date()): UiSnapshot
   const status = readStatus(repoPath);
   const store = getSessionStore(repoPath);
   const sessions = listSessions(store).map(toUiSession);
+  const totals = {
+    sessions: sessions.length,
+    running: sessions.filter((session) => session.status === "running").length,
+    completed: sessions.filter((session) => session.status === "completed").length,
+    failed: sessions.filter((session) => session.status === "failed").length,
+    committed: sessions.filter((session) => session.status === "committed").length,
+    needsReview: sessions.filter((session) => session.nextAction.key === "review").length,
+    readyToShip: sessions.filter((session) => session.nextAction.key === "ship").length,
+    withPullRequest: sessions.filter((session) => Boolean(session.pullRequest.url)).length,
+  };
 
   return {
     repo: {
@@ -83,15 +111,19 @@ export function createUiSnapshot(repoPath: string, now = new Date()): UiSnapshot
       head: readHead(repoPath),
       dirtyCount: status.length,
       statusText: formatStatusEntries(status),
+      status: status.map((entry) => ({
+        code: `${entry.index}${entry.workingTree}`,
+        path: entry.path,
+      })),
       capturedAt: now.toISOString(),
     },
-    totals: {
-      sessions: sessions.length,
-      completed: sessions.filter((session) => session.status === "completed").length,
-      failed: sessions.filter((session) => session.status === "failed").length,
-      committed: sessions.filter((session) => session.status === "committed").length,
-      withPullRequest: sessions.filter((session) => Boolean(session.pullRequest.url)).length,
-    },
+    totals,
+    workflow: [
+      { key: "workspace", label: "Workspace", count: status.length, tone: status.length > 0 ? "warn" : "ok" },
+      { key: "review", label: "Review", count: totals.needsReview, tone: totals.needsReview > 0 ? "accent" : "muted" },
+      { key: "ship", label: "Ship", count: totals.readyToShip, tone: totals.readyToShip > 0 ? "ok" : "muted" },
+      { key: "pullRequest", label: "PR", count: totals.withPullRequest, tone: totals.withPullRequest > 0 ? "accent" : "muted" },
+    ],
     sessions,
   };
 }
@@ -176,7 +208,32 @@ function toUiSession(session: SessionRecord): UiSession {
       logPreview: readPreview(session.logPath),
       diffPreview: readPreview(session.diffPath),
     },
+    nextAction: inferNextAction(session),
   };
+}
+
+function inferNextAction(session: SessionRecord): UiSession["nextAction"] {
+  if (session.status === "failed" || (session.exitCode !== undefined && session.exitCode !== 0)) {
+    return { key: "repair", label: "Repair", tone: "error" };
+  }
+
+  if (session.prUrl) {
+    return { key: "opened", label: "Opened", tone: "accent" };
+  }
+
+  if (session.commitHash) {
+    return { key: "ship", label: "Ship", tone: "ok" };
+  }
+
+  if (session.changedFiles && session.changedFiles.length > 0) {
+    return { key: "review", label: "Review", tone: "warn" };
+  }
+
+  if (session.status === "running") {
+    return { key: "running", label: "Running", tone: "accent" };
+  }
+
+  return { key: "closed", label: "Closed", tone: "muted" };
 }
 
 function readPreview(path: string | undefined): string {
