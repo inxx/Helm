@@ -1668,6 +1668,10 @@ fn host_runner_placeholders(
             artifact_dir.to_string_lossy().to_string(),
         ),
         (
+            "projectRoot".to_string(),
+            root.to_string_lossy().to_string(),
+        ),
+        (
             "contextPackPath".to_string(),
             artifact_dir
                 .join("context-pack.md")
@@ -2168,6 +2172,65 @@ fn default_role_presets() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    struct TestRepo {
+        root: PathBuf,
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn test_repo() -> TestRepo {
+        let root = std::env::temp_dir().join(format!("helm-test-{}", new_id()));
+        fs::create_dir_all(&root).expect("create temp repo");
+        run_git(&root, &["init"]);
+        run_git(&root, &["config", "user.name", "Helm Test"]);
+        run_git(&root, &["config", "user.email", "helm-test@example.com"]);
+        fs::write(root.join("README.md"), "# test\n").expect("write readme");
+        run_git(&root, &["add", "README.md"]);
+        run_git(&root, &["commit", "-m", "initial"]);
+        TestRepo { root }
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn open_test_project(repo: &TestRepo) -> (Connection, ProjectSummary) {
+        let mut conn = open_project_db(&repo.root).expect("open project db");
+        let project = upsert_project(&conn, &repo.root).expect("upsert project");
+        run_migrations(&mut conn).expect("migrations");
+        (conn, project)
+    }
+
+    fn create_test_task(conn: &mut Connection, project_id: &str) -> TaskSummary {
+        create_task(
+            conn,
+            project_id,
+            CreateTaskInput {
+                epic_id: None,
+                title: "Fixture core loop".to_string(),
+                description: Some("검증용 태스크".to_string()),
+                external_refs: None,
+            },
+        )
+        .expect("create task")
+    }
 
     #[test]
     fn migrations_are_idempotent() {
@@ -2206,5 +2269,78 @@ mod tests {
             "gateResult": null
         });
         assert!(!validate_structured_result(&invalid));
+    }
+
+    #[test]
+    fn planner_stub_creates_plan_approval_and_approval_moves_task_ready() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+
+        let planner_run = run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "planner")
+            .expect("planner");
+        assert_eq!(planner_run.status, "Succeeded");
+
+        let approvals =
+            list_approvals(&conn, &project.id, Some("Pending".to_string())).expect("approvals");
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].approval_type, "PlanApproval");
+
+        decide_approval(
+            &mut conn,
+            &project.id,
+            &approvals[0].id,
+            "Approved",
+            "계획 승인",
+        )
+        .expect("approve");
+        let updated = get_task(&conn, &task.id).expect("task");
+        assert_eq!(updated.status, "Ready");
+    }
+
+    #[test]
+    fn coder_is_blocked_before_plan_approval_and_allowed_after_approval() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+
+        let blocked = run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "coder")
+            .expect_err("coder should be blocked");
+        assert_eq!(blocked.code, "ValidationFailed");
+
+        run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "planner").expect("planner");
+        let approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("approvals")
+            .remove(0);
+        decide_approval(&mut conn, &project.id, &approval.id, "Approved", "승인").expect("approve");
+
+        let coder_run =
+            run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "coder").expect("coder");
+        assert_eq!(coder_run.status, "Succeeded");
+        let updated = get_task(&conn, &task.id).expect("task");
+        assert_eq!(updated.status, "PlanVerification");
+    }
+
+    #[test]
+    fn prepare_role_context_creates_queued_run_and_context_artifacts() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+
+        run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "planner").expect("planner");
+        let approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("approvals")
+            .remove(0);
+        decide_approval(&mut conn, &project.id, &approval.id, "Approved", "승인").expect("approve");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "coder")
+            .expect("context");
+        assert_eq!(run.status, "Queued");
+
+        let artifact_dir = repo.root.join(&run.artifact_dir);
+        assert!(artifact_dir.join("context-pack.md").exists());
+        assert!(artifact_dir.join("context-pack.json").exists());
+        assert!(artifact_dir.join("structured-result.schema.json").exists());
     }
 }

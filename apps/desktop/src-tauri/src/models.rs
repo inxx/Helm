@@ -73,6 +73,23 @@ pub struct EffectiveSettings {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RunnerTemplateSummary {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerCheckResult {
+    pub role_id: String,
+    pub available: bool,
+    pub command: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EpicSummary {
     pub id: String,
     pub project_id: String,

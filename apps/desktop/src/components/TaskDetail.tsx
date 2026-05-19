@@ -22,6 +22,15 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
   const [runs, setRuns] = useState<AgentRunSummary[]>([]);
   const [worktree, setWorktree] = useState<TaskWorktreeSummary | null>(null);
   const [artifact, setArtifact] = useState<string | null>(null);
+  const pendingPlanApproval = task
+    ? snapshot.approvals.find(
+        (approval) =>
+          approval.entityType === "Task" &&
+          approval.entityId === task.id &&
+          approval.approvalType === "PlanApproval" &&
+          approval.status === "Pending",
+      )
+    : null;
 
   useEffect(() => {
     if (!task) {
@@ -125,6 +134,19 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
         <h2>{task.title}</h2>
       </div>
       {task.description ? <p>{task.description}</p> : <p className="muted">설명 없음</p>}
+
+      <section className="detail-section next-action-panel">
+        <h3>다음 액션</h3>
+        <NextAction
+          busy={busy}
+          pendingPlanApproval={Boolean(pendingPlanApproval)}
+          task={task}
+          worktree={worktree}
+          onPrepareWorktree={prepareWorktree}
+          onPrepareContext={prepareContext}
+          onRunStubRole={runRole}
+        />
+      </section>
 
       <section className="detail-section">
         <h3>외부 참조</h3>
@@ -244,6 +266,157 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
       </section>
     </aside>
   );
+}
+
+interface NextActionProps {
+  busy: boolean;
+  pendingPlanApproval: boolean;
+  task: TaskSummary;
+  worktree: TaskWorktreeSummary | null;
+  onPrepareWorktree: () => Promise<void>;
+  onPrepareContext: (roleId: string) => Promise<void>;
+  onRunStubRole: (roleId: string) => Promise<void>;
+}
+
+function NextAction({
+  busy,
+  pendingPlanApproval,
+  task,
+  worktree,
+  onPrepareWorktree,
+  onPrepareContext,
+  onRunStubRole,
+}: NextActionProps) {
+  if (pendingPlanApproval) {
+    return (
+      <div className="next-action-card waiting">
+        <strong>계획 승인 대기</strong>
+        <p>승인이 완료되면 구현자 역할을 실행할 수 있습니다.</p>
+      </div>
+    );
+  }
+
+  const action = nextActionFor(task.status, Boolean(worktree));
+  if (!action) {
+    return (
+      <div className="next-action-card">
+        <strong>대기 중</strong>
+        <p>현재 상태에서 자동으로 제안할 다음 액션이 없습니다.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="next-action-card">
+      <div>
+        <strong>{action.title}</strong>
+        <p>{action.description}</p>
+      </div>
+      <button
+        className="primary-button"
+        disabled={busy}
+        onClick={() => {
+          if (action.kind === "worktree") {
+            void onPrepareWorktree();
+          } else if (action.kind === "stub") {
+            void onRunStubRole(action.roleId);
+          } else {
+            void onPrepareContext(action.roleId);
+          }
+        }}
+        type="button"
+      >
+        {action.button}
+      </button>
+    </div>
+  );
+}
+
+function nextActionFor(status: TaskStatus, hasWorktree: boolean):
+  | {
+      kind: "stub";
+      roleId: string;
+      title: string;
+      description: string;
+      button: string;
+    }
+  | {
+      kind: "context";
+      roleId: string;
+      title: string;
+      description: string;
+      button: string;
+    }
+  | {
+      kind: "worktree";
+      title: string;
+      description: string;
+      button: string;
+    }
+  | null {
+  if (status === "Planned" || status === "Blocked") {
+    return {
+      kind: "stub",
+      roleId: "planner",
+      title: "계획 생성",
+      description: "Planner를 실행해 계획 산출물과 PlanApproval을 만듭니다.",
+      button: "Planner 실행",
+    };
+  }
+  if (!hasWorktree && ["Ready", "PlanVerification", "CodeReview", "Testing"].includes(status)) {
+    return {
+      kind: "worktree",
+      title: "Worktree 준비",
+      description: "실제 role 실행을 위해 태스크 전용 branch와 worktree를 만듭니다.",
+      button: "worktree 준비",
+    };
+  }
+  if (status === "Ready") {
+    return {
+      kind: "context",
+      roleId: "coder",
+      title: "구현 컨텍스트 준비",
+      description: "Coder가 실행할 Context Pack을 생성합니다.",
+      button: "Coder 준비",
+    };
+  }
+  if (status === "PlanVerification") {
+    return {
+      kind: "context",
+      roleId: "plan_verifier",
+      title: "계획 준수 검토",
+      description: "구현 diff가 승인된 계획을 따르는지 검토합니다.",
+      button: "계획 검토 준비",
+    };
+  }
+  if (status === "CodeReview") {
+    return {
+      kind: "context",
+      roleId: "code_reviewer",
+      title: "코드 리뷰",
+      description: "변경 코드의 위험과 품질 이슈를 검토합니다.",
+      button: "리뷰 준비",
+    };
+  }
+  if (status === "Testing") {
+    return {
+      kind: "context",
+      roleId: "tester",
+      title: "테스트 검증",
+      description: "설정된 테스트 역할로 변경사항을 검증합니다.",
+      button: "테스트 준비",
+    };
+  }
+  if (status === "MergeWaiting") {
+    return {
+      kind: "context",
+      roleId: "tester",
+      title: "머지 대기",
+      description: "diff와 실행 기록을 확인하고 merge readiness를 판단합니다.",
+      button: "최신 테스트 준비",
+    };
+  }
+  return null;
 }
 
 function roleLabel(roleId: string): string {

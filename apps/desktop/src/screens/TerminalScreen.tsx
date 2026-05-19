@@ -4,11 +4,12 @@ import type { ProjectSnapshot, TerminalCommandResult } from "../lib/types";
 
 interface TerminalScreenProps {
   snapshot: ProjectSnapshot | null;
+  onOpenProject: () => void;
 }
 
 type CwdMode = "project" | "worktree";
 
-export function TerminalScreen({ snapshot }: TerminalScreenProps) {
+export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps) {
   const [cwdMode, setCwdMode] = useState<CwdMode>("project");
   const [taskId, setTaskId] = useState("");
   const [command, setCommand] = useState("pwd");
@@ -23,6 +24,9 @@ export function TerminalScreen({ snapshot }: TerminalScreenProps) {
       <section className="empty-state">
         <h2>터미널</h2>
         <p>프로젝트를 먼저 열어주세요.</p>
+        <button className="primary-button" onClick={onOpenProject} type="button">
+          프로젝트 열기
+        </button>
       </section>
     );
   }

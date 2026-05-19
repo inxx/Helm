@@ -9,6 +9,8 @@ import type {
   EffectiveSettings,
   ProjectSettingsPatch,
   ProjectSnapshot,
+  RunnerCheckResult,
+  RunnerTemplateSummary,
   TaskStatus,
   TaskWorktreeSummary,
   TerminalCommandResult,
@@ -29,6 +31,15 @@ export const api = {
   },
   updateProjectSettings(projectId: string, patch: ProjectSettingsPatch) {
     return invoke<EffectiveSettings>("update_project_settings", { projectId, patch });
+  },
+  listRunnerTemplates(projectId: string) {
+    return invoke<RunnerTemplateSummary[]>("list_runner_templates", { projectId });
+  },
+  applyRunnerTemplate(projectId: string, templateId: string) {
+    return invoke<EffectiveSettings>("apply_runner_template", { projectId, templateId });
+  },
+  checkRoleRunner(projectId: string, roleId: string) {
+    return invoke<RunnerCheckResult>("check_role_runner", { projectId, roleId });
   },
   updateTaskStatus(
     projectId: string,

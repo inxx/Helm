@@ -6,8 +6,10 @@ use crate::models::{
     AgentRunSummary, ApprovalSummary, CommandError, CommandResult, CreateEpicInput,
     CreateTaskInput, EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary,
     GitFileStatus, GitRepositoryState, ProjectContext, ProjectSettingsPatch, ProjectSnapshot,
-    ProjectSummary, TaskSummary, TaskWorktreeSummary, TerminalCommandResult,
+    ProjectSummary, RunnerCheckResult, RunnerTemplateSummary, TaskSummary, TaskWorktreeSummary,
+    TerminalCommandResult,
 };
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -76,6 +78,100 @@ fn update_project_settings(
     let context = project_context(&state, &project_id)?;
     let conn = db::open_existing_db(&context.db_path)?;
     db::update_settings(&conn, &project_id, patch)
+}
+
+#[tauri::command]
+fn list_runner_templates(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<RunnerTemplateSummary>> {
+    let _ = project_context(&state, &project_id)?;
+    Ok(runner_templates()
+        .into_iter()
+        .map(|template| RunnerTemplateSummary {
+            id: template.id.to_string(),
+            label: template.label.to_string(),
+            description: template.description.to_string(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn apply_runner_template(
+    project_id: String,
+    template_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<EffectiveSettings> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    let template = runner_templates()
+        .into_iter()
+        .find(|item| item.id == template_id)
+        .ok_or_else(|| CommandError::validation("지원하지 않는 runner template입니다."))?;
+    db::update_settings(
+        &conn,
+        &project_id,
+        ProjectSettingsPatch {
+            role_presets: Some((template.presets)()),
+            worktree_root: None,
+            obsidian_vault_path: None,
+            token_budget: None,
+            artifact_retention_days: None,
+        },
+    )
+}
+
+#[tauri::command]
+fn check_role_runner(
+    project_id: String,
+    role_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<RunnerCheckResult> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    let settings = db::effective_settings(&conn, &project_id)?;
+    let command = role_command_for_check(&settings.role_presets, &role_id)?;
+    if command.is_empty() {
+        return Ok(RunnerCheckResult {
+            role_id,
+            available: false,
+            command,
+            message: "role preset에 command가 없습니다.".to_string(),
+        });
+    }
+
+    let check = if command
+        .iter()
+        .any(|part| part.contains("fixture-runner.mjs"))
+    {
+        Command::new(&command[0])
+            .args(&command[1..])
+            .arg("--health")
+            .output()
+    } else {
+        Command::new(&command[0]).arg("--version").output()
+    };
+
+    match check {
+        Ok(output) if output.status.success() => Ok(RunnerCheckResult {
+            role_id,
+            available: true,
+            command,
+            message: "runner command를 실행할 수 있습니다.".to_string(),
+        }),
+        Ok(output) => Ok(RunnerCheckResult {
+            role_id,
+            available: false,
+            command,
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }),
+        Err(err) => Ok(RunnerCheckResult {
+            role_id,
+            available: false,
+            command,
+            message: err.to_string(),
+        }),
+    }
 }
 
 #[tauri::command]
@@ -424,6 +520,138 @@ fn reject_approval(
     db::decide_approval(&mut conn, &project_id, &approval_id, "Rejected", &reason)
 }
 
+struct RunnerTemplate {
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    presets: fn() -> Value,
+}
+
+fn runner_templates() -> Vec<RunnerTemplate> {
+    vec![
+        RunnerTemplate {
+            id: "fixture",
+            label: "Fixture runner",
+            description: "로컬 검증용 runner입니다. 실제 AI 호출 없이 artifact와 diff를 생성합니다.",
+            presets: fixture_role_presets,
+        },
+        RunnerTemplate {
+            id: "codex",
+            label: "Codex CLI",
+            description: "설치된 codex CLI를 role runner로 사용합니다. command는 환경에 맞게 조정해야 합니다.",
+            presets: codex_role_presets,
+        },
+        RunnerTemplate {
+            id: "claude",
+            label: "Claude CLI",
+            description: "설치된 claude CLI를 role runner로 사용합니다. 로컬 인증이 필요합니다.",
+            presets: claude_role_presets,
+        },
+    ]
+}
+
+fn fixture_runner_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|path| path.join("scripts").join("fixture-runner.mjs"))
+        .unwrap_or_else(|| PathBuf::from("scripts/fixture-runner.mjs"))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn fixture_role_presets() -> Value {
+    let script = fixture_runner_path();
+    json!(role_ids()
+        .into_iter()
+        .map(|(role_id, label)| json!({
+            "roleId": role_id,
+            "label": label,
+            "provider": "fixture",
+            "commandArgs": ["node", script, "--mode", "pass"],
+            "timeoutSeconds": 60
+        }))
+        .collect::<Vec<_>>())
+}
+
+fn codex_role_presets() -> Value {
+    json!(role_ids()
+        .into_iter()
+        .map(|(role_id, label)| json!({
+            "roleId": role_id,
+            "label": label,
+            "provider": "codex",
+            "commandArgs": [
+                "codex",
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--cd",
+                "{worktreePath}",
+                "--",
+                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+            ],
+            "timeoutSeconds": 1800
+        }))
+        .collect::<Vec<_>>())
+}
+
+fn claude_role_presets() -> Value {
+    json!(role_ids()
+        .into_iter()
+        .map(|(role_id, label)| json!({
+            "roleId": role_id,
+            "label": label,
+            "provider": "claude",
+            "commandArgs": [
+                "claude",
+                "-p",
+                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+            ],
+            "timeoutSeconds": 1800
+        }))
+        .collect::<Vec<_>>())
+}
+
+fn role_ids() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("planner", "설계자"),
+        ("coder", "구현자"),
+        ("plan_verifier", "계획 검토자"),
+        ("code_reviewer", "코드 리뷰어"),
+        ("tester", "테스트 담당자"),
+    ]
+}
+
+fn role_command_for_check(role_presets: &Value, role_id: &str) -> CommandResult<Vec<String>> {
+    let preset = role_presets
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("roleId").and_then(Value::as_str) == Some(role_id))
+        })
+        .ok_or_else(|| CommandError::validation("role preset을 찾을 수 없습니다."))?;
+
+    if let Some(args) = preset.get("commandArgs").and_then(Value::as_array) {
+        let mut parsed = Vec::new();
+        for arg in args {
+            parsed.push(
+                arg.as_str()
+                    .ok_or_else(|| {
+                        CommandError::validation("commandArgs는 문자열 배열이어야 합니다.")
+                    })?
+                    .to_string(),
+            );
+        }
+        return Ok(parsed);
+    }
+
+    if let Some(template) = preset.get("commandTemplate").and_then(Value::as_str) {
+        return Ok(template.split_whitespace().map(str::to_string).collect());
+    }
+
+    Ok(Vec::new())
+}
+
 fn project_context(state: &State<'_, AppState>, project_id: &str) -> CommandResult<ProjectContext> {
     state
         .projects
@@ -536,6 +764,9 @@ fn main() {
             get_project_snapshot,
             get_effective_settings,
             update_project_settings,
+            list_runner_templates,
+            apply_runner_template,
+            check_role_runner,
             list_epics,
             create_epic,
             list_tasks,

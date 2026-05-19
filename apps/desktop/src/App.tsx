@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { StatusBar } from "./components/StatusBar";
 import { api } from "./lib/api";
+import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
@@ -22,6 +23,7 @@ const navItems = [
 export function App() {
   const [screen, setScreen] = useState<Screen>("tasks");
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
+  const [recents, setRecents] = useState<RecentProject[]>(() => loadRecents());
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -37,10 +39,31 @@ export function App() {
     try {
       const path = await open({ directory: true, multiple: false });
       if (typeof path !== "string") return;
-      const next = await api.openProject(path);
-      setSnapshot(next);
-      setSelectedTaskId(next.tasks[0]?.id ?? null);
-      setScreen("tasks");
+      await openProjectPath(path);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openProjectPath(path: string) {
+    const next = await api.openProject(path);
+    setSnapshot(next);
+    const nextRecents = upsertRecent(recents, next.project);
+    setRecents(nextRecents);
+    saveRecents(nextRecents);
+    setSelectedTaskId(next.tasks[0]?.id ?? null);
+    setScreen("tasks");
+  }
+
+  async function switchProject(projectId: string) {
+    const recent = recents.find((project) => project.id === projectId);
+    if (!recent) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await openProjectPath(recent.rootPath);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -70,7 +93,9 @@ export function App() {
       activeScreen={screen}
       onNavigate={setScreen}
       onOpenProject={openProject}
-      projectName={snapshot?.project.name ?? null}
+      recents={recents}
+      activeProjectId={snapshot?.project.id ?? null}
+      onSwitchProject={switchProject}
       busy={busy}
     >
       {snapshot ? <StatusBar snapshot={snapshot} /> : null}
@@ -89,8 +114,12 @@ export function App() {
       {screen === "git" ? (
         <GitScreen snapshot={snapshot} onOpenProject={openProject} />
       ) : null}
-      {screen === "terminal" ? <TerminalScreen snapshot={snapshot} /> : null}
-      {screen === "settings" ? <SettingsScreen snapshot={snapshot} onRefresh={refresh} /> : null}
+      {screen === "terminal" ? (
+        <TerminalScreen snapshot={snapshot} onOpenProject={openProject} />
+      ) : null}
+      {screen === "settings" ? (
+        <SettingsScreen snapshot={snapshot} onRefresh={refresh} onOpenProject={openProject} />
+      ) : null}
     </AppShell>
   );
 }

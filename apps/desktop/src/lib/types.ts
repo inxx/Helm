@@ -33,6 +33,19 @@ export interface EffectiveSettings {
   artifactRetentionDays: number | null;
 }
 
+export interface RunnerTemplateSummary {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface RunnerCheckResult {
+  roleId: string;
+  available: boolean;
+  command: string[];
+  message: string;
+}
+
 export interface EpicSummary {
   id: string;
   projectId: string;
