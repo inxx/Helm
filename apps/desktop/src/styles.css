@@ -1926,7 +1926,7 @@ textarea {
 
 .terminal-screen {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 0;
   min-height: 0;
   background: var(--term-bg);
@@ -1959,6 +1959,80 @@ textarea {
 .terminal-header p {
   color: var(--term-muted);
   font-size: 12px;
+}
+
+.terminal-add-pane {
+  height: 28px;
+  border: 1px solid var(--term-accent);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--term-accent);
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.terminal-add-pane:hover:not(:disabled) {
+  background: rgb(120 255 190 / 8%);
+}
+
+.terminal-pane-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr));
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+
+.terminal-pane-grid.split-scroll {
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(520px, calc((100% - 12px) / 2));
+  grid-template-columns: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.terminal-pane {
+  display: grid;
+  grid-template-rows: auto auto minmax(260px, 1fr);
+  min-width: 0;
+  min-height: 420px;
+  overflow: hidden;
+  border: 1px solid var(--term-line);
+  border-radius: var(--radius);
+  background: var(--term-bg);
+}
+
+.terminal-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--term-line);
+  background: var(--term-surface);
+  padding: 8px 10px;
+}
+
+.terminal-pane-header strong {
+  color: var(--term-text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.terminal-pane-header button {
+  height: 24px;
+  border: 1px solid var(--term-line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--term-muted);
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.terminal-pane-header button:hover:not(:disabled) {
+  color: var(--term-text);
+  border-color: var(--term-muted);
 }
 
 .terminal-controls {
@@ -2050,6 +2124,7 @@ textarea {
   font-family: var(--mono);
   font-size: 12.5px;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .terminal-output header span {

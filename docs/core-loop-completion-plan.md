@@ -42,16 +42,39 @@ Task 생성
 - run artifact viewer
 - 기본 터미널 명령 실행기
 
-부족한 점:
+기능적으로 미비한 점:
 
-- role preset 기본값이 없어 실제 Codex/Claude 실행까지 바로 이어지지 않는다.
-- UI가 상태 기반 안내가 아니라 버튼 모음에 가깝다.
-- reviewer/tester chain은 상태 이름만 있고 검증 계약이 약하다.
-- `RunApproval`, `ManualStatusChange`, merge approval 흐름이 실사용 흐름으로 연결되지 않았다.
-- 실제 Git diff와 structured result를 비교해 판정하는 gate가 없다.
-- merge/commit/PR 준비 단계가 없다.
-- 문서상 Phase 3a 완료 표시와 README의 현재 상태가 일부 어긋난다.
-- 테스트가 migration/path/schema 수준이라 핵심 사용자 플로우를 보호하지 못한다.
+- Task 생성 전 단계가 약하다. 사용자가 자연어 목표나 Jira 링크를 넣고 plan draft를 만든 뒤 Epic/Task로 확정하는 Planning Workspace가 아직 제품 경로로 닫히지 않았다.
+- 새 프로젝트의 기본 설정만으로 실제 runner 실행까지 이어지지 않는다. fixture/Codex/Claude template은 있지만 기본 role preset은 실행 command가 비어 있어 사용자가 먼저 template을 이해하고 적용해야 한다.
+- Task Detail이 상태 기반 primary action을 일부 제공하지만, 모든 Context Pack/Stub role 버튼이 함께 노출되어 사용자가 현재 가능한 작업과 디버그용 작업을 구분해야 한다.
+- Stub role과 Host role이 병렬로 노출된다. 데모/검증용 stub과 실제 host runner의 제품 의미가 UI에서 분리되지 않아 완성 제품처럼 느껴지지 않는다.
+- Context Pack은 공통 형식만 제공한다. planner/coder/verifier/reviewer/tester별 입력 계약, 성공 조건, 금지 사항, 기대 artifact가 충분히 분리되지 않았다.
+- reviewer/tester chain은 상태 이름은 있지만 검증 계약이 약하다. 리뷰 finding, 테스트 결과, gate 판정이 별도 DB 모델로 남지 않는다.
+- 실제 Git diff와 structured result를 비교해 판정하는 gate가 없다. agent가 pass를 보고하면 실제 변경 파일과 보고 파일이 어긋나도 자동 전이가 가능하다.
+- 실패/차단 흐름이 얇다. `needs_changes`, review fail, test fail, schema mismatch, command fail 이후 사용자가 무엇을 수정하고 어떤 role을 retry해야 하는지 task detail에서 안내하지 못한다.
+- MergeWaiting 이후가 비어 있다. merge readiness, base/head 비교, diff 요약, blocker, merge command preview, merge approval이 없다.
+- Git 화면은 project-level read-only viewer에 머문다. task worktree branch/path/diff와 Git 화면이 연결되지 않는다.
+- Terminal은 분할 pane 기반 단일 명령 실행까지 가능하다. 아직 interactive PTY, task workflow와 연결된 test/check 실행, 결과 저장, audit 연결은 없다.
+- Audit log는 쌓이지만 사용자 의사결정 화면으로 정리되지 않는다. approval, run, gate, status transition을 한 태스크 타임라인으로 읽기 어렵다.
+- 테스트가 migration/path/schema 수준이라 핵심 사용자 플로우를 보호하지 못한다. fixture runner 기반 end-to-end core loop 테스트가 없다.
+- README와 Phase 문서가 현재 구현 범위와 남은 기능을 같은 기준으로 설명하지 못한다.
+
+## 기능 갭 인벤토리
+
+| 영역 | 현재 상태 | 미비점 | 우선순위 |
+| --- | --- | --- | --- |
+| 시작/계획 | Task 수동 생성, external ref 저장 | Planning Workspace와 draft approval 없음 | P1 |
+| Runner onboarding | template command와 health check 있음 | 새 프로젝트 기본값만으로 실행 불가 | P0 |
+| Task Detail | next action 기본 안내 있음 | 제품 액션과 디버그 버튼이 섞임 | P0 |
+| Role 실행 | stub run, host run 모두 가능 | stub/host 의미 분리와 실행 모드 선택 부족 | P0 |
+| Context Pack | 공통 context 생성 | role별 contract와 acceptance criteria 부족 | P0 |
+| Gate 판정 | schema/exit code/pass 기반 | diff consistency, review/test gate 없음 | P0 |
+| 실패 처리 | retry/cancel 일부 있음 | 실패 이유별 next action과 Blocked 전이 약함 | P0 |
+| Merge readiness | 상태값만 있음 | readiness command/UI/approval/preview 없음 | P1 |
+| Git 연계 | project git viewer 있음 | task worktree diff와 연결 부족 | P1 |
+| Terminal | 분할 pane 단일 명령 실행 | interactive PTY, tester/check artifact, audit 연결 없음 | P1 |
+| Audit/Timeline | audit row 저장 | 태스크 타임라인 UI 없음 | P1 |
+| 자동 검증 | 단위 테스트 일부 | fixture core loop 테스트 없음 | P0 |
 
 ## 성공 기준
 
@@ -74,41 +97,41 @@ Task 생성
 
 이 시나리오는 실제 Codex/Claude가 없어도 fixture runner로 검증 가능해야 하고, 로컬에 Codex/Claude가 있으면 실제 runner로도 검증 가능해야 한다.
 
-## 구현 단계
+## 업데이트된 구현 단계
 
-### Step 1. 문서와 현재 상태 정렬
+### Step 0. 기능 범위 잠금과 문서 정렬
 
 목표:
 
-- README와 Phase 문서가 현재 구현 범위와 남은 범위를 정확히 설명하게 한다.
+- README와 Phase 문서가 현재 구현 범위와 남은 기능 범위를 정확히 설명하게 한다.
 - `generic shell execute 금지`와 기본 터미널 실행기 추가 사이의 정책 충돌을 정리한다.
+- stub runner, fixture runner, host runner의 제품상 의미를 분리한다.
 
 작업:
 
 - README의 현재 상태를 Phase 3a 기준으로 갱신한다.
 - 기본 터미널 실행기는 "개발자 명시 실행 도구"로 분류하고, agent runner와 권한 모델을 분리해 문서화한다.
-- `docs/phase-3a-implementation-plan.md`의 "구현 완료" 항목 중 검증이 부족한 항목은 "기본 구현 완료, 검증 보강 필요"로 조정한다.
+- `docs/phase-3a-implementation-plan.md`의 "구현 완료" 항목 중 검증이 부족한 항목은 "기본 구현 완료, 제품화 필요"로 조정한다.
 - 다음 구현 기준 문서를 이 문서로 연결한다.
 
 완료 기준:
 
 - 문서만 보고도 현재 구현, 미구현, 다음 작업 우선순위가 구분된다.
 
-### Step 2. 기본 role preset과 runner onboarding
+### Step 1. Runner onboarding 완성
 
 목표:
 
 - 사용자가 JSON을 직접 작성하지 않아도 host runner를 시작할 수 있게 한다.
+- 새 프로젝트를 연 뒤 fixture runner로 core loop를 바로 검증할 수 있게 한다.
 
 작업:
 
-- `rolePresets` 기본값에 `commandArgs` 예시를 추가한다.
-- provider별 preset template을 제공한다.
-  - Codex CLI
-  - Claude CLI
-  - shell fixture runner
-- Settings UI를 raw JSON textarea 중심에서 preset 선택 + advanced JSON 편집 구조로 바꾼다.
-- runner health check command를 추가한다.
+- `rolePresets` 기본값을 빈 provider 목록으로 두되, 첫 실행 전 Settings에서 template 적용을 명시적으로 안내한다.
+- fixture runner template을 가장 앞에 두고 "로컬 검증용"으로 라벨링한다.
+- Codex/Claude template은 "실제 host 실행"으로 분류하고 인증/설치 실패 메시지를 분리한다.
+- Task Detail에서 role 실행이 막힐 때 "runner template 미적용"을 정확히 표시한다.
+- `check_role_runner` 결과를 Task Detail의 실행 전 조건에도 노출한다.
 
 추가 command 후보:
 
@@ -122,12 +145,14 @@ apply_runner_template(project_id, template_id)
 
 - 새 프로젝트에서 fixture runner template을 적용하고 Planner/Coder 실행을 끝까지 돌릴 수 있다.
 - Codex/Claude가 설치된 환경에서는 health check가 성공/실패 이유를 명확히 보여준다.
+- runner가 없으면 host 실행 버튼이 막히고, Settings로 이동할 수 있다.
 
-### Step 3. 상태 기반 Task Detail 재구성
+### Step 2. Task Detail을 제품 경로 중심으로 재구성
 
 목표:
 
 - 사용자가 다음에 무엇을 해야 하는지 상태별로 알 수 있게 한다.
+- 제품 실행 경로와 디버그/개발자 도구를 분리한다.
 
 작업:
 
@@ -137,14 +162,19 @@ apply_runner_template(project_id, template_id)
 - PlanApproval Pending이면 approval inbox뿐 아니라 task detail 상단에도 표시한다.
 - run history를 role lane 형태로 묶는다.
 - artifact viewer는 `summary`, `result`, `diff`, `logs`, `context` 탭으로 정리한다.
+- Stub role 실행은 기본 화면에서 숨기고 "개발/fixture 도구" 영역으로 이동한다.
+- Context Pack 생성과 host 실행을 하나의 primary flow로 묶는다.
+- `Queued` run이 있으면 새 context 생성 대신 기존 run 실행/취소/삭제 선택지를 보여준다.
+- `Blocked`, `NeedsInspection`, `Failed`, `TimedOut`, `Canceled` 상태별 복구 액션을 분리한다.
 
 완료 기준:
 
 - Planned task에서는 Planner 실행만 primary action으로 보인다.
 - PlanApproval 승인 전 Coder 실행은 UI와 backend 양쪽에서 막힌다.
 - MergeWaiting에서는 diff와 gate 결과가 먼저 보인다.
+- 사용자는 전체 role 버튼 목록을 보지 않고도 다음 작업을 진행할 수 있다.
 
-### Step 4. GateResult 모델 도입
+### Step 3. GateResult 모델과 diff consistency 도입
 
 목표:
 
@@ -192,13 +222,16 @@ NeedsInspection
 - host runner가 계산한 `changed-files.json`, `diff.patch`와 agent가 보고한 `changedFiles`를 비교한다.
 - 불일치하면 `NeedsInspection`으로 멈춘다.
 - gate result를 Task Detail에 표시한다.
+- `exit_code`, schema validation, result status, diff consistency를 별도 gate로 남긴다.
+- gate 실패 시 task 상태를 자동 전이하지 않고 run status와 task blocker를 분리해 표시한다.
 
 완료 기준:
 
 - agent가 `changedFiles`를 비워두고 실제 diff가 있으면 Helm이 표시한다.
 - schema는 pass지만 diff consistency가 깨지면 자동 진행하지 않는다.
+- 모든 자동 상태 전이는 gate pass 기록을 근거로 설명된다.
 
-### Step 5. Reviewer/Tester chain 완성
+### Step 4. Reviewer/Tester chain 완성
 
 목표:
 
@@ -211,6 +244,9 @@ NeedsInspection
 - Tester는 role preset 외에 project check command를 우선 지원한다.
 - 테스트 실행 결과를 `test-result.json` artifact로 남긴다.
 - reviewer/tester 실패 시 task를 `Blocked`로 보내고 retry path를 안내한다.
+- Code Reviewer는 finding severity와 merge blocker 여부를 구조화해 남긴다.
+- Plan Verifier는 승인된 plan artifact 또는 planner summary와 실제 diff를 비교한다.
+- Tester는 configured check command, stdout/stderr, exit code를 run artifact와 gate result로 연결한다.
 
 추가 artifact 후보:
 
@@ -224,8 +260,9 @@ gate-result.json
 
 - Coder 성공 후 바로 MergeWaiting으로 가지 않고 PlanVerification -> CodeReview -> Testing을 거친다.
 - Tester pass에서만 MergeWaiting으로 전이된다.
+- review/test fail은 왜 막혔는지와 어떤 role을 다시 실행해야 하는지 표시한다.
 
-### Step 6. Merge readiness와 사용자 승인
+### Step 5. Merge readiness와 사용자 승인
 
 목표:
 
@@ -243,6 +280,8 @@ gate-result.json
   - gate results
   - audit tail
 - 아직 자동 merge는 하지 않고, merge command preview부터 구현한다.
+- merge blocker 목록을 gate result와 run status에서 계산한다.
+- task worktree diff를 Git 화면과 연결한다.
 
 추가 command 후보:
 
@@ -256,7 +295,7 @@ preview_merge_commands(project_id, task_id)
 - 사용자가 MergeWaiting task를 열면 "왜 머지 가능한지"와 "무엇이 아직 막는지"를 확인할 수 있다.
 - 실제 merge/push 없이도 다음 Git 명령이 명확히 제시된다.
 
-### Step 7. 검증 보강
+### Step 6. Core loop 자동 검증
 
 목표:
 
@@ -274,6 +313,7 @@ preview_merge_commands(project_id, task_id)
   - retry/cancel 상태
 - frontend typecheck 외에 주요 컴포넌트 단위 테스트 또는 Playwright smoke test를 추가한다.
 - fixture runner script를 만든다.
+- acceptance test는 fixture runner로 실제 artifact와 diff를 생성한다.
 
 fixture runner 요구:
 
@@ -289,17 +329,36 @@ fixture runner 요구:
 - `cargo test`
 - fixture 기반 core loop smoke test
 
+### Step 7. Planning Workspace 제품화
+
+목표:
+
+- Jira ticket이 없어도 Helm 안에서 목표를 계획 초안으로 만들고 Task로 materialize할 수 있게 한다.
+
+작업:
+
+- `Planning` 탭의 입력/초안/승인 흐름을 DB 모델과 연결한다.
+- planning session, plan draft, draft approval skeleton을 추가한다.
+- 승인된 draft를 Epic/Task/External Ref로 변환한다.
+- 기존 Jira key/URL 시작 흐름과 새 목표 시작 흐름을 같은 Task pipeline으로 합친다.
+
+완료 기준:
+
+- 사용자가 자연어 목표만 입력해도 Task가 생성되고 Planner 실행으로 이어진다.
+- Jira 링크가 있으면 external ref로 연결되지만 Jira 없이도 기능이 줄어들지 않는다.
+
 ## 우선순위
 
 바로 다음 작업 순서는 아래가 가장 낫다.
 
-1. Step 2: fixture runner와 기본 preset
-2. Step 3: 상태 기반 Task Detail
-3. Step 7 일부: fixture core loop 테스트
-4. Step 4: GateResult 모델
-5. Step 5: Reviewer/Tester chain
-6. Step 6: Merge readiness
-7. Step 1: 문서 정렬은 각 단계 완료 시 같이 반영
+1. Step 0: 기능 범위 잠금과 문서 정렬
+2. Step 1: Runner onboarding 완성
+3. Step 2: Task Detail 제품 경로 재구성
+4. Step 6 일부: fixture core loop acceptance test
+5. Step 3: GateResult와 diff consistency
+6. Step 4: Reviewer/Tester chain
+7. Step 5: Merge readiness
+8. Step 7: Planning Workspace
 
 이 순서가 좋은 이유는 현재 가장 큰 병목이 "기능이 없어서"가 아니라 "실제 태스크 하나를 자연스럽게 끝까지 돌릴 실행 경로가 없어서"이기 때문이다.
 
