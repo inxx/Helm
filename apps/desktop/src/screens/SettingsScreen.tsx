@@ -164,10 +164,12 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   function removeConnection(id: string) {
     setAiConnections((current) => current.filter((connection) => connection.id !== id));
     setRoleAssignments((current) =>
-      current.map((assignment) => ({
-        ...assignment,
-        connectionIds: assignment.connectionIds.filter((connectionId) => connectionId !== id),
-      })),
+      normalizeRoleAssignments(current).map((assignment) =>
+        withLegacyConnectionIds({
+          ...assignment,
+          selections: assignment.selections.filter((selection) => selection.connectionId !== id),
+        }),
+      ),
     );
   }
 
@@ -176,12 +178,32 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
       normalizeRoleAssignments(current).map((assignment) => {
         if (assignment.roleId !== roleId) return assignment;
         if (assignment.selectionMode === "single") {
-          return { ...assignment, connectionIds: checked ? [connectionId] : [] };
+          return withLegacyConnectionIds({
+            ...assignment,
+            selections: checked
+              ? [roleSelection(connectionId, modelForConnection(connectionId, aiConnections))]
+              : [],
+          });
         }
         const next = checked
-          ? Array.from(new Set([...assignment.connectionIds, connectionId]))
-          : assignment.connectionIds.filter((id) => id !== connectionId);
-        return { ...assignment, connectionIds: next };
+          ? upsertSelection(
+              assignment.selections,
+              roleSelection(connectionId, modelForConnection(connectionId, aiConnections)),
+            )
+          : assignment.selections.filter((selection) => selection.connectionId !== connectionId);
+        return withLegacyConnectionIds({ ...assignment, selections: next });
+      }),
+    );
+  }
+
+  function setRoleModel(roleId: RoleAssignment["roleId"], connectionId: string, model: string) {
+    setRoleAssignments((current) =>
+      normalizeRoleAssignments(current).map((assignment) => {
+        if (assignment.roleId !== roleId) return assignment;
+        return withLegacyConnectionIds({
+          ...assignment,
+          selections: upsertSelection(assignment.selections, roleSelection(connectionId, model.trim() || null)),
+        });
       }),
     );
   }
@@ -349,6 +371,30 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                               />
                             </label>
                             <label>
+                              <span>기본 모델</span>
+                              <input
+                                placeholder={defaultModelPlaceholder(connection.provider)}
+                                value={connection.defaultModel ?? ""}
+                                onChange={(event) =>
+                                  updateConnection(connection.id, {
+                                    defaultModel: event.target.value.trim() ? event.target.value.trim() : null,
+                                  })
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>모델 목록</span>
+                              <input
+                                placeholder="쉼표로 구분"
+                                value={(connection.availableModels ?? []).join(", ")}
+                                onChange={(event) =>
+                                  updateConnection(connection.id, {
+                                    availableModels: splitModelList(event.target.value),
+                                  })
+                                }
+                              />
+                            </label>
+                            <label>
                               <span>Timeout (s)</span>
                               <input
                                 min={1}
@@ -408,7 +454,8 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                       const assignment = normalizeRoleAssignments(roleAssignments).find(
                         (item) => item.roleId === role.roleId,
                       );
-                      const selected = assignment?.connectionIds ?? [];
+                      const selections = assignment?.selections ?? [];
+                      const selected = selections.map((selection) => selection.connectionId);
                       return (
                         <article className="role-assignment-row" key={role.roleId}>
                           <div>
@@ -421,19 +468,42 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                             </span>
                           </div>
                           <div className="role-connection-options">
-                            {enabledConnections.map((connection) => (
-                              <label className="inline-check" key={connection.id}>
-                                <input
-                                  checked={selected.includes(connection.id)}
-                                  name={`role-${role.roleId}`}
-                                  onChange={(event) =>
-                                    setRoleConnection(role.roleId, connection.id, event.target.checked)
-                                  }
-                                  type={role.selectionMode === "single" ? "radio" : "checkbox"}
-                                />
-                                <span>{connection.label}</span>
-                              </label>
-                            ))}
+                            {enabledConnections.map((connection) => {
+                              const roleModel =
+                                selections.find((selection) => selection.connectionId === connection.id)?.model ??
+                                connection.defaultModel ??
+                                "";
+                              const isSelected = selected.includes(connection.id);
+                              return (
+                                <div className="role-runner-option" key={connection.id}>
+                                  <label className="inline-check">
+                                    <input
+                                      checked={isSelected}
+                                      name={`role-${role.roleId}`}
+                                      onChange={(event) =>
+                                        setRoleConnection(role.roleId, connection.id, event.target.checked)
+                                      }
+                                      type={role.selectionMode === "single" ? "radio" : "checkbox"}
+                                    />
+                                    <span>{connection.label}</span>
+                                  </label>
+                                  {isSelected ? (
+                                    <select
+                                      aria-label={`${role.label} ${connection.label} 모델`}
+                                      value={roleModel}
+                                      onChange={(event) => setRoleModel(role.roleId, connection.id, event.target.value)}
+                                    >
+                                      <option value="">CLI 기본 모델</option>
+                                      {modelOptions(connection, roleModel).map((model) => (
+                                        <option key={model} value={model}>
+                                          {model}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  ) : null}
+                                </div>
+                              );
+                            })}
                           </div>
                         </article>
                       );
@@ -520,6 +590,9 @@ function normalizeAiConnections(value: unknown): AiConnection[] {
       healthCheckArgs: Array.isArray(item.healthCheckArgs) ? item.healthCheckArgs.filter(isString) : undefined,
       timeoutSeconds: typeof item.timeoutSeconds === "number" ? item.timeoutSeconds : 1800,
       enabled: typeof item.enabled === "boolean" ? item.enabled : true,
+      defaultModel: typeof item.defaultModel === "string" ? item.defaultModel : null,
+      availableModels: Array.isArray(item.availableModels) ? item.availableModels.filter(isString) : [],
+      defaultEffort: typeof item.defaultEffort === "string" ? item.defaultEffort : null,
     }));
 }
 
@@ -529,13 +602,69 @@ function normalizeRoleAssignments(value: unknown): RoleAssignment[] {
     const match = incoming.find(
       (item) => typeof item === "object" && item !== null && (item as { roleId?: unknown }).roleId === role.roleId,
     ) as Partial<RoleAssignment> | undefined;
+    const selections = normalizeSelections(match);
     return {
       roleId: role.roleId,
       selectionMode: role.selectionMode,
-      connectionIds: Array.isArray(match?.connectionIds) ? match.connectionIds.filter(isString) : [],
+      selections,
+      connectionIds: selections.map((selection) => selection.connectionId),
       aggregationPolicy: role.selectionMode === "multiple" ? "all_pass" : null,
     };
   });
+}
+
+function normalizeSelections(assignment: Partial<RoleAssignment> | undefined) {
+  if (Array.isArray(assignment?.selections)) {
+    return assignment.selections
+      .filter((item) => typeof item === "object" && item !== null && typeof item.connectionId === "string")
+      .map((item) => ({
+        connectionId: item.connectionId,
+        model: typeof item.model === "string" ? item.model : null,
+        effort: typeof item.effort === "string" ? item.effort : null,
+      }));
+  }
+  if (!Array.isArray(assignment?.connectionIds)) return [];
+  return assignment.connectionIds.filter(isString).map((connectionId) => ({
+    connectionId,
+    model: null,
+    effort: null,
+  }));
+}
+
+function withLegacyConnectionIds(assignment: RoleAssignment): RoleAssignment {
+  return {
+    ...assignment,
+    connectionIds: assignment.selections.map((selection) => selection.connectionId),
+  };
+}
+
+function roleSelection(connectionId: string, model?: string | null) {
+  return { connectionId, model: model ?? null, effort: null };
+}
+
+function upsertSelection<T extends { connectionId: string }>(items: T[], next: T): T[] {
+  const without = items.filter((item) => item.connectionId !== next.connectionId);
+  return [...without, next];
+}
+
+function modelForConnection(connectionId: string, connections: AiConnection[]): string | null {
+  return connections.find((connection) => connection.id === connectionId)?.defaultModel ?? null;
+}
+
+function splitModelList(raw: string): string[] {
+  return Array.from(new Set(raw.split(",").map((item) => item.trim()).filter(Boolean)));
+}
+
+function defaultModelPlaceholder(provider: string): string {
+  if (provider === "codex") return "예: gpt-5.2";
+  if (provider === "claude") return "예: sonnet";
+  return "선택 사항";
+}
+
+function modelOptions(connection: AiConnection, selectedModel: string): string[] {
+  return Array.from(
+    new Set([...(connection.availableModels ?? []), connection.defaultModel ?? "", selectedModel].filter(Boolean)),
+  );
 }
 
 function codexConnection(): AiConnection {
@@ -555,6 +684,8 @@ function codexConnection(): AiConnection {
     healthCheckArgs: ["codex", "--version"],
     timeoutSeconds: 1800,
     enabled: true,
+    defaultModel: "gpt-5.2",
+    availableModels: ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"],
   };
 }
 
@@ -571,6 +702,8 @@ function claudeConnection(): AiConnection {
     healthCheckArgs: ["claude", "--version"],
     timeoutSeconds: 1800,
     enabled: true,
+    defaultModel: "sonnet",
+    availableModels: ["sonnet", "opus"],
   };
 }
 

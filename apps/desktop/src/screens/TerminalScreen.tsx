@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type { ProjectSnapshot, TerminalCommandResult } from "../lib/types";
 
@@ -34,16 +34,29 @@ function createPane(command = "pwd"): TerminalPaneState {
 
 export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps) {
   const [panes, setPanes] = useState<TerminalPaneState[]>(() => [createPane()]);
+  const [activePaneId, setActivePaneId] = useState<string | null>(null);
+  const paneRefs = useRef(new Map<string, HTMLElement>());
 
   const taskOptions = useMemo(() => snapshot?.tasks ?? [], [snapshot]);
   const usesSplitScroll = panes.length >= 5;
-  const panePages = useMemo(() => {
-    const pages: TerminalPaneState[][] = [];
-    for (let index = 0; index < panes.length; index += 2) {
-      pages.push(panes.slice(index, index + 2));
+  const selectedPaneId = activePaneId ?? panes[0]?.id ?? null;
+
+  useEffect(() => {
+    if (!selectedPaneId) return;
+    paneRefs.current.get(selectedPaneId)?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "start",
+    });
+  }, [selectedPaneId, panes.length]);
+
+  function setPaneRef(id: string, node: HTMLElement | null) {
+    if (node) {
+      paneRefs.current.set(id, node);
+    } else {
+      paneRefs.current.delete(id);
     }
-    return pages;
-  }, [panes]);
+  }
 
   if (!snapshot) {
     return (
@@ -64,11 +77,25 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
   }
 
   function addPane() {
-    setPanes((current) => [...current, createPane(current.at(-1)?.command ?? "pwd")]);
+    const nextPane = createPane(panes.at(-1)?.command ?? "pwd");
+    setPanes((current) => [...current, nextPane]);
+    setActivePaneId(nextPane.id);
   }
 
   function removePane(id: string) {
-    setPanes((current) => current.filter((pane) => pane.id !== id || pane.running));
+    const targetIndex = panes.findIndex((pane) => pane.id === id);
+    const targetPane = panes[targetIndex];
+    if (!targetPane || targetPane.running) return;
+
+    const nextPanes = panes.filter((pane) => pane.id !== id);
+    setPanes(nextPanes);
+    if (selectedPaneId === id) {
+      setActivePaneId(nextPanes[Math.min(targetIndex, nextPanes.length - 1)]?.id ?? null);
+    }
+  }
+
+  function selectPane(id: string) {
+    setActivePaneId(id);
   }
 
   async function runCommand(pane: TerminalPaneState) {
@@ -97,7 +124,12 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
     const worktreeTaskMissing = pane.cwdMode === "worktree" && !pane.taskId;
     const commandMissing = !pane.command.trim();
     return (
-      <article className="terminal-pane" key={pane.id}>
+      <article
+        className={selectedPaneId === pane.id ? "terminal-pane active" : "terminal-pane"}
+        key={pane.id}
+        ref={(node) => setPaneRef(pane.id, node)}
+        onFocusCapture={() => selectPane(pane.id)}
+      >
         <header className="terminal-pane-header">
           <strong>pane {index + 1}</strong>
           <button
@@ -206,6 +238,23 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
         </button>
       </header>
 
+      {panes.length > 0 ? (
+        <nav className="terminal-tab-strip" aria-label="열린 터미널">
+          {panes.map((pane, index) => (
+            <button
+              className={selectedPaneId === pane.id ? "active" : ""}
+              key={pane.id}
+              onClick={() => selectPane(pane.id)}
+              type="button"
+            >
+              <span className={pane.running ? "running" : ""} aria-hidden="true" />
+              <strong>pane {index + 1}</strong>
+              <small>{pane.cwdMode === "worktree" ? "worktree" : "root"}</small>
+            </button>
+          ))}
+        </nav>
+      ) : null}
+
       <div
         className={
           panes.length === 0
@@ -223,13 +272,9 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
               터미널 추가
             </button>
           </div>
-        ) : usesSplitScroll
-          ? panePages.map((page, pageIndex) => (
-              <div className="terminal-pane-page" key={page.map((pane) => pane.id).join(":")}>
-                {page.map((pane, paneIndex) => renderPane(pane, pageIndex * 2 + paneIndex))}
-              </div>
-            ))
-          : panes.map((pane, index) => renderPane(pane, index))}
+        ) : (
+          panes.map((pane, index) => renderPane(pane, index))
+        )}
       </div>
     </section>
   );

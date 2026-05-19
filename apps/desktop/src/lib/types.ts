@@ -58,11 +58,22 @@ export interface AiConnection {
   healthCheckArgs?: string[];
   timeoutSeconds: number;
   enabled: boolean;
+  defaultModel?: string | null;
+  availableModels?: string[];
+  defaultEffort?: string | null;
+}
+
+export interface RoleRunnerSelection {
+  connectionId: string;
+  model?: string | null;
+  effort?: string | null;
 }
 
 export interface RoleAssignment {
   roleId: "planner" | "coder" | "plan_verifier" | "code_reviewer" | "tester";
   selectionMode: "single" | "multiple";
+  selections: RoleRunnerSelection[];
+  /** Legacy shape retained for older persisted project settings. */
   connectionIds: string[];
   aggregationPolicy?: "all_pass" | "any_pass" | "manual_decision" | null;
 }

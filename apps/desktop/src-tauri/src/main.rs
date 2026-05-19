@@ -813,7 +813,9 @@ fn fixture_ai_connections() -> Value {
             "commandArgs": ["node", script, "--mode", "pass"],
             "healthCheckArgs": ["node", script],
             "timeoutSeconds": 60,
-            "enabled": true
+            "enabled": true,
+            "defaultModel": null,
+            "availableModels": []
         }
     ])
 }
@@ -860,7 +862,9 @@ fn codex_ai_connections() -> Value {
             ],
             "healthCheckArgs": ["codex", "--version"],
             "timeoutSeconds": 1800,
-            "enabled": true
+            "enabled": true,
+            "defaultModel": "gpt-5.2",
+            "availableModels": ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"]
         }
     ])
 }
@@ -899,7 +903,10 @@ fn claude_ai_connections() -> Value {
             ],
             "healthCheckArgs": ["claude", "--version"],
             "timeoutSeconds": 1800,
-            "enabled": true
+            "enabled": true,
+            "defaultModel": "sonnet",
+            "availableModels": ["sonnet", "opus"],
+            "defaultEffort": null
         }
     ])
 }
@@ -917,6 +924,7 @@ fn assignments_for_connection(connection_id: &str) -> Value {
                 "roleId": role_id,
                 "selectionMode": if multiple { "multiple" } else { "single" },
                 "connectionIds": [connection_id],
+                "selections": [{ "connectionId": connection_id, "model": null, "effort": null }],
                 "aggregationPolicy": if multiple { Value::String("all_pass".to_string()) } else { Value::Null }
             })
         })

@@ -918,12 +918,10 @@ pub fn run_host_role(
         CommandError::validation("host run 실행 전에 태스크 worktree를 먼저 준비해주세요.")
     })?;
     let settings = effective_settings(conn, project_id)?;
-    let command_args = role_command_args(
-        &settings.role_presets,
-        &run.role_id,
-        &host_runner_placeholders(root, &worktree, &run),
-    )?;
-    let timeout_seconds = role_timeout_seconds(&settings.role_presets, &run.role_id);
+    let placeholders = host_runner_placeholders(root, &worktree, &run);
+    let runner_command = resolve_host_runner_command(&settings, &run.role_id, &placeholders)?;
+    let command_args = runner_command.args;
+    let timeout_seconds = runner_command.timeout_seconds;
     if command_args.is_empty() {
         return Err(CommandError::validation(
             "role preset에 실행 command가 설정되어 있지 않습니다.",
@@ -946,7 +944,10 @@ pub fn run_host_role(
             "runId": run_id,
             "taskId": run.task_id,
             "roleId": run.role_id,
-            "runner": "HelmHostRunner"
+            "runner": "HelmHostRunner",
+            "provider": runner_command.provider.clone(),
+            "connectionId": runner_command.connection_id.clone(),
+            "model": runner_command.model.clone()
         }),
     )?;
 
@@ -998,7 +999,8 @@ pub fn run_host_role(
             )
             .env("HELM_WORKTREE_PATH", worktree.worktree_path.clone())
             .env("HELM_TASK_ID", run.task_id.clone())
-            .env("HELM_ROLE_ID", run.role_id.clone()),
+            .env("HELM_ROLE_ID", run.role_id.clone())
+            .env("HELM_MODEL", runner_command.model.unwrap_or_default()),
         timeout_seconds,
         cancellation,
     )?;
@@ -1756,6 +1758,191 @@ fn host_runner_placeholders(
     ])
 }
 
+struct ResolvedHostRunnerCommand {
+    args: Vec<String>,
+    timeout_seconds: u64,
+    provider: Option<String>,
+    connection_id: Option<String>,
+    model: Option<String>,
+}
+
+fn resolve_host_runner_command(
+    settings: &EffectiveSettings,
+    role_id: &str,
+    placeholders: &HashMap<String, String>,
+) -> CommandResult<ResolvedHostRunnerCommand> {
+    if let Some(command) = role_assignment_command(settings, role_id, placeholders)? {
+        return Ok(command);
+    }
+
+    Ok(ResolvedHostRunnerCommand {
+        args: role_command_args(&settings.role_presets, role_id, placeholders)?,
+        timeout_seconds: role_timeout_seconds(&settings.role_presets, role_id),
+        provider: None,
+        connection_id: None,
+        model: None,
+    })
+}
+
+fn role_assignment_command(
+    settings: &EffectiveSettings,
+    role_id: &str,
+    placeholders: &HashMap<String, String>,
+) -> CommandResult<Option<ResolvedHostRunnerCommand>> {
+    let assignment = settings.role_assignments.as_array().and_then(|items| {
+        items
+            .iter()
+            .find(|item| item.get("roleId").and_then(Value::as_str) == Some(role_id))
+    });
+    let Some(assignment) = assignment else {
+        return Ok(None);
+    };
+
+    let Some(selection) = first_role_selection(assignment) else {
+        return Ok(None);
+    };
+    let connection_id = selection
+        .get("connectionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            CommandError::validation("role selection의 connectionId가 올바르지 않습니다.")
+        })?;
+    let connection = settings
+        .ai_connections
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(connection_id))
+        })
+        .ok_or_else(|| CommandError::validation("역할에 배정된 AI 연결을 찾을 수 없습니다."))?;
+    if connection.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return Err(CommandError::validation(
+            "역할에 배정된 AI 연결이 비활성화되어 있습니다.",
+        ));
+    }
+
+    let args = connection
+        .get("commandArgs")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(|raw| apply_placeholders(raw, placeholders))
+                        .ok_or_else(|| {
+                            CommandError::validation("commandArgs는 문자열 배열이어야 합니다.")
+                        })
+                })
+                .collect::<CommandResult<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let provider = connection
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let model = selection
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            connection
+                .get("defaultModel")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .map(str::to_string);
+    let effort = selection
+        .get("effort")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            connection
+                .get("defaultEffort")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        });
+
+    Ok(Some(ResolvedHostRunnerCommand {
+        args: inject_provider_options(args, provider.as_deref(), model.as_deref(), effort),
+        timeout_seconds: connection
+            .get("timeoutSeconds")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| role_timeout_seconds(&settings.role_presets, role_id))
+            .clamp(1, 21600),
+        provider,
+        connection_id: Some(connection_id.to_string()),
+        model,
+    }))
+}
+
+fn first_role_selection(assignment: &Value) -> Option<Value> {
+    if let Some(selection) = assignment
+        .get("selections")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+    {
+        return Some(selection.clone());
+    }
+    assignment
+        .get("connectionIds")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(Value::as_str)
+        .map(|connection_id| json!({ "connectionId": connection_id }))
+}
+
+fn inject_provider_options(
+    args: Vec<String>,
+    provider: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Vec<String> {
+    let with_model = match (provider, model) {
+        (Some("codex"), Some(model)) if !has_arg(&args, &["-m", "--model"]) => {
+            insert_after_command(args, "exec", ["-m".to_string(), model.to_string()])
+        }
+        (Some("claude"), Some(model)) if !has_arg(&args, &["--model"]) => {
+            insert_after_index(args, 0, ["--model".to_string(), model.to_string()])
+        }
+        _ => args,
+    };
+
+    match (provider, effort) {
+        (Some("claude"), Some(effort)) if !has_arg(&with_model, &["--effort"]) => {
+            insert_after_index(with_model, 0, ["--effort".to_string(), effort.to_string()])
+        }
+        _ => with_model,
+    }
+}
+
+fn has_arg(args: &[String], names: &[&str]) -> bool {
+    args.iter().any(|arg| names.iter().any(|name| arg == name))
+}
+
+fn insert_after_command<const N: usize>(
+    args: Vec<String>,
+    command: &str,
+    insert: [String; N],
+) -> Vec<String> {
+    let index = args.iter().position(|arg| arg == command).unwrap_or(0);
+    insert_after_index(args, index, insert)
+}
+
+fn insert_after_index<const N: usize>(
+    mut args: Vec<String>,
+    index: usize,
+    insert: [String; N],
+) -> Vec<String> {
+    let insert_at = (index + 1).min(args.len());
+    for (offset, value) in insert.into_iter().enumerate() {
+        args.insert(insert_at + offset, value);
+    }
+    args
+}
+
 fn role_command_args(
     role_presets: &Value,
     role_id: &str,
@@ -2223,30 +2410,35 @@ fn default_role_assignments() -> Value {
             "roleId": "planner",
             "selectionMode": "single",
             "connectionIds": [],
+            "selections": [],
             "aggregationPolicy": null
         },
         {
             "roleId": "coder",
             "selectionMode": "single",
             "connectionIds": [],
+            "selections": [],
             "aggregationPolicy": null
         },
         {
             "roleId": "plan_verifier",
             "selectionMode": "multiple",
             "connectionIds": [],
+            "selections": [],
             "aggregationPolicy": "all_pass"
         },
         {
             "roleId": "code_reviewer",
             "selectionMode": "multiple",
             "connectionIds": [],
+            "selections": [],
             "aggregationPolicy": "all_pass"
         },
         {
             "roleId": "tester",
             "selectionMode": "multiple",
             "connectionIds": [],
+            "selections": [],
             "aggregationPolicy": "all_pass"
         }
     ])
@@ -2425,6 +2617,60 @@ mod tests {
         assert!(artifact_dir.join("context-pack.md").exists());
         assert!(artifact_dir.join("context-pack.json").exists());
         assert!(artifact_dir.join("structured-result.schema.json").exists());
+    }
+
+    #[test]
+    fn role_assignment_command_injects_provider_model_flag() {
+        let settings = EffectiveSettings {
+            role_presets: default_role_presets(),
+            ai_connections: json!([
+                {
+                    "id": "codex-local",
+                    "label": "Codex CLI",
+                    "provider": "codex",
+                    "commandArgs": ["codex", "exec", "--cd", "{worktreePath}", "--", "run {roleId}"],
+                    "timeoutSeconds": 120,
+                    "enabled": true,
+                    "defaultModel": "gpt-5.2"
+                }
+            ]),
+            role_assignments: json!([
+                {
+                    "roleId": "coder",
+                    "selectionMode": "single",
+                    "connectionIds": ["codex-local"],
+                    "selections": [{ "connectionId": "codex-local", "model": "gpt-5.4" }],
+                    "aggregationPolicy": null
+                }
+            ]),
+            worktree_root: None,
+            obsidian_vault_path: None,
+            token_budget: None,
+            artifact_retention_days: Some(30),
+        };
+        let placeholders = HashMap::from([
+            ("worktreePath".to_string(), "/tmp/helm-worktree".to_string()),
+            ("roleId".to_string(), "coder".to_string()),
+        ]);
+
+        let command =
+            resolve_host_runner_command(&settings, "coder", &placeholders).expect("command");
+
+        assert_eq!(
+            command.args,
+            vec![
+                "codex",
+                "exec",
+                "-m",
+                "gpt-5.4",
+                "--cd",
+                "/tmp/helm-worktree",
+                "--",
+                "run coder"
+            ]
+        );
+        assert_eq!(command.timeout_seconds, 120);
+        assert_eq!(command.model.as_deref(), Some("gpt-5.4"));
     }
 
     #[test]
