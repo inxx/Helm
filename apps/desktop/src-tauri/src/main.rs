@@ -9,16 +9,61 @@ use crate::models::{
     ProjectSnapshot, ProjectSummary, RunnerCheckResult, RunnerTemplateSummary, TaskSummary,
     TaskWorktreeSummary, TerminalCommandResult,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 use std::time::{Duration, Instant};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
+
+const MAX_RECENT_PROJECTS: usize = 12;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredRecentProject {
+    id: String,
+    name: String,
+    root_path: String,
+    last_opened_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredLaunchState {
+    version: u32,
+    recent_projects: Vec<StoredRecentProject>,
+    active_project_id: Option<String>,
+    active_project_root_path: Option<String>,
+    updated_at: Option<String>,
+}
+
+impl Default for StoredLaunchState {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            recent_projects: Vec::new(),
+            active_project_id: None,
+            active_project_root_path: None,
+            updated_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchState {
+    recent_projects: Vec<StoredRecentProject>,
+    active_project_id: Option<String>,
+    active_project_root_path: Option<String>,
+    snapshot: Option<ProjectSnapshot>,
+    restore_error: Option<CommandError>,
+}
 
 #[derive(Default)]
 struct AppState {
@@ -27,25 +72,54 @@ struct AppState {
 }
 
 #[tauri::command]
-fn open_project(path: String, state: State<'_, AppState>) -> CommandResult<ProjectSnapshot> {
-    let selected_path = PathBuf::from(path);
-    let root = git::resolve_git_root(&selected_path)?;
-    let conn = db::open_project_db(&root)?;
-    let project = db::upsert_project(&conn, &root)?;
-    {
-        let mut projects = state
-            .projects
-            .lock()
-            .map_err(|_| CommandError::new("IoFailed", "프로젝트 상태를 갱신하지 못했습니다."))?;
-        projects.insert(
-            project.id.clone(),
-            ProjectContext {
-                root_path: root.clone(),
-                db_path: root.join(".helm").join("helm.sqlite"),
-            },
-        );
+fn open_project(
+    path: String,
+    reconcile_stale_runs: Option<bool>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> CommandResult<ProjectSnapshot> {
+    let snapshot = open_project_from_path(
+        Path::new(&path),
+        &state,
+        reconcile_stale_runs.unwrap_or(false),
+    )?;
+    remember_project(&app, &snapshot.project)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn get_launch_state(state: State<'_, AppState>, app: AppHandle) -> CommandResult<LaunchState> {
+    let mut stored = load_stored_launch_state(&app)?;
+    let restore_root = stored.active_project_root_path.clone().or_else(|| {
+        stored
+            .recent_projects
+            .first()
+            .map(|project| project.root_path.clone())
+    });
+
+    let mut snapshot = None;
+    let mut restore_error = None;
+
+    if let Some(root_path) = restore_root {
+        match open_project_from_path(Path::new(&root_path), &state, true) {
+            Ok(next) => {
+                remember_project(&app, &next.project)?;
+                stored = load_stored_launch_state(&app)?;
+                snapshot = Some(next);
+            }
+            Err(err) => {
+                restore_error = Some(err);
+            }
+        }
     }
-    project_snapshot(&conn, &root, project)
+
+    Ok(LaunchState {
+        recent_projects: stored.recent_projects,
+        active_project_id: stored.active_project_id,
+        active_project_root_path: stored.active_project_root_path,
+        snapshot,
+        restore_error,
+    })
 }
 
 #[tauri::command]
@@ -585,6 +659,89 @@ fn reject_approval(
     db::decide_approval(&mut conn, &project_id, &approval_id, "Rejected", &reason)
 }
 
+fn open_project_from_path(
+    path: &Path,
+    state: &State<'_, AppState>,
+    reconcile_stale_runs: bool,
+) -> CommandResult<ProjectSnapshot> {
+    let root = git::resolve_git_root(path)?;
+    let conn = db::open_project_db(&root)?;
+    let project = db::upsert_project(&conn, &root)?;
+    if reconcile_stale_runs {
+        db::reconcile_interrupted_runs(&conn, &project.id)?;
+    }
+    register_project_context(state, &project.id, &root)?;
+    project_snapshot(&conn, &root, project)
+}
+
+fn register_project_context(
+    state: &State<'_, AppState>,
+    project_id: &str,
+    root: &Path,
+) -> CommandResult<()> {
+    let mut projects = state
+        .projects
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "프로젝트 상태를 갱신하지 못했습니다."))?;
+    projects.insert(
+        project_id.to_string(),
+        ProjectContext {
+            root_path: root.to_path_buf(),
+            db_path: root.join(".helm").join("helm.sqlite"),
+        },
+    );
+    Ok(())
+}
+
+fn remember_project(app: &AppHandle, project: &ProjectSummary) -> CommandResult<()> {
+    let mut stored = load_stored_launch_state(app)?;
+    stored
+        .recent_projects
+        .retain(|item| item.id != project.id && item.root_path != project.root_path);
+    stored.recent_projects.insert(
+        0,
+        StoredRecentProject {
+            id: project.id.clone(),
+            name: project.name.clone(),
+            root_path: project.root_path.clone(),
+            last_opened_at: chrono::Utc::now().timestamp_millis(),
+        },
+    );
+    stored.recent_projects.truncate(MAX_RECENT_PROJECTS);
+    stored.active_project_id = Some(project.id.clone());
+    stored.active_project_root_path = Some(project.root_path.clone());
+    stored.updated_at = Some(db::now());
+    save_stored_launch_state(app, &stored)
+}
+
+fn load_stored_launch_state(app: &AppHandle) -> CommandResult<StoredLaunchState> {
+    let path = launch_state_path(app)?;
+    if !path.exists() {
+        return Ok(StoredLaunchState::default());
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| CommandError::io("프로젝트 복원 정보를 읽지 못했습니다.", err))?;
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
+}
+
+fn save_stored_launch_state(app: &AppHandle, stored: &StoredLaunchState) -> CommandResult<()> {
+    let path = launch_state_path(app)?;
+    let raw = serde_json::to_string_pretty(stored)
+        .map_err(|err| CommandError::io("프로젝트 복원 정보를 만들지 못했습니다.", err))?;
+    fs::write(path, format!("{raw}\n"))
+        .map_err(|err| CommandError::io("프로젝트 복원 정보를 저장하지 못했습니다.", err))
+}
+
+fn launch_state_path(app: &AppHandle) -> CommandResult<PathBuf> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| CommandError::io("Helm 전역 상태 경로를 찾지 못했습니다.", err))?;
+    fs::create_dir_all(&dir)
+        .map_err(|err| CommandError::io("Helm 전역 상태 폴더를 만들지 못했습니다.", err))?;
+    Ok(dir.join("launch-state.json"))
+}
+
 struct RunnerTemplate {
     id: &'static str,
     label: &'static str,
@@ -937,6 +1094,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            get_launch_state,
             open_project,
             get_project_snapshot,
             get_effective_settings,

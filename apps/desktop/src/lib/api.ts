@@ -9,6 +9,7 @@ import type {
   GitCommitSummary,
   GitFileStatus,
   EffectiveSettings,
+  LaunchState,
   ProjectSettingsPatch,
   ProjectSnapshot,
   RunnerCheckResult,
@@ -19,8 +20,14 @@ import type {
 } from "./types";
 
 export const api = {
-  openProject(path: string) {
-    return invoke<ProjectSnapshot>("open_project", { path });
+  getLaunchState() {
+    return invoke<LaunchState>("get_launch_state");
+  },
+  openProject(path: string, options: { reconcileStaleRuns?: boolean } = {}) {
+    return invoke<ProjectSnapshot>("open_project", {
+      path,
+      reconcileStaleRuns: options.reconcileStaleRuns,
+    });
   },
   getProjectSnapshot(projectId: string) {
     return invoke<ProjectSnapshot>("get_project_snapshot", { projectId });

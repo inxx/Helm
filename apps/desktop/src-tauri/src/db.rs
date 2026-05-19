@@ -1146,6 +1146,38 @@ pub fn get_agent_run(conn: &Connection, run_id: &str) -> CommandResult<AgentRunS
     })
 }
 
+pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> CommandResult<usize> {
+    let timestamp = now();
+    let count = conn
+        .execute(
+            "UPDATE agent_runs
+             SET status = 'NeedsInspection',
+                 finished_at = COALESCE(finished_at, ?1),
+                 updated_at = ?1
+             WHERE project_id = ?2 AND status = 'Running'",
+            params![timestamp, project_id],
+        )
+        .map_err(|err| CommandError::database("중단된 실행 상태를 정리하지 못했습니다.", err))?;
+
+    if count > 0 {
+        insert_audit(
+            conn,
+            project_id,
+            "AgentRun",
+            None,
+            "agent_run.reconciled",
+            json!({
+                "from": "Running",
+                "to": "NeedsInspection",
+                "count": count,
+                "reason": "Helm app restarted before the host run finished"
+            }),
+        )?;
+    }
+
+    Ok(count)
+}
+
 pub fn read_run_artifact(
     conn: &Connection,
     root: &Path,
@@ -2393,5 +2425,38 @@ mod tests {
         assert!(artifact_dir.join("context-pack.md").exists());
         assert!(artifact_dir.join("context-pack.json").exists());
         assert!(artifact_dir.join("structured-result.schema.json").exists());
+    }
+
+    #[test]
+    fn reconcile_interrupted_runs_marks_running_runs_for_inspection() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let timestamp = now();
+        let run_id = new_id();
+
+        conn.execute(
+            "INSERT INTO agent_runs (
+               id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+               stdout_log_path, stderr_log_path, started_at, created_at, updated_at
+             )
+             VALUES (?1, ?2, ?3, 'coder', 'Running', ?4, 'summary.md', 'structured-result.json',
+                     'stdout.log', 'stderr.log', ?5, ?5, ?5)",
+            params![
+                run_id,
+                project.id,
+                task.id,
+                ".helm/artifacts/runs/reconcile-test",
+                timestamp
+            ],
+        )
+        .expect("insert running run");
+
+        let count = reconcile_interrupted_runs(&conn, &project.id).expect("reconcile");
+        assert_eq!(count, 1);
+
+        let run = get_agent_run(&conn, &run_id).expect("run");
+        assert_eq!(run.status, "NeedsInspection");
+        assert!(run.finished_at.is_some());
     }
 }

@@ -25,6 +25,21 @@ export interface ProjectSummary {
   updatedAt: string;
 }
 
+export interface RecentProjectSummary {
+  id: string;
+  name: string;
+  rootPath: string;
+  lastOpenedAt: number;
+}
+
+export interface LaunchState {
+  recentProjects: RecentProjectSummary[];
+  activeProjectId: string | null;
+  activeProjectRootPath: string | null;
+  snapshot: ProjectSnapshot | null;
+  restoreError: CommandError | null;
+}
+
 export interface EffectiveSettings {
   rolePresets: unknown;
   aiConnections: AiConnection[];

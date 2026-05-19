@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { Compass, GitBranch, ListChecks, Settings, SquareTerminal } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { StatusBar } from "./components/StatusBar";
 import { api } from "./lib/api";
@@ -13,6 +13,7 @@ import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
 
 type Screen = "planning" | "tasks" | "git" | "terminal" | "settings";
+type BootStatus = "restoring" | "ready";
 
 const navItems = [
   { id: "planning" as const, label: "계획", icon: Compass },
@@ -29,11 +30,65 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
 
   const selectedTask = useMemo<TaskSummary | null>(() => {
     if (!snapshot || !selectedTaskId) return null;
     return snapshot.tasks.find((task) => task.id === selectedTaskId) ?? null;
   }, [selectedTaskId, snapshot]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function restoreLastProject() {
+      setBusy(true);
+      try {
+        const launch = await api.getLaunchState();
+        if (cancelled) return;
+
+        if (launch.recentProjects.length > 0) {
+          setRecents(launch.recentProjects);
+          saveRecents(launch.recentProjects);
+        }
+
+        if (launch.snapshot) {
+          hydrateSnapshot(launch.snapshot);
+        } else if (launch.restoreError) {
+          setError(launch.restoreError.message);
+        } else if (recents[0]) {
+          const next = await api.openProject(recents[0].rootPath, { reconcileStaleRuns: true });
+          if (cancelled) return;
+          hydrateSnapshot(next);
+          const nextRecents = upsertRecent(recents, next.project, {
+            preserveExistingPosition: true,
+          });
+          setRecents(nextRecents);
+          saveRecents(nextRecents);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(errorMessage(err));
+        }
+      } finally {
+        if (!cancelled) {
+          setBusy(false);
+          setBootStatus("ready");
+        }
+      }
+    }
+
+    void restoreLastProject();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function hydrateSnapshot(next: ProjectSnapshot) {
+    setSnapshot(next);
+    setSelectedTaskId(next.tasks[0]?.id ?? null);
+    setScreen("tasks");
+    setError(null);
+  }
 
   async function openProject() {
     setError(null);
@@ -51,14 +106,12 @@ export function App() {
 
   async function openProjectPath(path: string, options: { preserveRecentPosition?: boolean } = {}) {
     const next = await api.openProject(path);
-    setSnapshot(next);
+    hydrateSnapshot(next);
     const nextRecents = upsertRecent(recents, next.project, {
       preserveExistingPosition: options.preserveRecentPosition,
     });
     setRecents(nextRecents);
     saveRecents(nextRecents);
-    setSelectedTaskId(next.tasks[0]?.id ?? null);
-    setScreen("tasks");
   }
 
   async function switchProject(projectId: string) {
@@ -104,29 +157,38 @@ export function App() {
     >
       {snapshot ? <StatusBar snapshot={snapshot} /> : null}
       {error ? <div className="error-banner">{error}</div> : null}
-      {screen === "planning" ? (
-        <PlanningScreen snapshot={snapshot} onOpenProject={openProject} />
-      ) : null}
-      {screen === "tasks" ? (
-        <TasksScreen
-          snapshot={snapshot}
-          selectedTask={selectedTask}
-          selectedTaskId={selectedTaskId}
-          onSelectTask={setSelectedTaskId}
-          onOpenProject={openProject}
-          onRefresh={refresh}
-          onGoGit={() => setScreen("git")}
-        />
-      ) : null}
-      {screen === "git" ? (
-        <GitScreen snapshot={snapshot} onOpenProject={openProject} />
-      ) : null}
-      {screen === "terminal" ? (
-        <TerminalScreen snapshot={snapshot} onOpenProject={openProject} />
-      ) : null}
-      {screen === "settings" ? (
-        <SettingsScreen snapshot={snapshot} onRefresh={refresh} onOpenProject={openProject} />
-      ) : null}
+      {bootStatus === "restoring" ? (
+        <section className="empty-state">
+          <h2>마지막 프로젝트 여는 중</h2>
+          <p>이전에 열었던 Helm 프로젝트와 실행 상태를 확인하고 있습니다.</p>
+        </section>
+      ) : (
+        <>
+          {screen === "planning" ? (
+            <PlanningScreen snapshot={snapshot} onOpenProject={openProject} />
+          ) : null}
+          {screen === "tasks" ? (
+            <TasksScreen
+              snapshot={snapshot}
+              selectedTask={selectedTask}
+              selectedTaskId={selectedTaskId}
+              onSelectTask={setSelectedTaskId}
+              onOpenProject={openProject}
+              onRefresh={refresh}
+              onGoGit={() => setScreen("git")}
+            />
+          ) : null}
+          {screen === "git" ? (
+            <GitScreen snapshot={snapshot} onOpenProject={openProject} />
+          ) : null}
+          {screen === "terminal" ? (
+            <TerminalScreen snapshot={snapshot} onOpenProject={openProject} />
+          ) : null}
+          {screen === "settings" ? (
+            <SettingsScreen snapshot={snapshot} onRefresh={refresh} onOpenProject={openProject} />
+          ) : null}
+        </>
+      )}
     </AppShell>
   );
 }
