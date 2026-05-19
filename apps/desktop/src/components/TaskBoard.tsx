@@ -115,31 +115,31 @@ export function TaskBoard({ tasks, selectedTaskId, onSelectTask }: TaskBoardProp
               {columnTasks.map((task) => {
                 const externalRef = task.externalRefs[0];
                 return (
-                <button
-                  aria-pressed={task.id === selectedTaskId}
-                  className={task.id === selectedTaskId ? "task-card selected" : "task-card"}
-                  key={task.id}
-                  onClick={() => onSelectTask(task.id)}
-                  type="button"
-                >
-                  <div className="task-card-topline">
-                    <span className={`task-stage-pill ${stage.tone}`}>{stage.label}</span>
-                    <small>{relativeTime(task.lastTransitionAt)}</small>
-                  </div>
-                  <strong className="task-card-title">{task.title}</strong>
-                  {task.description ? <span className="task-card-description">{task.description}</span> : null}
-                  <div className="task-card-flow">
-                    <span>next</span>
-                    <strong>{stage.next}</strong>
-                  </div>
-                  {task.statusReason ? <span className="task-card-reason">{task.statusReason}</span> : null}
-                  {externalRef ? (
-                    <small className="task-card-ref">
-                      {externalRef.refTitle ? `${externalRef.refTitle} · ` : ""}
-                      {externalRef.refValue}
-                    </small>
-                  ) : null}
-                </button>
+                  <button
+                    aria-pressed={task.id === selectedTaskId}
+                    className={task.id === selectedTaskId ? "task-card selected" : "task-card"}
+                    key={task.id}
+                    onClick={() => onSelectTask(task.id)}
+                    type="button"
+                  >
+                    <div className="task-card-topline">
+                      <span className={`task-stage-pill ${stage.tone}`}>{stage.label}</span>
+                      <small>{relativeTime(task.lastTransitionAt)}</small>
+                    </div>
+                    <strong className="task-card-title">{task.title}</strong>
+                    {task.description ? <span className="task-card-description">{task.description}</span> : null}
+                    <div className="task-card-flow">
+                      <span>next</span>
+                      <strong>{stage.next}</strong>
+                    </div>
+                    {task.statusReason ? <span className="task-card-reason">{task.statusReason}</span> : null}
+                    {externalRef ? (
+                      <small className="task-card-ref">
+                        {externalRef.refTitle ? `${externalRef.refTitle} · ` : ""}
+                        {externalRef.refValue}
+                      </small>
+                    ) : null}
+                  </button>
                 );
               })}
             </div>
@@ -151,15 +151,16 @@ export function TaskBoard({ tasks, selectedTaskId, onSelectTask }: TaskBoardProp
 }
 
 function groupTasksByStatus(tasks: TaskSummary[]): Record<TaskStatus, TaskSummary[]> {
-  const grouped = Object.fromEntries(TASK_STATUS_ORDER.map((status) => [status, []])) as Record<
-    TaskStatus,
-    TaskSummary[]
-  >;
+  const grouped = Object.fromEntries(
+    TASK_STATUS_ORDER.map((status) => [status, [] as TaskSummary[]]),
+  ) as Record<TaskStatus, TaskSummary[]>;
   for (const task of tasks) {
     grouped[task.status].push(task);
   }
   for (const status of TASK_STATUS_ORDER) {
-    grouped[status].sort((a, b) => a.sortOrder - b.sortOrder || Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    grouped[status].sort(
+      (a, b) => a.sortOrder - b.sortOrder || Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
+    );
   }
   return grouped;
 }

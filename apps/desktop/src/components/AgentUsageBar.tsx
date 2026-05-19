@@ -5,17 +5,22 @@ interface AgentUsageBarProps {
 }
 
 export function AgentUsageBar({ snapshot }: AgentUsageBarProps) {
-  const enabledConnections = snapshot.settings.aiConnections.filter((connection) => connection.enabled);
-  const totalConnections = snapshot.settings.aiConnections.length;
+  const connections = Array.isArray(snapshot.settings.aiConnections) ? snapshot.settings.aiConnections : [];
+  const assignments = Array.isArray(snapshot.settings.roleAssignments) ? snapshot.settings.roleAssignments : [];
+  const enabledConnections = connections.filter((connection) => connection.enabled);
+  const totalConnections = connections.length;
   const assignedConnectionIds = new Set(
-    snapshot.settings.roleAssignments.flatMap((assignment) =>
-      assignment.selections.map((selection) => selection.connectionId),
+    assignments.flatMap((assignment) =>
+      Array.isArray(assignment.selections)
+        ? assignment.selections.map((selection) => selection.connectionId)
+        : [],
     ),
   );
-  const assignedConnections = snapshot.settings.aiConnections.filter((connection) =>
+  const assignedConnections = connections.filter((connection) =>
     assignedConnectionIds.has(connection.id),
   );
-  const pendingApprovals = snapshot.approvals.filter((approval) => approval.status === "Pending").length;
+  const approvals = Array.isArray(snapshot.approvals) ? snapshot.approvals : [];
+  const pendingApprovals = approvals.filter((approval) => approval.status === "Pending").length;
   const tokenBudget = snapshot.settings.tokenBudget;
   const primaryConnection = assignedConnections[0] ?? enabledConnections[0] ?? null;
 
