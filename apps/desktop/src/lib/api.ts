@@ -114,17 +114,18 @@ export const api = {
   getChangedFiles(projectId: string) {
     return invoke<GitFileStatus[]>("get_changed_files", { projectId });
   },
-  runTerminalCommand(
-    projectId: string,
-    cwdMode: "project" | "worktree",
-    taskId: string | null,
-    command: string,
-  ) {
+  runTerminalCommand(projectId: string, cwd: string, command: string) {
     return invoke<TerminalCommandResult>("run_terminal_command", {
       projectId,
-      cwdMode,
-      taskId,
+      cwd,
       command,
+    });
+  },
+  resolveTerminalCwd(projectId: string, cwd: string, path: string) {
+    return invoke<string>("resolve_terminal_cwd", {
+      projectId,
+      cwd,
+      path,
     });
   },
 };

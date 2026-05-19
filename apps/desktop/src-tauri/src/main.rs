@@ -435,8 +435,7 @@ fn get_changed_files(
 #[tauri::command]
 fn run_terminal_command(
     project_id: String,
-    cwd_mode: String,
-    task_id: Option<String>,
+    cwd: String,
     command: String,
     state: State<'_, AppState>,
 ) -> CommandResult<TerminalCommandResult> {
@@ -445,20 +444,8 @@ fn run_terminal_command(
         return Err(CommandError::validation("실행할 명령을 입력해주세요."));
     }
     let context = project_context(&state, &project_id)?;
-    let cwd = match cwd_mode.as_str() {
-        "project" => context.root_path.clone(),
-        "worktree" => {
-            let task_id = task_id
-                .as_deref()
-                .ok_or_else(|| CommandError::validation("태스크를 선택해주세요."))?;
-            let conn = db::open_existing_db(&context.db_path)?;
-            let worktree = db::get_task_worktree(&conn, &project_id, task_id)?
-                .ok_or_else(|| CommandError::validation("태스크 worktree를 먼저 준비해주세요."))?;
-            PathBuf::from(worktree.worktree_path)
-        }
-        _ => return Err(CommandError::validation("지원하지 않는 터미널 cwd입니다.")),
-    };
-    if !cwd.exists() {
+    let cwd = resolve_terminal_path(&context.root_path, &cwd, ".")?;
+    if !cwd.is_dir() {
         return Err(CommandError::validation("터미널 cwd를 찾을 수 없습니다."));
     }
 
@@ -471,6 +458,21 @@ fn run_terminal_command(
         exit_code: output.exit_code,
         timed_out: output.timed_out,
     })
+}
+
+#[tauri::command]
+fn resolve_terminal_cwd(
+    project_id: String,
+    cwd: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> CommandResult<String> {
+    let context = project_context(&state, &project_id)?;
+    let next = resolve_terminal_path(&context.root_path, &cwd, &path)?;
+    if !next.is_dir() {
+        return Err(CommandError::validation("이동할 경로를 찾을 수 없습니다."));
+    }
+    Ok(next.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -1086,6 +1088,38 @@ fn run_shell_command(
     }
 }
 
+fn resolve_terminal_path(project_root: &Path, cwd: &str, path: &str) -> CommandResult<PathBuf> {
+    let base = if cwd.trim().is_empty() {
+        project_root.to_path_buf()
+    } else {
+        PathBuf::from(cwd)
+    };
+    let target = path.trim();
+    let candidate = if target.is_empty() {
+        project_root.to_path_buf()
+    } else if target == "~" {
+        home_dir()?
+    } else if let Some(rest) = target.strip_prefix("~/") {
+        home_dir()?.join(rest)
+    } else {
+        let target_path = PathBuf::from(target);
+        if target_path.is_absolute() {
+            target_path
+        } else {
+            base.join(target_path)
+        }
+    };
+    candidate
+        .canonicalize()
+        .map_err(|err| CommandError::io("터미널 경로를 확인하지 못했습니다.", err))
+}
+
+fn home_dir() -> CommandResult<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| CommandError::validation("HOME 경로를 찾을 수 없습니다."))
+}
+
 fn truncate_output(value: String) -> String {
     const MAX_OUTPUT_BYTES: usize = 64 * 1024;
     if value.len() <= MAX_OUTPUT_BYTES {
@@ -1124,6 +1158,7 @@ fn main() {
             get_recent_commits,
             get_changed_files,
             run_terminal_command,
+            resolve_terminal_cwd,
             run_stub_role,
             prepare_role_context,
             run_host_role,
