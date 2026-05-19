@@ -41,12 +41,19 @@ export function saveRecents(recents: RecentProject[]): void {
 export function upsertRecent(
   recents: RecentProject[],
   project: { id: string; name: string; rootPath: string },
+  options: { preserveExistingPosition?: boolean } = {},
 ): RecentProject[] {
+  const nextRecent = {
+    id: project.id,
+    name: project.name,
+    rootPath: project.rootPath,
+    lastOpenedAt: Date.now(),
+  };
+  if (options.preserveExistingPosition && recents.some((r) => r.id === project.id)) {
+    return recents.map((r) => (r.id === project.id ? nextRecent : r)).slice(0, MAX_RECENTS);
+  }
   const filtered = recents.filter((r) => r.id !== project.id);
-  return [
-    { id: project.id, name: project.name, rootPath: project.rootPath, lastOpenedAt: Date.now() },
-    ...filtered,
-  ].slice(0, MAX_RECENTS);
+  return [nextRecent, ...filtered].slice(0, MAX_RECENTS);
 }
 
 export function shortenPath(rootPath: string): string {

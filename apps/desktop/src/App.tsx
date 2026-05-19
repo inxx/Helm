@@ -49,10 +49,12 @@ export function App() {
     }
   }
 
-  async function openProjectPath(path: string) {
+  async function openProjectPath(path: string, options: { preserveRecentPosition?: boolean } = {}) {
     const next = await api.openProject(path);
     setSnapshot(next);
-    const nextRecents = upsertRecent(recents, next.project);
+    const nextRecents = upsertRecent(recents, next.project, {
+      preserveExistingPosition: options.preserveRecentPosition,
+    });
     setRecents(nextRecents);
     saveRecents(nextRecents);
     setSelectedTaskId(next.tasks[0]?.id ?? null);
@@ -65,7 +67,7 @@ export function App() {
     setError(null);
     setBusy(true);
     try {
-      await openProjectPath(recent.rootPath);
+      await openProjectPath(recent.rootPath, { preserveRecentPosition: true });
     } catch (err) {
       setError(errorMessage(err));
     } finally {
