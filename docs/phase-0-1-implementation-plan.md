@@ -301,7 +301,8 @@ Phase 1 핵심 DTO:
 - `ProjectSnapshot`: `project`, `settings`, `repository`, `epics`, `tasks`, `taskCounts`, `auditTail`
 - `EffectiveSettings`: `rolePresets`, `worktreeRoot`, `obsidianVaultPath`, `tokenBudget`, `artifactRetentionDays`
 - `EpicSummary`: `id`, `projectId`, `title`, `status`, `planPath`, `createdAt`, `updatedAt`
-- `TaskSummary`: `id`, `projectId`, `epicId`, `title`, `description`, `status`, `statusReason`, `sortOrder`, `createdAt`, `updatedAt`, `lastTransitionAt`
+- `TaskExternalRefSummary`: `id`, `projectId`, `taskId`, `refType`, `refValue`, `refTitle`, `createdAt`
+- `TaskSummary`: `id`, `projectId`, `epicId`, `title`, `description`, `status`, `statusReason`, `sortOrder`, `externalRefs`, `createdAt`, `updatedAt`, `lastTransitionAt`
 - `AuditLogEntry`: `id`, `projectId`, `entityType`, `entityId`, `eventType`, `payload`, `createdAt`
 
 Phase 1 Git DTO:
@@ -310,6 +311,51 @@ Phase 1 Git DTO:
 - `GitCommitSummary`: `hash`, `shortHash`, `authorName`, `authorEmail`, `committedAt`, `subject`, `refs`, `isMine`
 - `GitBranchSummary`: `branchName`, `headHash`, `upstream`, `ahead`, `behind`, `isCurrent`
 - `GitFileStatus`: `path`, `status`, `staged`, `renamedFrom`
+
+Phase 1 input DTO:
+
+```text
+CreateEpicInput {
+  title: string
+  planPath?: string | null
+}
+
+TaskExternalRefInput {
+  refType: "JiraEpic" | "JiraTask" | "MarkdownPlan" | "PlainText" | "Url"
+  refValue: string
+  refTitle?: string | null
+}
+
+CreateTaskInput {
+  epicId?: string | null
+  title: string
+  description?: string
+  externalRefs?: TaskExternalRefInput[]
+}
+
+UpdateTaskStatusInput {
+  taskId: string
+  status: "Planned" | "Ready" | "Coding" | "PlanVerification" | "CodeReview" | "Testing" | "MergeWaiting" | "Merged" | "Done" | "Blocked"
+  statusReason?: string | null
+}
+
+UpdateProjectSettingsPatch {
+  rolePresets?: unknown
+  worktreeRoot?: string | null
+  obsidianVaultPath?: string | null
+  tokenBudget?: number | null
+  artifactRetentionDays?: number | null
+}
+```
+
+Phase 1 input validation:
+
+- `title`은 trim 후 빈 문자열이면 `ValidationFailed`를 반환한다.
+- `description`이 없으면 빈 문자열로 저장한다.
+- `externalRefs`는 없거나 빈 배열이어도 정상이다.
+- `externalRefs.refValue`는 trim 후 빈 문자열이면 저장하지 않고 `ValidationFailed`를 반환한다.
+- Phase 1에서는 external ref 수정/삭제 command를 만들지 않는다. 잘못 입력한 참조는 task를 새로 만들거나 Phase 2 이후 별도 edit command에서 다룬다.
+- `UpdateProjectSettingsPatch`는 알 수 없는 key를 허용하지 않는다.
 
 ### 3.3 SQLite Phase 1 schema
 
@@ -321,6 +367,7 @@ projects
 project_settings
 epics
 tasks
+task_external_refs
 audit_logs
 ```
 
@@ -330,6 +377,7 @@ audit_logs
 - `project_settings`: `projectId`, `key`, `valueJson`, `updatedAt`
 - `epics`: `id`, `projectId`, `title`, `status`, `planPath`, `createdAt`, `updatedAt`
 - `tasks`: `id`, `projectId`, `epicId`, `title`, `description`, `status`, `statusReason`, `sortOrder`, `createdAt`, `updatedAt`, `lastTransitionAt`
+- `task_external_refs`: `id`, `projectId`, `taskId`, `refType`, `refValue`, `refTitle`, `createdAt`
 - `audit_logs`: `id`, `projectId`, `entityType`, `entityId`, `eventType`, `payloadJson`, `createdAt`
 
 Phase 1 migration 파일은 `apps/desktop/src-tauri/migrations/0001_phase1.sql`로 둔다. 구현 시 SQL은 아래 결정을 따른다.
@@ -392,6 +440,21 @@ CREATE TABLE tasks (
 CREATE INDEX idx_epics_project_id ON epics(project_id);
 CREATE INDEX idx_tasks_project_status_sort ON tasks(project_id, status, sort_order);
 
+CREATE TABLE task_external_refs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  ref_type TEXT NOT NULL,
+  ref_value TEXT NOT NULL,
+  ref_title TEXT,
+  created_at TEXT NOT NULL,
+  CHECK (ref_type IN ('JiraEpic', 'JiraTask', 'MarkdownPlan', 'PlainText', 'Url')),
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_task_external_refs_task_id ON task_external_refs(task_id);
+
 CREATE TABLE audit_logs (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
@@ -427,12 +490,14 @@ Phase 1 기본 상태:
 - Epic 기본값: `Drafting`
 - Task 기본값: `Planned`
 - Task board 컬럼: `Planned`, `Ready`, `Coding`, `PlanVerification`, `CodeReview`, `Testing`, `MergeWaiting`, `Merged`, `Done`, `Blocked`
+- 외부 Jira/Markdown/URL 참조는 `task_external_refs`에 metadata로 저장하되 Phase 1에서는 동기화하지 않는다.
 
 `AgentRun`, `Approval`, `ExternalSync`, `Jira`, `Slack`, `Worktree` schema는 Phase 2 이후에 추가한다.
 
 Phase 1 상태 변경 규칙:
 
 - `create_epic`은 `Drafting`, `create_task`는 `Planned`를 기본값으로 쓴다.
+- `create_task`는 optional `externalRefs`를 받을 수 있고, 허용된 `refType`만 저장한다.
 - `update_task_status`는 위 canonical `TaskStatus` enum에 속한 값만 허용한다.
 - Phase 1에서는 전체 상태 머신을 강제하지 않는다. 사용자가 skeleton에서 상태를 수동 변경할 수 있게 하되, 변경 전/후 상태와 `status_reason`을 audit log에 남긴다.
 - Phase 2에서 role run과 approval model이 추가되면 자동 상태 전이 규칙을 migration 없이 얹을 수 있어야 한다.
@@ -625,10 +690,10 @@ Phase 1 구현에서는 아래 결정을 그대로 코드로 옮긴다.
 3. foreign key와 unique constraint: 위 SQL 기준
 4. timestamp 저장 형식: RFC3339 UTC 문자열
 5. `recent projects` 저장 위치: Phase 1에서는 영속화하지 않고 app memory state로만 처리
-6. Rust model과 Tauri command response DTO: `ProjectSummary`, `ProjectSnapshot`, `EffectiveSettings`, `EpicSummary`, `TaskSummary`, `AuditLogEntry`, Git DTO 기준
+6. Rust model과 Tauri command response DTO: `ProjectSummary`, `ProjectSnapshot`, `EffectiveSettings`, `EpicSummary`, `TaskSummary`, `TaskExternalRefSummary`, `AuditLogEntry`, Git DTO 기준
 7. React 화면 state shape: `ProjectSnapshot`을 화면 source of truth로 두고, create/update 이후 snapshot을 다시 조회한다.
 
-최소 schema는 `schema_migrations`, `projects`, `project_settings`, `epics`, `tasks`, `audit_logs`를 유지한다. `AgentRun`, `Approval`, `ExternalSync`, `Jira`, `Slack`, `Worktree`는 Phase 2 이후 migration으로 추가한다.
+최소 schema는 `schema_migrations`, `projects`, `project_settings`, `epics`, `tasks`, `task_external_refs`, `audit_logs`를 유지한다. `AgentRun`, `Approval`, `ExternalSync`, `Jira`, `Slack`, `Worktree`는 Phase 2 이후 migration으로 추가한다.
 
 ### 4. Git viewer 범위 축소
 

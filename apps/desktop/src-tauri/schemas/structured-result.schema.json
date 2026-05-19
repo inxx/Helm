@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inxx.local/helm/structured-result.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "status", "summary", "changedFiles", "risks", "nextActions", "gateResult"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "status": { "type": "string", "enum": ["pass", "fail", "needs_changes"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "changedFiles": { "type": "array", "items": { "type": "string" } },
+    "risks": { "type": "array", "items": { "type": "string" } },
+    "nextActions": { "type": "array", "items": { "type": "string" } },
+    "gateResult": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gate", "status", "blocking", "blockers", "affectedFiles", "suggestedNext"],
+          "properties": {
+            "gate": { "type": "string", "enum": ["plan_verification", "code_review", "test", "security", "rules"] },
+            "status": { "type": "string", "enum": ["pass", "warn", "fail"] },
+            "blocking": { "type": "boolean" },
+            "blockers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "severity", "summary"],
+                "properties": {
+                  "id": { "type": "string", "minLength": 1 },
+                  "severity": { "type": "string", "enum": ["error", "warning"] },
+                  "file": { "type": "string" },
+                  "summary": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "affectedFiles": { "type": "array", "items": { "type": "string" } },
+            "suggestedNext": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["action", "reason"],
+              "properties": {
+                "action": { "type": "string", "enum": ["fix", "retry", "request_changes", "approve", "manual_review"] },
+                "reason": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
