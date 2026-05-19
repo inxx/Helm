@@ -3,133 +3,380 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Helm</title>
+    <title>Helm — local agent ops</title>
     <link rel="stylesheet" href="/assets/app.css" />
   </head>
   <body>
     <div class="app-shell">
-      <aside class="rail">
+      <aside class="rail" aria-label="navigation">
         <div class="brand">
           <span class="brand-mark">H</span>
-          <div>
+          <div class="brand-name">
             <strong>Helm</strong>
             <span>local agent ops</span>
           </div>
         </div>
 
-        <nav class="view-nav" aria-label="session filters">
-          <button class="view-item active" type="button" data-view="all">
-            <span>All</span>
-            <strong id="nav-all">0</strong>
+        <nav class="nav-primary" aria-label="primary">
+          <p class="nav-group-label">메뉴</p>
+          <button class="nav-item active" type="button" data-route="tasks">
+            <span class="nav-icon">◰</span>
+            <span>태스크</span>
+            <span class="nav-count" id="nav-tasks-count">0</span>
           </button>
-          <button class="view-item" type="button" data-view="review">
-            <span>Review</span>
-            <strong id="nav-review">0</strong>
+          <button class="nav-item" type="button" data-route="git">
+            <span class="nav-icon">⌥</span>
+            <span>깃</span>
+            <span class="nav-count" id="nav-git-count">0</span>
           </button>
-          <button class="view-item" type="button" data-view="ship">
-            <span>Ship</span>
-            <strong id="nav-ship">0</strong>
+          <button class="nav-item" type="button" data-route="terminal">
+            <span class="nav-icon">›_</span>
+            <span>터미널</span>
+            <span class="nav-count" id="nav-terminal-count">0</span>
           </button>
-          <button class="view-item" type="button" data-view="repair">
-            <span>Repair</span>
-            <strong id="nav-repair">0</strong>
+          <button class="nav-item" type="button" data-route="settings">
+            <span class="nav-icon">◇</span>
+            <span>설정</span>
+            <span class="nav-count"></span>
           </button>
         </nav>
 
-        <section class="rail-section" aria-label="repository">
-          <h2>Repo</h2>
-          <dl class="repo-facts">
+        <section class="rail-repo" aria-label="repository">
+          <h2>Repository</h2>
+          <dl>
             <div>
               <dt>branch</dt>
-              <dd id="repo-branch">-</dd>
+              <dd id="rail-branch">—</dd>
             </div>
             <div>
               <dt>head</dt>
-              <dd id="repo-head">-</dd>
+              <dd id="rail-head">—</dd>
             </div>
             <div>
               <dt>state</dt>
-              <dd id="repo-state">-</dd>
+              <dd id="rail-state">—</dd>
             </div>
           </dl>
         </section>
       </aside>
 
       <main class="workspace">
-        <header class="hero-bar">
-          <div class="hero-copy">
-            <p class="eyebrow">control room</p>
-            <h1>Helm</h1>
-            <p id="repo-path" class="repo-path">-</p>
+        <header class="topbar">
+          <div class="topbar-title">
+            <h1 id="view-title">태스크</h1>
+            <span class="crumb" id="view-subtitle">Agent Runs</span>
+            <span class="repo-path" id="repo-path" title="">—</span>
           </div>
-          <button id="refresh-button" class="icon-button" type="button" title="새로고침" aria-label="새로고침">
-            ↻
-          </button>
+          <div class="topbar-actions">
+            <span class="kbd" title="검색">⌘ K</span>
+            <button
+              id="refresh-button"
+              class="icon-button"
+              type="button"
+              title="새로고침"
+              aria-label="새로고침"
+            >
+              ↻
+            </button>
+          </div>
         </header>
 
-        <section class="workflow-strip" id="workflow-strip" aria-label="workflow"></section>
+        <!-- =========================================================
+             TASKS VIEW — Linear-inspired board + side detail
+             ========================================================= -->
+        <section class="view tasks-view visible" id="view-tasks" aria-label="태스크">
+          <div class="tasks-toolbar">
+            <div class="filter-chips" role="tablist" aria-label="status filters">
+              <button class="filter-chip active" type="button" data-view="all">
+                <span>전체</span>
+                <span class="count" id="chip-all">0</span>
+              </button>
+              <button class="filter-chip" type="button" data-view="review">
+                <span>검토</span>
+                <span class="count" id="chip-review">0</span>
+              </button>
+              <button class="filter-chip" type="button" data-view="ship">
+                <span>출시</span>
+                <span class="count" id="chip-ship">0</span>
+              </button>
+              <button class="filter-chip" type="button" data-view="repair">
+                <span>수리</span>
+                <span class="count" id="chip-repair">0</span>
+              </button>
+            </div>
+            <div class="search-input">
+              <input
+                id="session-filter"
+                type="search"
+                placeholder="세션 검색…"
+                aria-label="세션 검색"
+              />
+            </div>
+          </div>
 
-        <section class="summary-band" aria-label="summary">
-          <div class="signal large">
-            <span>workspace</span>
-            <strong id="metric-dirty">0</strong>
-          </div>
-          <div class="signal">
-            <span>sessions</span>
-            <strong id="metric-sessions">0</strong>
-          </div>
-          <div class="signal">
-            <span>review</span>
-            <strong id="metric-review">0</strong>
-          </div>
-          <div class="signal">
-            <span>ship</span>
-            <strong id="metric-ship">0</strong>
-          </div>
-          <div class="signal">
-            <span>prs</span>
-            <strong id="metric-prs">0</strong>
+          <section class="workflow-strip" id="workflow-strip" aria-label="workflow"></section>
+
+          <div class="tasks-board">
+            <div class="board-columns" id="board-columns"></div>
+
+            <aside class="task-detail" aria-label="태스크 상세">
+              <div class="detail-head">
+                <div class="title-row">
+                  <h2 id="detail-title">세션을 선택하세요</h2>
+                </div>
+                <div class="meta" id="detail-meta"></div>
+                <div style="display: flex; justify-content: flex-end">
+                  <div class="artifact-tabs" role="tablist" aria-label="artifact preview">
+                    <button class="artifact-tab active" type="button" data-artifact="log">
+                      Log
+                    </button>
+                    <button class="artifact-tab" type="button" data-artifact="diff">Diff</button>
+                  </div>
+                </div>
+              </div>
+              <div class="detail-body" id="detail-body">
+                <div class="empty-state">
+                  <strong>선택된 세션 없음</strong>
+                  <span>왼쪽 보드에서 카드를 선택하면 상세가 표시됩니다.</span>
+                </div>
+              </div>
+            </aside>
           </div>
         </section>
 
-        <section class="ops-layout">
-          <section class="session-column" aria-label="sessions">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">sessions</p>
-                <h2>Agent Runs</h2>
-              </div>
-              <input id="session-filter" type="search" placeholder="검색" aria-label="세션 검색" />
+        <!-- =========================================================
+             GIT VIEW — read-only viewer
+             ========================================================= -->
+        <section class="view git-view" id="view-git" aria-label="깃">
+          <div class="git-branchbar">
+            <div class="branch-fact">
+              <span class="label">branch</span>
+              <span class="value" id="git-branch">—</span>
             </div>
-            <div id="session-list" class="session-list" aria-live="polite"></div>
-          </section>
+            <div class="branch-fact">
+              <span class="label">head</span>
+              <span class="value" id="git-head">—</span>
+            </div>
+            <div class="branch-fact" id="git-state-wrap">
+              <span class="label">state</span>
+              <span class="value" id="git-state">—</span>
+            </div>
+            <div class="branch-fact">
+              <span class="label">captured</span>
+              <span class="value" id="git-captured">—</span>
+            </div>
+          </div>
 
-          <aside class="inspect-column" aria-label="inspection">
-            <section class="workspace-panel">
-              <div class="section-head compact">
-                <div>
-                  <p class="eyebrow">workspace</p>
-                  <h2>Git State</h2>
-                </div>
-                <span id="captured-at" class="stamp">-</span>
+          <div class="git-layout">
+            <section class="git-changes" aria-label="changed files">
+              <div class="panel-head">
+                <h3>Changes</h3>
+                <span class="panel-count" id="git-changes-count">0</span>
               </div>
-              <div id="status-list" class="status-list"></div>
+              <div class="changes-list" id="git-changes-list"></div>
             </section>
 
-            <section class="detail-panel">
-              <div class="section-head compact">
-                <div>
-                  <p class="eyebrow">selected</p>
-                  <h2>Session</h2>
+            <section class="git-commits" aria-label="recent commits">
+              <div class="panel-head">
+                <h3>최근 커밋 (세션 기준)</h3>
+                <span class="panel-count" id="git-commits-count">0</span>
+              </div>
+              <div class="commit-list" id="git-commits-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <!-- =========================================================
+             TERMINAL VIEW — Warp-inspired, dark canvas only here
+             ========================================================= -->
+        <section class="view terminal-view" id="view-terminal" aria-label="터미널">
+          <div class="terminal-tabs" role="tablist" aria-label="terminal tabs">
+            <button class="terminal-tab active" type="button">
+              <span class="tab-dot"></span>
+              <span>zsh · helm</span>
+            </button>
+            <button class="terminal-tab" type="button">
+              <span class="tab-dot"></span>
+              <span>~/work</span>
+            </button>
+            <button class="terminal-add" type="button" title="새 터미널" aria-label="새 터미널">
+              +
+            </button>
+          </div>
+
+          <div class="terminal-pane">
+            <div class="terminal-scrollback" id="terminal-scrollback">
+              <div class="term-block">
+                <div class="term-prompt-line">
+                  <span class="ps1">helm ❯</span>
+                  <span class="cmd">inxx-helm status</span>
                 </div>
-                <div class="artifact-tabs" role="tablist" aria-label="artifact preview">
-                  <button class="artifact-tab active" type="button" data-artifact="log">Log</button>
-                  <button class="artifact-tab" type="button" data-artifact="diff">Diff</button>
+                <pre class="term-output" id="terminal-status-output">로딩 중…</pre>
+              </div>
+
+              <div class="term-block">
+                <div class="term-prompt-line">
+                  <span class="ps1">helm ❯</span>
+                  <span class="cmd">about</span>
+                </div>
+                <pre class="term-output">
+<span class="note">Phase 1에서 터미널 메뉴는 skeleton 상태입니다.
+PTY와 split pane은 Phase 4에서 구현됩니다.
+현재는 시스템 터미널에서 inxx-helm CLI를 사용하세요.</span></pre>
+              </div>
+
+              <div class="term-block">
+                <div class="term-prompt-line">
+                  <span class="ps1">helm ❯</span>
+                  <span class="cmd">help --cli</span>
+                </div>
+                <pre class="term-output">
+inxx-helm run --agent codex|claude|gemini "&lt;prompt&gt;"
+inxx-helm status
+inxx-helm show [session]
+inxx-helm commit [session] --check "npm run check" -m "..."
+inxx-helm pr [session] --base main --title "..."</pre>
+              </div>
+            </div>
+
+            <form class="terminal-prompt" id="terminal-prompt" onsubmit="return false;">
+              <span class="ps1">helm ❯</span>
+              <input
+                type="text"
+                placeholder="명령 입력 (Phase 4부터 활성)"
+                aria-label="terminal input"
+                disabled
+              />
+            </form>
+          </div>
+        </section>
+
+        <!-- =========================================================
+             SETTINGS VIEW — categories + form rows
+             ========================================================= -->
+        <section class="view settings-view" id="view-settings" aria-label="설정">
+          <nav class="settings-nav" aria-label="settings categories">
+            <button class="settings-nav-item active" type="button" data-section="repository">
+              Repository
+            </button>
+            <button class="settings-nav-item" type="button" data-section="agents">Agents</button>
+            <button class="settings-nav-item" type="button" data-section="workflow">Workflow</button>
+            <button class="settings-nav-item" type="button" data-section="about">About</button>
+          </nav>
+
+          <div class="settings-body">
+            <section class="settings-section" data-section="repository">
+              <header>
+                <h2>Repository</h2>
+                <p>현재 Helm이 추적 중인 로컬 저장소 정보입니다.</p>
+              </header>
+              <div class="settings-card">
+                <div class="settings-row">
+                  <span class="label">Path</span>
+                  <div class="value" id="settings-repo-path">—</div>
+                </div>
+                <div class="settings-row">
+                  <span class="label">Branch</span>
+                  <div class="value" id="settings-branch">—</div>
+                </div>
+                <div class="settings-row">
+                  <span class="label">HEAD</span>
+                  <div class="value" id="settings-head">—</div>
+                </div>
+                <div class="settings-row">
+                  <span class="label">Workspace</span>
+                  <div class="value" id="settings-dirty">—</div>
                 </div>
               </div>
-              <div id="session-detail" class="detail-empty">-</div>
             </section>
-          </aside>
+
+            <section class="settings-section" data-section="agents" hidden>
+              <header>
+                <h2>Agents</h2>
+                <p>
+                  Agent 바이너리 경로와 인증은
+                  <code>.helm/config.json</code>에서 관리합니다. Phase 1에서는 UI 편집을 제공하지
+                  않습니다.
+                </p>
+              </header>
+              <div class="settings-callout">
+                <strong>설정 파일 위치</strong>
+                <span><code>&lt;repo&gt;/.helm/config.json</code></span>
+              </div>
+              <div class="settings-card">
+                <div class="settings-row">
+                  <span class="label">codex</span>
+                  <div class="value">
+                    /opt/homebrew/bin/codex
+                    <span class="hint">기본값. config의 agentBinaries.codex로 덮어쓸 수 있습니다.</span>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <span class="label">claude</span>
+                  <div class="value">
+                    /opt/homebrew/bin/claude
+                    <span class="hint">로컬 인증 필요. 401 발생 시 claude CLI 인증을 확인하세요.</span>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <span class="label">gemini</span>
+                  <div class="value">
+                    /opt/homebrew/bin/gemini
+                    <span class="hint">환경변수 &gt; config &gt; 기본값 순서로 적용됩니다.</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-section" data-section="workflow" hidden>
+              <header>
+                <h2>Workflow</h2>
+                <p>커밋 체크 명령과 PR base 브랜치 기본값입니다.</p>
+              </header>
+              <div class="settings-card">
+                <div class="settings-row">
+                  <span class="label">defaultCheckCommand</span>
+                  <div class="value">
+                    npm run check
+                    <span class="hint"
+                      ><code>--check</code> 옵션이 없으면 commit 시 이 명령을 실행합니다.</span
+                    >
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <span class="label">prBaseBranch</span>
+                  <div class="value">
+                    main
+                    <span class="hint"><code>--base</code> 옵션이 없으면 이 값으로 PR을 생성합니다.</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-section" data-section="about" hidden>
+              <header>
+                <h2>About</h2>
+                <p>Helm은 로컬 single-agent 오케스트레이션을 위한 개인용 CLI/데스크톱입니다.</p>
+              </header>
+              <div class="settings-card">
+                <div class="settings-row">
+                  <span class="label">Package</span>
+                  <div class="value">@inxx/helm</div>
+                </div>
+                <div class="settings-row">
+                  <span class="label">Phase</span>
+                  <div class="value">
+                    Phase 1 — UI v0
+                    <span class="hint">실제 agent 실행은 Phase 3a에서 HelmHostRunner로 연결됩니다.</span>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <span class="label">License</span>
+                  <div class="value">MIT</div>
+                </div>
+              </div>
+            </section>
+          </div>
         </section>
       </main>
     </div>
