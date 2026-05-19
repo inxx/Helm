@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import { Files, GitBranch, GitCommitHorizontal, GitGraph } from "lucide-react";
+import type { CSSProperties } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { shortHash } from "../lib/status";
@@ -7,6 +8,7 @@ import type {
   GitBranchSummary,
   GitCommitSummary,
   GitFileStatus,
+  GitGraphCell,
   ProjectSnapshot,
 } from "../lib/types";
 
@@ -21,9 +23,16 @@ type GitGraphRow =
   | {
       id: "worktree";
       kind: "worktree";
+      graphCells: GitGraphCell[];
+      graphColorIndex: number;
       refs: string[];
       subject: string;
       summary: string;
+    }
+  | {
+      id: string;
+      kind: "connector";
+      graphCells: GitGraphCell[];
     }
   | {
       id: string;
@@ -32,11 +41,28 @@ type GitGraphRow =
       commit: GitCommitSummary;
     };
 
+type SelectableGitGraphRow = Exclude<GitGraphRow, { kind: "connector" }>;
+
 const gitViews: Array<{ id: GitView; label: string; icon: LucideIcon }> = [
   { id: "genealogy", label: "계보", icon: GitGraph },
   { id: "changes", label: "변경", icon: Files },
   { id: "branches", label: "브랜치", icon: GitBranch },
 ];
+
+const graphLaneColors = [
+  "oklch(0.64 0.16 252)",
+  "oklch(0.66 0.16 166)",
+  "oklch(0.66 0.17 316)",
+  "oklch(0.68 0.17 82)",
+  "oklch(0.62 0.2 27)",
+  "oklch(0.66 0.14 205)",
+  "oklch(0.62 0.18 145)",
+  "oklch(0.68 0.14 290)",
+  "oklch(0.58 0.02 260)",
+];
+
+const worktreeGraphColorIndex = 8;
+const graphCellWidth = 10;
 
 export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
   const [activeView, setActiveView] = useState<GitView>("genealogy");
@@ -85,19 +111,23 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
   }, [snapshot]);
 
   const graphRows = useMemo(() => buildGraphRows(snapshot, commits), [snapshot, commits]);
+  const selectableRows = useMemo(
+    () => graphRows.filter((row): row is SelectableGitGraphRow => row.kind !== "connector"),
+    [graphRows],
+  );
 
   useEffect(() => {
-    if (graphRows.length === 0) {
+    if (selectableRows.length === 0) {
       setSelectedRowId(null);
       return;
     }
-    if (!selectedRowId || !graphRows.some((row) => row.id === selectedRowId)) {
-      setSelectedRowId(graphRows[0].id);
+    if (!selectedRowId || !selectableRows.some((row) => row.id === selectedRowId)) {
+      setSelectedRowId(selectableRows[0].id);
     }
-  }, [graphRows, selectedRowId]);
+  }, [selectableRows, selectedRowId]);
 
   const selectedRow =
-    graphRows.find((row) => row.id === selectedRowId) ?? graphRows[0] ?? null;
+    selectableRows.find((row) => row.id === selectedRowId) ?? selectableRows[0] ?? null;
 
   if (!snapshot) {
     return (
@@ -180,7 +210,7 @@ function GitMetric({ label, value }: { label: string; value: string | number }) 
 
 interface GenealogyViewProps {
   rows: GitGraphRow[];
-  selectedRow: GitGraphRow | null;
+  selectedRow: SelectableGitGraphRow | null;
   selectedRowId: string | null;
   onSelectRow: (id: string) => void;
   files: GitFileStatus[];
@@ -206,50 +236,66 @@ function GenealogyView({
           <div className="empty-inline">커밋 없음</div>
         ) : (
           <div className="git-graph-list" role="listbox" aria-label="커밋 계보">
-            {rows.map((row, index) => (
-              <button
-                key={row.id}
-                type="button"
-                role="option"
-                aria-selected={selectedRowId === row.id}
-                className={`git-graph-row lane-${index % 6} ${
-                  selectedRowId === row.id ? "selected" : ""
-                }`}
-                onClick={() => onSelectRow(row.id)}
-              >
-                <span className="git-graph-rail" aria-hidden="true">
-                  <span className="git-graph-dot">{row.kind === "worktree" ? "◉" : "●"}</span>
-                </span>
-                <span className="git-graph-content">
-                  <span className="git-graph-titleline">
-                    {row.refs.slice(0, 3).map((ref) => (
-                      <span className="git-ref-label" key={ref}>
-                        {formatRefLabel(ref)}
-                      </span>
-                    ))}
-                    <strong>{row.kind === "worktree" ? row.subject : row.commit.subject}</strong>
+            {rows.map((row, index) => {
+              if (row.kind === "connector") {
+                return (
+                  <div className="git-graph-row connector" key={row.id} role="presentation">
+                    <GitGraphCells connector cells={row.graphCells} />
+                  </div>
+                );
+              }
+
+              const rowColorIndex =
+                row.kind === "worktree" ? row.graphColorIndex : row.commit.graphColorIndex;
+
+              return (
+                <button
+                  key={row.id}
+                  type="button"
+                  role="option"
+                  aria-selected={selectedRowId === row.id}
+                  className={`git-graph-row lane-${index % 6} ${
+                    selectedRowId === row.id ? "selected" : ""
+                  }`}
+                  style={{ "--branch-color": gitGraphColor(rowColorIndex) } as CSSProperties}
+                  onClick={() => onSelectRow(row.id)}
+                >
+                  <GitGraphCells
+                    cells={row.kind === "worktree" ? row.graphCells : row.commit.graphCells}
+                    head={row.kind === "commit" ? row.commit.isHead : false}
+                    worktree={row.kind === "worktree"}
+                  />
+                  <span className="git-graph-content">
+                    <span className="git-graph-titleline">
+                      {compactRefLabels(row.refs).map((ref) => (
+                        <span className="git-ref-label" key={ref}>
+                          {ref}
+                        </span>
+                      ))}
+                      <strong>{row.kind === "worktree" ? row.subject : row.commit.subject}</strong>
+                    </span>
+                    <span className="git-graph-subline">
+                      {row.kind === "worktree"
+                        ? row.summary
+                        : `${row.commit.authorName} · ${formatCommitDate(row.commit.committedAt)}`}
+                    </span>
                   </span>
-                  <span className="git-graph-subline">
-                    {row.kind === "worktree"
-                      ? row.summary
-                      : `${row.commit.authorName} · ${formatCommitDate(row.commit.committedAt)}`}
+                  <span className="git-graph-meta">
+                    {row.kind === "worktree" ? (
+                      <>
+                        <span>{files.length} files</span>
+                        <span>WORKTREE</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>{row.commit.shortHash}</span>
+                        <span>{row.commit.isMine ? "mine" : "commit"}</span>
+                      </>
+                    )}
                   </span>
-                </span>
-                <span className="git-graph-meta">
-                  {row.kind === "worktree" ? (
-                    <>
-                      <span>{files.length} files</span>
-                      <span>WORKTREE</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>{row.commit.shortHash}</span>
-                      <span>{row.commit.isMine ? "mine" : "commit"}</span>
-                    </>
-                  )}
-                </span>
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </div>
         )}
       </section>
@@ -257,7 +303,13 @@ function GenealogyView({
       <section className="git-panel git-selected-panel">
         <div className="git-panel-title">
           <span>상세</span>
-          <strong>{selectedRow?.kind === "commit" ? selectedRow.commit.shortHash : "worktree"}</strong>
+          <strong>
+            {selectedRow?.kind === "commit"
+              ? selectedRow.commit.shortHash
+              : selectedRow
+                ? "worktree"
+                : "none"}
+          </strong>
         </div>
         <SelectedGitDetail selectedRow={selectedRow} files={files} snapshot={snapshot} />
       </section>
@@ -265,12 +317,169 @@ function GenealogyView({
   );
 }
 
+function GitGraphCells({
+  cells,
+  connector = false,
+  head = false,
+  worktree = false,
+}: {
+  cells: GitGraphCell[];
+  connector?: boolean;
+  head?: boolean;
+  worktree?: boolean;
+}) {
+  const height = connector ? 20 : 48;
+  const width = Math.max(cells.length, 2) * graphCellWidth;
+  const midY = height / 2;
+
+  return (
+    <svg
+      aria-hidden="true"
+      className={connector ? "git-visual-graph connector" : "git-visual-graph"}
+      focusable="false"
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      width={width}
+      style={{ "--graph-columns": Math.max(cells.length, 2) } as CSSProperties}
+    >
+      {cells.map((cell, index) => (
+        <GraphCellShape
+          cell={cell}
+          head={head}
+          height={height}
+          index={index}
+          key={`${index}:${cell.kind}:${cell.colorIndex ?? "x"}:${cell.secondaryColorIndex ?? "x"}`}
+          midY={midY}
+          worktree={worktree}
+        />
+      ))}
+    </svg>
+  );
+}
+
+function GraphCellShape({
+  cell,
+  head,
+  height,
+  index,
+  midY,
+  worktree,
+}: {
+  cell: GitGraphCell;
+  head: boolean;
+  height: number;
+  index: number;
+  midY: number;
+  worktree: boolean;
+}) {
+  if (cell.kind === "empty") return null;
+
+  const centerX = index * graphCellWidth + graphCellWidth / 2;
+  const leftX = centerX - graphCellWidth / 2;
+  const rightX = centerX + graphCellWidth / 2;
+  const color = gitGraphColor(cell.colorIndex ?? 0);
+  const secondaryColor = gitGraphColor(cell.secondaryColorIndex ?? cell.colorIndex ?? 0);
+  const strokeProps = {
+    fill: "none",
+    stroke: color,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    strokeWidth: 2.2,
+  };
+
+  switch (cell.kind) {
+    case "pipe":
+      return <line {...strokeProps} x1={centerX} x2={centerX} y1={0} y2={height} />;
+    case "commit":
+      return (
+        <g>
+          <line {...strokeProps} x1={centerX} x2={centerX} y1={0} y2={height} />
+          <circle
+            cx={centerX}
+            cy={midY}
+            fill={head || worktree ? "var(--surface)" : color}
+            r={head || worktree ? 5 : 4.2}
+            stroke={color}
+            strokeWidth={head || worktree ? 2.3 : 1.8}
+          />
+        </g>
+      );
+    case "horizontal":
+      return <line {...strokeProps} x1={leftX} x2={rightX} y1={midY} y2={midY} />;
+    case "horizontal-pipe":
+      return (
+        <g>
+          <line
+            {...strokeProps}
+            stroke={secondaryColor}
+            x1={centerX}
+            x2={centerX}
+            y1={0}
+            y2={height}
+          />
+          <line {...strokeProps} x1={leftX} x2={rightX} y1={midY} y2={midY} />
+        </g>
+      );
+    case "branch-right":
+      return (
+        <path
+          {...strokeProps}
+          d={`M ${rightX} ${midY} Q ${centerX} ${midY} ${centerX} ${midY + 6} L ${centerX} ${height}`}
+        />
+      );
+    case "branch-left":
+      return (
+        <path
+          {...strokeProps}
+          d={`M ${leftX} ${midY} Q ${centerX} ${midY} ${centerX} ${midY + 6} L ${centerX} ${height}`}
+        />
+      );
+    case "merge-right":
+      return (
+        <path
+          {...strokeProps}
+          d={`M ${centerX} 0 L ${centerX} ${midY - 6} Q ${centerX} ${midY} ${rightX} ${midY}`}
+        />
+      );
+    case "merge-left":
+      return (
+        <path
+          {...strokeProps}
+          d={`M ${centerX} 0 L ${centerX} ${midY - 6} Q ${centerX} ${midY} ${leftX} ${midY}`}
+        />
+      );
+    case "tee-right":
+      return (
+        <g>
+          <line {...strokeProps} x1={centerX} x2={centerX} y1={0} y2={height} />
+          <line {...strokeProps} x1={centerX} x2={rightX} y1={midY} y2={midY} />
+        </g>
+      );
+    case "tee-left":
+      return (
+        <g>
+          <line {...strokeProps} x1={centerX} x2={centerX} y1={0} y2={height} />
+          <line {...strokeProps} x1={leftX} x2={centerX} y1={midY} y2={midY} />
+        </g>
+      );
+    case "tee-up":
+      return (
+        <g>
+          <line {...strokeProps} x1={centerX} x2={centerX} y1={0} y2={midY} />
+          <line {...strokeProps} x1={leftX} x2={rightX} y1={midY} y2={midY} />
+        </g>
+      );
+    default:
+      return null;
+  }
+}
+
 function SelectedGitDetail({
   selectedRow,
   files,
   snapshot,
 }: {
-  selectedRow: GitGraphRow | null;
+  selectedRow: SelectableGitGraphRow | null;
   files: GitFileStatus[];
   snapshot: ProjectSnapshot;
 }) {
@@ -434,10 +643,22 @@ function buildGraphRows(
   if (!snapshot) return [];
 
   const rows: GitGraphRow[] = [];
+  const graphColumnCount = Math.max(
+    2,
+    ...commits.flatMap((commit) => [
+      commit.graphCells.length,
+      ...commit.graphConnectorRows.map((connectorRow) => connectorRow.length),
+    ]),
+  );
+
   if (snapshot.repository.dirtyCount > 0) {
+    const headCommit = commits.find((commit) => commit.isHead) ?? commits[0] ?? null;
+    const graphLane = headCommit?.graphLane ?? 0;
     rows.push({
       id: "worktree",
       kind: "worktree",
+      graphCells: buildWorktreeGraphCells(graphColumnCount, graphLane),
+      graphColorIndex: worktreeGraphColorIndex,
       refs: [snapshot.repository.currentBranch ?? "detached"],
       subject: "Uncommitted Changes",
       summary: `${snapshot.repository.dirtyCount} files with changes`,
@@ -445,15 +666,35 @@ function buildGraphRows(
   }
 
   rows.push(
-    ...commits.map((commit) => ({
-      id: commit.hash,
-      kind: "commit" as const,
-      refs: commit.refs,
-      commit,
-    })),
+    ...commits.flatMap((commit) => [
+      ...commit.graphConnectorRows.map((graphCells, index) => ({
+        id: `${commit.hash}:connector:${index}`,
+        kind: "connector" as const,
+        graphCells,
+      })),
+      {
+        id: commit.hash,
+        kind: "commit" as const,
+        refs: commit.refs,
+        commit,
+      },
+    ]),
   );
 
   return rows;
+}
+
+function buildWorktreeGraphCells(columnCount: number, lane: number): GitGraphCell[] {
+  const requiredColumnCount = Math.max(columnCount, lane * 2 + 1, 2);
+  return Array.from({ length: requiredColumnCount }, (_, index) => ({
+    kind: index === lane * 2 ? "commit" : "empty",
+    colorIndex: index === lane * 2 ? worktreeGraphColorIndex : null,
+    secondaryColorIndex: null,
+  }));
+}
+
+function gitGraphColor(colorIndex: number): string {
+  return graphLaneColors[colorIndex % graphLaneColors.length];
 }
 
 function fileCodeClass(status: string): string {
@@ -484,6 +725,34 @@ function fileStatusCode(status: string): string {
     default:
       return status.slice(0, 2).toUpperCase();
   }
+}
+
+function compactRefLabels(refs: string[]): string[] {
+  const labels = Array.from(new Set(refs.map(formatRefLabel).filter(Boolean)));
+  const localRefs = new Set(
+    labels.filter((ref) => !ref.startsWith("origin/") && !ref.startsWith("tag:")),
+  );
+  const remoteRefs = new Set(labels.filter((ref) => ref.startsWith("origin/")));
+  const compacted: string[] = [];
+
+  for (const label of labels) {
+    if (label.startsWith("origin/")) {
+      const localName = label.slice("origin/".length);
+      if (localRefs.has(localName)) continue;
+      compacted.push(label);
+      continue;
+    }
+
+    if (!label.startsWith("tag:") && remoteRefs.has(`origin/${label}`)) {
+      compacted.push(`${label} ↔ origin`);
+      continue;
+    }
+
+    compacted.push(label);
+  }
+
+  if (compacted.length <= 2) return compacted;
+  return [compacted[0], `+${compacted.length - 1}`];
 }
 
 function formatRefLabel(ref: string): string {

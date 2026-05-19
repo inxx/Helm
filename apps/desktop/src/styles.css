@@ -1360,7 +1360,7 @@ textarea {
 .git-graph-row {
   --branch-color: var(--brand);
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) auto;
+  grid-template-columns: max-content minmax(0, 1fr) auto;
   align-items: stretch;
   gap: 0;
   width: 100%;
@@ -1375,6 +1375,16 @@ textarea {
 
 .git-graph-row:hover {
   background: var(--surface-2);
+}
+
+.git-graph-row.connector {
+  grid-template-columns: max-content minmax(0, 1fr);
+  min-height: 20px;
+  cursor: default;
+}
+
+.git-graph-row.connector:hover {
+  background: var(--surface);
 }
 
 .git-graph-row.selected {
@@ -1406,39 +1416,19 @@ textarea {
   --branch-color: oklch(0.58 0.12 205);
 }
 
-.git-graph-rail {
-  position: relative;
-  display: grid;
-  place-items: center;
+.git-visual-graph {
+  display: block;
   align-self: stretch;
+  width: calc(var(--graph-columns) * 10px);
+  min-width: 36px;
+  height: 48px;
+  margin: 0 12px 0 16px;
+  overflow: visible;
 }
 
-.git-graph-rail::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: color-mix(in oklch, var(--branch-color) 38%, var(--line));
-}
-
-.git-graph-dot {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--surface);
-  color: var(--branch-color);
-  font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1;
-}
-
-.git-graph-row.selected .git-graph-dot {
-  background: color-mix(in oklch, var(--brand) 16%, var(--surface));
+.git-visual-graph.connector {
+  height: 20px;
+  min-height: 20px;
 }
 
 .git-graph-content {
@@ -3092,7 +3082,7 @@ textarea {
   }
 
   .git-graph-row {
-    grid-template-columns: 32px minmax(0, 1fr);
+    grid-template-columns: max-content minmax(0, 1fr);
   }
 
   .git-graph-meta {

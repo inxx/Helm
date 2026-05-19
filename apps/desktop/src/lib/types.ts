@@ -157,15 +157,40 @@ export interface GitBranchSummary {
   isCurrent: boolean;
 }
 
+export type GitGraphCellKind =
+  | "empty"
+  | "pipe"
+  | "commit"
+  | "branch-right"
+  | "branch-left"
+  | "merge-right"
+  | "merge-left"
+  | "horizontal"
+  | "horizontal-pipe"
+  | "tee-right"
+  | "tee-left"
+  | "tee-up";
+
+export interface GitGraphCell {
+  kind: GitGraphCellKind;
+  colorIndex: number | null;
+  secondaryColorIndex: number | null;
+}
+
 export interface GitCommitSummary {
   hash: string;
   shortHash: string;
+  graphCells: GitGraphCell[];
+  graphConnectorRows: GitGraphCell[][];
+  graphLane: number;
+  graphColorIndex: number;
   authorName: string;
   authorEmail: string;
   committedAt: string;
   subject: string;
   refs: string[];
   isMine: boolean;
+  isHead: boolean;
 }
 
 export interface GitFileStatus {

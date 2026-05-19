@@ -204,15 +204,28 @@ pub struct GitRepositoryState {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitGraphCell {
+    pub kind: String,
+    pub color_index: Option<usize>,
+    pub secondary_color_index: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitCommitSummary {
     pub hash: String,
     pub short_hash: String,
+    pub graph_cells: Vec<GitGraphCell>,
+    pub graph_connector_rows: Vec<Vec<GitGraphCell>>,
+    pub graph_lane: usize,
+    pub graph_color_index: usize,
     pub author_name: String,
     pub author_email: String,
     pub committed_at: String,
     pub subject: String,
     pub refs: Vec<String>,
     pub is_mine: bool,
+    pub is_head: bool,
 }
 
 #[derive(Debug, Serialize)]
