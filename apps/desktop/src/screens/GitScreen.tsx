@@ -91,7 +91,7 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
 
     void Promise.all([
       api.getLocalBranches(snapshot.project.id),
-      api.getRecentCommits(snapshot.project.id, 50),
+      api.getRecentCommits(snapshot.project.id, 100),
       api.getChangedFiles(snapshot.project.id),
     ])
       .then(([nextBranches, nextCommits, nextFiles]) => {

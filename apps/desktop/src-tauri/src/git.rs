@@ -480,12 +480,7 @@ fn build_commit_graph(records: &[GitCommitRecord]) -> Vec<RenderedCommitGraph> {
             lanes[lane] = None;
         }
 
-        let valid_parents: Vec<String> = commit
-            .parent_hashes
-            .iter()
-            .filter(|parent_hash| hash_to_row.contains_key(*parent_hash))
-            .cloned()
-            .collect();
+        let valid_parents = commit.parent_hashes.clone();
         if valid_parents.len() >= 2 {
             color_assigner.begin_fork();
         }
@@ -960,6 +955,55 @@ impl GraphColorAssigner {
             self.recent_assignments.pop_front();
         }
         self.color_usage_count[color] += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_parent_keeps_lane_open_for_next_branch() {
+        let records = vec![
+            commit_record("branch-a", &["unseen-a"]),
+            commit_record("branch-b", &["unseen-b"]),
+        ];
+
+        let graph = build_commit_graph(&records);
+
+        assert_eq!(graph[0].lane, 0);
+        assert_eq!(graph[1].lane, 1);
+        assert!(matches!(graph[1].cells[0], GraphCell::Pipe(_)));
+        assert!(matches!(graph[1].cells[2], GraphCell::Commit(_)));
+    }
+
+    #[test]
+    fn shared_truncated_parent_connects_to_existing_open_lane() {
+        let records = vec![
+            commit_record("branch-a", &["shared-base"]),
+            commit_record("branch-b", &["shared-base"]),
+        ];
+
+        let graph = build_commit_graph(&records);
+
+        assert_eq!(graph[0].lane, 0);
+        assert_eq!(graph[1].lane, 1);
+        assert!(matches!(graph[1].cells[0], GraphCell::TeeRight(_)));
+        assert!(matches!(graph[1].cells[1], GraphCell::Horizontal(_)));
+        assert!(matches!(graph[1].cells[2], GraphCell::Commit(_)));
+    }
+
+    fn commit_record(hash: &str, parents: &[&str]) -> GitCommitRecord {
+        GitCommitRecord {
+            hash: hash.to_string(),
+            short_hash: hash.to_string(),
+            parent_hashes: parents.iter().map(|parent| (*parent).to_string()).collect(),
+            author_name: "Test".to_string(),
+            author_email: "test@example.com".to_string(),
+            committed_at: "2026-05-19T00:00:00+09:00".to_string(),
+            refs: Vec::new(),
+            subject: hash.to_string(),
+        }
     }
 }
 
