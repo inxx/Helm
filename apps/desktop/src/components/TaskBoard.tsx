@@ -13,7 +13,7 @@ export function TaskBoard({ tasks, selectedTaskId, onSelectTask }: TaskBoardProp
       {TASK_STATUS_ORDER.map((status) => {
         const columnTasks = tasks.filter((task) => task.status === status);
         return (
-          <section className="task-column" key={status}>
+          <section className="task-column" data-status={status} key={status}>
             <header className="task-column-header">
               <span>{TASK_STATUS_LABEL[status]}</span>
               <strong>{columnTasks.length}</strong>

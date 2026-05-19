@@ -47,17 +47,17 @@ export function TerminalScreen({ snapshot }: TerminalScreenProps) {
   }
 
   return (
-    <section className="content-panel terminal-screen">
-      <div className="terminal-header">
+    <section className="terminal-screen">
+      <header className="terminal-header">
         <div>
           <h2>터미널</h2>
-          <p className="muted">프로젝트 root 또는 태스크 worktree에서 명령을 실행합니다.</p>
+          <p>프로젝트 root 또는 태스크 worktree에서 명령을 실행합니다.</p>
         </div>
-      </div>
+      </header>
 
       <div className="terminal-controls">
         <label>
-          <span>CWD</span>
+          <span>cwd</span>
           <select value={cwdMode} onChange={(event) => setCwdMode(event.target.value as CwdMode)}>
             <option value="project">프로젝트 root</option>
             <option value="worktree">태스크 worktree</option>
@@ -65,7 +65,7 @@ export function TerminalScreen({ snapshot }: TerminalScreenProps) {
         </label>
         {cwdMode === "worktree" ? (
           <label>
-            <span>Task</span>
+            <span>task</span>
             <select value={taskId} onChange={(event) => setTaskId(event.target.value)}>
               <option value="">태스크 선택</option>
               {taskOptions.map((task) => (
@@ -75,9 +75,14 @@ export function TerminalScreen({ snapshot }: TerminalScreenProps) {
               ))}
             </select>
           </label>
-        ) : null}
+        ) : (
+          <label aria-hidden>
+            <span>cwd path</span>
+            <input value={snapshot.project.rootPath} readOnly />
+          </label>
+        )}
         <label className="terminal-command">
-          <span>Command</span>
+          <span>command</span>
           <input
             value={command}
             onChange={(event) => setCommand(event.target.value)}
@@ -93,10 +98,11 @@ export function TerminalScreen({ snapshot }: TerminalScreenProps) {
         </button>
       </div>
 
-      {error ? <div className="error-banner">{error}</div> : null}
-
       <div className="terminal-output-list">
-        {history.length === 0 ? <p className="muted">아직 실행한 명령이 없습니다.</p> : null}
+        {error ? <div className="error-banner">{error}</div> : null}
+        {history.length === 0 ? (
+          <p className="muted">아직 실행한 명령이 없습니다. 명령을 입력하고 Enter 키를 누르세요.</p>
+        ) : null}
         {history.map((item, index) => (
           <article className="terminal-output" key={`${item.command}-${item.cwd}-${index}`}>
             <header>

@@ -41,53 +41,101 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
 
   return (
     <div className="git-layout">
-      <section className="content-panel">
+      <section className="content-panel full-width">
         <h2>저장소 상태</h2>
         <div className="metric-grid">
-          <div><span>브랜치</span><strong>{snapshot.repository.currentBranch ?? "detached"}</strong></div>
-          <div><span>HEAD</span><strong>{shortHash(snapshot.repository.head)}</strong></div>
-          <div><span>Staged</span><strong>{snapshot.repository.stagedCount}</strong></div>
-          <div><span>Unstaged</span><strong>{snapshot.repository.unstagedCount}</strong></div>
-          <div><span>Untracked</span><strong>{snapshot.repository.untrackedCount}</strong></div>
+          <div>
+            <span>branch</span>
+            <strong>{snapshot.repository.currentBranch ?? "detached"}</strong>
+          </div>
+          <div>
+            <span>head</span>
+            <strong>{shortHash(snapshot.repository.head)}</strong>
+          </div>
+          <div>
+            <span>staged</span>
+            <strong>{snapshot.repository.stagedCount}</strong>
+          </div>
+          <div>
+            <span>unstaged</span>
+            <strong>{snapshot.repository.unstagedCount}</strong>
+          </div>
+          <div>
+            <span>untracked</span>
+            <strong>{snapshot.repository.untrackedCount}</strong>
+          </div>
         </div>
       </section>
 
       <section className="content-panel">
         <h2>변경 파일</h2>
-        {files.length === 0 ? <p className="muted">변경 파일 없음</p> : null}
-        <ul className="file-list">
-          {files.map((file) => (
-            <li key={`${file.status}:${file.path}`}>
-              <span>{file.status}</span>
-              <strong>{file.path}</strong>
-            </li>
-          ))}
-        </ul>
+        <div>
+          {files.length === 0 ? (
+            <p className="muted">변경 파일 없음</p>
+          ) : (
+            <ul className="file-list">
+              {files.map((file) => (
+                <li key={`${file.status}:${file.path}`}>
+                  <span className={fileCodeClass(file.status)}>{file.status}</span>
+                  <strong>{file.path}</strong>
+                  {file.renamedFrom ? <span title={file.renamedFrom}>R</span> : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </section>
 
       <section className="content-panel">
         <h2>로컬 브랜치</h2>
-        <ul className="plain-list">
-          {branches.map((branch) => (
-            <li key={branch.branchName}>
-              <strong>{branch.branchName}</strong>
-              <span>{branch.isCurrent ? "현재" : shortHash(branch.headHash)}</span>
-            </li>
-          ))}
-        </ul>
+        <div>
+          {branches.length === 0 ? (
+            <p className="muted">로컬 브랜치 없음</p>
+          ) : (
+            <ul className="plain-list">
+              {branches.map((branch) => (
+                <li key={branch.branchName}>
+                  <strong>
+                    {branch.branchName}
+                    {branch.isCurrent ? " · current" : ""}
+                  </strong>
+                  <span>{shortHash(branch.headHash)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </section>
 
-      <section className="content-panel">
+      <section className="content-panel full-width">
         <h2>최근 커밋</h2>
-        <ul className="commit-list">
-          {commits.map((commit) => (
-            <li key={commit.hash}>
-              <strong>{commit.subject}</strong>
-              <span>{commit.shortHash} · {commit.authorName}{commit.isMine ? " · 내 커밋" : ""}</span>
-            </li>
-          ))}
-        </ul>
+        <div>
+          {commits.length === 0 ? (
+            <p className="muted">커밋 없음</p>
+          ) : (
+            <ul className="commit-list">
+              {commits.map((commit) => (
+                <li key={commit.hash}>
+                  <strong>{commit.subject}</strong>
+                  <span>
+                    {commit.shortHash} · {commit.authorName}
+                    {commit.isMine ? " · 내 커밋" : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </section>
     </div>
   );
+}
+
+function fileCodeClass(status: string): string {
+  const trimmed = status.trim();
+  if (!trimmed) return "";
+  if (trimmed.includes("A") || trimmed.includes("?")) return "code-added";
+  if (trimmed.includes("D")) return "code-deleted";
+  if (trimmed.includes("M") || trimmed.includes("R")) return "code-modified";
+  return "";
 }

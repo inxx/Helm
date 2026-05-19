@@ -22,7 +22,7 @@ export function ApprovalInbox({ snapshot, onRefresh }: ApprovalInboxProps) {
   }
 
   return (
-    <section className="content-panel approval-inbox">
+    <section className="approval-inbox">
       <h2>승인 대기</h2>
       {approvals.length === 0 ? <p className="muted">승인 대기 항목이 없습니다.</p> : null}
       <ul className="plain-list">
