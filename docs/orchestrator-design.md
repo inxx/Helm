@@ -53,10 +53,24 @@ Phase 1은 제품 껍데기와 데이터 기반을 검증한다. Phase 2는 Helm
 ```text
 Phase 1: 프로젝트 열기 -> repo-local DB -> 태스크/Git skeleton
 Phase 2: 태스크 생성 -> stub role run -> structured result -> audit log -> 상태 전이
-Phase 3: worktree -> 실제 agent 실행 -> gate chain -> merge 대기
+Phase 3a: worktree -> Helm host runner -> Codex/Claude 단일 실행
+Phase 3b: Docker Hermes observer -> 실행 관찰/감사 보조
+Phase 3c: verifier/reviewer/tester chain -> merge 대기
 ```
 
 Phase 2가 끝나기 전까지는 "AI 개발 조직 운영"을 제품 가치로 검증했다고 보지 않는다.
+
+### 성공을 위한 축소 경로
+
+Helm은 Jira, Slack, 터미널, Git graph를 모두 붙여야 가치가 생기는 제품이 아니다. 첫 성공은 "로컬 repo의 태스크 하나가 계획, 실행, 검토, 승인, 기록까지 추적된다"는 core loop에서 나온다.
+
+따라서 구현 우선순위는 다음 원칙을 따른다.
+
+- Phase 1은 제품 가치 검증이 아니라 기반 검증이다. 오래 끌지 않는다.
+- Phase 2에서 상태 전이, 승인, stub run, audit log가 실제 UI와 DB에 일관되게 반영되어야 한다.
+- Phase 3은 한 번에 구현하지 않고 `3a Helm host runner`, `3b Docker Hermes observer`, `3c gate chain`으로 나눈다.
+- 실제 agent 실행은 `maxParallelRuns=1`에서 시작한다. worktree 격리, artifact 저장, diff 검증, cancel/retry가 안정화된 뒤 `2`로 올린다.
+- Jira, Slack, terminal split, Git graph는 core loop가 검증된 뒤 붙인다.
 
 ## 참고 레퍼런스
 
@@ -90,6 +104,8 @@ Phase 1은 제품 골격을 검증하는 단계다. agent 실행, terminal PTY, 
 - Terminal: xterm.js + Rust PTY service
 - Secret storage: macOS Keychain
 - Git integration: git CLI 기반 worktree/branch/status/merge 관리
+- Runner: HelmHostRunner가 로컬 host에서 Claude/Codex CLI 실행
+- Observer: DockerHermesObserver는 Phase 3b에서 실행 관찰/감사 보조
 
 Tauri를 선택한 이유는 로컬 데스크톱 앱으로 가볍게 배포하면서도 파일 시스템, 프로세스 실행, secure storage, 네이티브 창 제어를 다룰 수 있기 때문이다. agent 실행, git 조작, 터미널 PTY는 UI가 직접 수행하지 않고 backend command layer가 담당한다.
 
@@ -379,6 +395,72 @@ Source of truth 규칙:
 - Tester: test command exit code와 실패 로그를 기반으로 `pass | fail`을 반환한다.
 
 structured result가 없거나 schema validation에 실패하면 Helm은 stdout/stderr 요약만 저장하고 해당 run을 `AgentRunStatus=NeedsInspection`으로 기록한다.
+
+### Execution Owner와 Observer 계약
+
+Role Adapter는 "무엇을 실행할지"를 정하고, HelmHostRunner는 "로컬 host에서 어떻게 실행할지"를 담당한다. DockerHermesObserver는 실행 주체가 아니라 HelmHostRunner의 run lifecycle, artifact, policy signal을 관찰하는 보조 계층이다. Helm의 상태 전이, 승인, 다음 role 결정은 Runner나 Observer가 아니라 Helm backend가 소유한다.
+
+Phase 3 실행/관찰 구성:
+
+- `HelmHostRunner`: task worktree에서 인증된 Claude/Codex CLI를 controlled child process로 실행한다.
+- `DockerHermesObserver`: Docker container에서 host run의 event, artifact, timeout, policy signal을 관찰한다.
+
+HelmHostRunner 입력:
+
+- `runId`
+- `taskId`
+- `roleId`
+- `worktreePath`
+- `artifactDir`
+- `contextPackPath`
+- `contextManifestPath`
+- `resultPath`
+- `summaryPath`
+- `schemaPath`
+- `timeoutSeconds`
+- `allowedCommandPolicy`
+
+HelmHostRunner 출력:
+
+- `exitCode`
+- `startedAt`
+- `finishedAt`
+- `stdoutLogPath`
+- `stderrLogPath`
+- `resultPath`
+- `summaryPath`
+- `observedChangedFiles`
+- `policyViolations`
+
+Run event stream:
+
+```text
+run.started
+process.output
+artifact.created
+git.changed
+policy.blocked
+run.finished
+```
+
+DockerHermesObserver는 위 event stream과 artifact directory를 관찰하고, 누락 artifact, timeout 의심, policy violation 의심, Docker 관찰 실패 같은 보조 신호를 Helm backend에 보고한다. Hermes는 Helm의 상위 오케스트레이터가 아니며 TaskStatus 전이, approval 생성, 다음 role scheduling, audit source of truth, provider credential, Claude/Codex CLI 실행을 소유하지 않는다.
+
+Provider credential 원칙:
+
+- Claude/Codex 인증은 Helm backend와 로컬 host가 소유한다.
+- DockerHermesObserver container에는 provider token, login session, Keychain secret을 전달하지 않는다.
+- Hermes는 provider API를 직접 호출하지 않는다.
+- 인증 실패는 Hermes 오류가 아니라 HelmHostRunner 또는 provider 설정 오류로 기록한다.
+
+DockerHermesObserver 기본 관찰 스펙:
+
+- `artifactDir`를 read-only 또는 append-only 관찰 대상으로 mount한다.
+- task worktree는 가능하면 mount하지 않는다. 필요하면 read-only 관찰 대상으로만 mount한다.
+- provider credential directory와 Keychain secret은 mount하지 않는다.
+- observer failure는 agent run 실패로 즉시 간주하지 않고 `NeedsInspection` 또는 observer warning으로 기록한다.
+- 권장 Docker Desktop 리소스는 CPU 2-4 cores, memory 2-4GB, disk image 64GB 이상이다.
+- `maxParallelRuns`는 HelmHostRunner 설정이며 Hermes observer의 병렬 실행 권한이 아니다.
+- 같은 worktree에 두 HelmHostRunner를 동시에 실행하지 않는다.
 
 ## 품질 게이트 결과 계약
 
@@ -734,6 +816,8 @@ Helm은 Scoped Allowlist를 사용한다.
 
 임의 CLI agent를 일반 child process로 실행하는 것만으로는 OS 수준 파일 쓰기와 네트워크 접근을 완전히 강제할 수 없다. 따라서 "agent runner는 task worktree만 writable"은 최종 목표로 두되, 초기 구현에서는 worktree 격리, command allowlist, 실행 전 정책 차단, 실행 후 diff 검증을 먼저 닫는다. OS sandbox나 더 강한 process isolation은 별도 보안 hardening 단계에서 검증한다.
 
+DockerHermesObserver는 Phase 3b의 observability/audit hardening 수단이다. 현재 성공 경로에서는 Docker container가 agent 실행 보안 경계가 아니다. 최종 판정은 Helm backend가 실제 Git diff, artifact, exit code, structured result를 다시 계산해 내린다.
+
 네트워크 권한은 두 종류로 나눈다.
 
 - 허용된 connector 네트워크: Jira, Slack, AI provider/CLI 등 사용자가 설정한 connector가 필요한 네트워크
@@ -865,6 +949,56 @@ helm:
 - `supersedes`: 대체한 이전 artifact
 
 이 구조는 AI Factory의 artifact metadata/audit 개념을 Helm의 MD backfill 정책에 맞게 줄인 것이다.
+
+## Markdown과 artifact 확인 단계
+
+Helm은 작업 중 생성되는 Markdown을 처음부터 넓게 스캔하지 않는다. 먼저 Helm이 직접 만든 run artifact를 안전하게 확인하는 기능부터 닫고, 이후 사용자가 관리하는 계획/Obsidian 문서로 확장한다.
+
+단계별 실행 계획:
+
+```text
+Phase 2: run artifact viewer
+Phase 3a: 실제 Claude/Codex run의 summary.md/result/log 확인
+Phase 4: task 상세 문서 탭
+Phase 5+: MD backfill과 Obsidian 문서 연결
+```
+
+### Phase 2. Run artifact viewer
+
+대상:
+
+- `.helm/artifacts/runs/<agent-run-id>/summary.md`
+- `.helm/artifacts/runs/<agent-run-id>/structured-result.json`
+- `.helm/artifacts/runs/<agent-run-id>/stdout.log`
+- `.helm/artifacts/runs/<agent-run-id>/stderr.log`
+
+규칙:
+
+- `agent_runs.artifact_dir` 아래의 allowlisted 파일만 읽는다.
+- 임의 Markdown 경로, 절대 경로, `..` path traversal, symlink target은 읽지 않는다.
+- UI는 task 상세의 run history에서 artifact를 인라인으로 보여준다.
+- Phase 2에서는 repo 전체 Markdown 검색, Obsidian scan, MD backfill을 하지 않는다.
+
+### Phase 3a. 실제 run artifact 확인
+
+HelmHostRunner가 실제 Claude/Codex를 실행해도 artifact viewer 계약은 Phase 2와 같다. 실제 agent가 `summary.md`를 만들지 못하면 Helm wrapper가 fallback summary를 만들고 run은 `NeedsInspection`으로 멈춘다.
+
+### Phase 4. Task 문서 탭
+
+task 상세에 문서 탭을 추가한다.
+
+표시 대상:
+
+- 승인된 계획 문서
+- run summary
+- review/test 결과 Markdown
+- 관련 artifact metadata
+
+이 단계에서도 사용자가 작성한 Markdown 원본을 자동 수정하지 않는다.
+
+### Phase 5 이후. MD backfill과 Obsidian 연결
+
+Jira/Slack key, sync status, artifact relation처럼 Helm이 관리하는 metadata만 frontmatter `helm` namespace 또는 Helm managed block에 기록한다. Obsidian scan/backfill은 사용자가 연결한 vault 경로와 승인된 문서에만 수행한다.
 
 ## 프로젝트 학습 루프
 
@@ -1010,7 +1144,7 @@ Helm은 모든 중요한 전환을 기록한다.
 
 ## 구현 순서
 
-Phase 0과 Phase 1의 세부 구현 계획은 [phase-0-1-implementation-plan.md](phase-0-1-implementation-plan.md)를 기준으로 한다.
+Phase 0과 Phase 1의 세부 구현 계획은 [phase-0-1-implementation-plan.md](phase-0-1-implementation-plan.md)를 기준으로 한다. Phase 2의 세부 구현 계획은 [phase-2-implementation-plan.md](phase-2-implementation-plan.md)를 기준으로 한다.
 
 ### Phase 0. 문서와 기존 상태 정리
 
@@ -1038,15 +1172,30 @@ Phase 0과 Phase 1의 세부 구현 계획은 [phase-0-1-implementation-plan.md]
 - 감사 로그
 - 완료 기준: 상태 전이, 승인 대기, 감사 로그, stub adapter run 기록이 DB와 UI에 일관되게 반영된다.
 
-### Phase 3. Worktree와 agent 실행
+### Phase 3a. Worktree와 Helm host runner
 
 - git worktree/branch 생성
-- agent command 실행
+- HelmHostRunner 기반 Claude/Codex 단일 실행
 - Context Pack 생성
 - log/diff/artifact 저장
+- cancel/retry/timeout 처리
+- 완료 기준: task worktree에서 agent 1개가 실행되고, Context Pack, stdout/stderr, summary, structured result, diff artifact가 저장된다. 같은 worktree 동시 실행은 금지한다.
+
+### Phase 3b. Docker Hermes observer 검증
+
+- DockerHermesObserver adapter 추가
+- Docker daemon 상태와 observer resource limit 점검
+- artifact directory read-only 관찰 검증
+- HelmHostRunner가 실행한 Codex 또는 Claude 단일 role을 observer가 추적
+- observer warning과 policy signal을 `AgentRunStatus=NeedsInspection` 또는 audit warning으로 매핑
+- 완료 기준: Claude/Codex 실행과 인증은 HelmHostRunner가 소유하고, Hermes는 Docker에서 실행 관찰/감사 보조 신호만 제공한다.
+
+### Phase 3c. Gate chain과 merge 대기
+
 - Plan Verifier, Code Reviewer, Tester chain
 - gate result schema 처리
-- 완료 기준: task worktree에서 controlled runner가 실행되고, Context Pack, stdout/stderr, summary, structured result, diff artifact가 저장되며 검토/리뷰/테스트 chain이 상태 머신을 전환한다.
+- merge approval 대기 상태 연결
+- 완료 기준: verifier/reviewer/tester 결과가 상태 머신을 전환하고, merge 전 사용자 승인 없이는 진행하지 않는다.
 
 ### Phase 4. UI 완성
 
