@@ -191,6 +191,12 @@ pub fn effective_settings(conn: &Connection, project_id: &str) -> CommandResult<
         role_presets: settings
             .remove("rolePresets")
             .unwrap_or_else(default_role_presets),
+        ai_connections: settings
+            .remove("aiConnections")
+            .unwrap_or_else(default_ai_connections),
+        role_assignments: settings
+            .remove("roleAssignments")
+            .unwrap_or_else(default_role_assignments),
         worktree_root: settings
             .remove("worktreeRoot")
             .and_then(|value| value.as_str().map(str::to_string)),
@@ -217,6 +223,12 @@ pub fn update_settings(
     let mut values = Vec::new();
     if let Some(value) = patch.role_presets {
         values.push(("rolePresets", value));
+    }
+    if let Some(value) = patch.ai_connections {
+        values.push(("aiConnections", value));
+    }
+    if let Some(value) = patch.role_assignments {
+        values.push(("roleAssignments", value));
     }
     if let Some(value) = patch.worktree_root {
         values.push(("worktreeRoot", option_string(value)));
@@ -2166,6 +2178,45 @@ fn default_role_presets() -> Value {
         { "roleId": "plan_verifier", "label": "계획 검토자", "provider": null },
         { "roleId": "code_reviewer", "label": "코드 리뷰어", "provider": null },
         { "roleId": "tester", "label": "테스트 담당자", "provider": null }
+    ])
+}
+
+fn default_ai_connections() -> Value {
+    json!([])
+}
+
+fn default_role_assignments() -> Value {
+    json!([
+        {
+            "roleId": "planner",
+            "selectionMode": "single",
+            "connectionIds": [],
+            "aggregationPolicy": null
+        },
+        {
+            "roleId": "coder",
+            "selectionMode": "single",
+            "connectionIds": [],
+            "aggregationPolicy": null
+        },
+        {
+            "roleId": "plan_verifier",
+            "selectionMode": "multiple",
+            "connectionIds": [],
+            "aggregationPolicy": "all_pass"
+        },
+        {
+            "roleId": "code_reviewer",
+            "selectionMode": "multiple",
+            "connectionIds": [],
+            "aggregationPolicy": "all_pass"
+        },
+        {
+            "roleId": "tester",
+            "selectionMode": "multiple",
+            "connectionIds": [],
+            "aggregationPolicy": "all_pass"
+        }
     ])
 }
 

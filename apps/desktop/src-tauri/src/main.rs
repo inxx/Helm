@@ -3,11 +3,11 @@ mod git;
 mod models;
 
 use crate::models::{
-    AgentRunSummary, ApprovalSummary, CommandError, CommandResult, CreateEpicInput,
-    CreateTaskInput, EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary,
-    GitFileStatus, GitRepositoryState, ProjectContext, ProjectSettingsPatch, ProjectSnapshot,
-    ProjectSummary, RunnerCheckResult, RunnerTemplateSummary, TaskSummary, TaskWorktreeSummary,
-    TerminalCommandResult,
+    AgentRunSummary, AiConnectionCheckResult, ApprovalSummary, CommandError, CommandResult,
+    CreateEpicInput, CreateTaskInput, EffectiveSettings, EpicSummary, GitBranchSummary,
+    GitCommitSummary, GitFileStatus, GitRepositoryState, ProjectContext, ProjectSettingsPatch,
+    ProjectSnapshot, ProjectSummary, RunnerCheckResult, RunnerTemplateSummary, TaskSummary,
+    TaskWorktreeSummary, TerminalCommandResult,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -113,6 +113,8 @@ fn apply_runner_template(
         &project_id,
         ProjectSettingsPatch {
             role_presets: Some((template.presets)()),
+            ai_connections: Some((template.connections)()),
+            role_assignments: Some((template.assignments)()),
             worktree_root: None,
             obsidian_vault_path: None,
             token_budget: None,
@@ -167,6 +169,69 @@ fn check_role_runner(
         }),
         Err(err) => Ok(RunnerCheckResult {
             role_id,
+            available: false,
+            command,
+            message: err.to_string(),
+        }),
+    }
+}
+
+#[tauri::command]
+fn check_ai_connection(
+    project_id: String,
+    connection: Value,
+    state: State<'_, AppState>,
+) -> CommandResult<AiConnectionCheckResult> {
+    let _ = project_context(&state, &project_id)?;
+    let connection_id = connection
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let command = connection_command_for_check(&connection)?;
+    if command.is_empty() {
+        return Ok(AiConnectionCheckResult {
+            connection_id,
+            available: false,
+            command,
+            message: "AI 연결에 command가 없습니다.".to_string(),
+        });
+    }
+
+    let check = if command
+        .iter()
+        .any(|part| part.contains("fixture-runner.mjs"))
+    {
+        Command::new(&command[0])
+            .args(&command[1..])
+            .arg("--health")
+            .output()
+    } else {
+        Command::new(&command[0]).args(&command[1..]).output()
+    };
+
+    match check {
+        Ok(output) if output.status.success() => Ok(AiConnectionCheckResult {
+            connection_id,
+            available: true,
+            command,
+            message: "AI 연결 command를 실행할 수 있습니다.".to_string(),
+        }),
+        Ok(output) => {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Ok(AiConnectionCheckResult {
+                connection_id,
+                available: false,
+                command,
+                message: if message.is_empty() {
+                    String::from_utf8_lossy(&output.stdout).trim().to_string()
+                } else {
+                    message
+                },
+            })
+        }
+        Err(err) => Ok(AiConnectionCheckResult {
+            connection_id,
             available: false,
             command,
             message: err.to_string(),
@@ -525,6 +590,8 @@ struct RunnerTemplate {
     label: &'static str,
     description: &'static str,
     presets: fn() -> Value,
+    connections: fn() -> Value,
+    assignments: fn() -> Value,
 }
 
 fn runner_templates() -> Vec<RunnerTemplate> {
@@ -534,18 +601,24 @@ fn runner_templates() -> Vec<RunnerTemplate> {
             label: "Fixture runner",
             description: "로컬 검증용 runner입니다. 실제 AI 호출 없이 artifact와 diff를 생성합니다.",
             presets: fixture_role_presets,
+            connections: fixture_ai_connections,
+            assignments: fixture_role_assignments,
         },
         RunnerTemplate {
             id: "codex",
             label: "Codex CLI",
             description: "설치된 codex CLI를 role runner로 사용합니다. command는 환경에 맞게 조정해야 합니다.",
             presets: codex_role_presets,
+            connections: codex_ai_connections,
+            assignments: codex_role_assignments,
         },
         RunnerTemplate {
             id: "claude",
             label: "Claude CLI",
             description: "설치된 claude CLI를 role runner로 사용합니다. 로컬 인증이 필요합니다.",
             presets: claude_role_presets,
+            connections: claude_ai_connections,
+            assignments: claude_role_assignments,
         },
     ]
 }
@@ -573,6 +646,25 @@ fn fixture_role_presets() -> Value {
         .collect::<Vec<_>>())
 }
 
+fn fixture_ai_connections() -> Value {
+    let script = fixture_runner_path();
+    json!([
+        {
+            "id": "fixture-pass",
+            "label": "Fixture pass",
+            "provider": "fixture",
+            "commandArgs": ["node", script, "--mode", "pass"],
+            "healthCheckArgs": ["node", script],
+            "timeoutSeconds": 60,
+            "enabled": true
+        }
+    ])
+}
+
+fn fixture_role_assignments() -> Value {
+    assignments_for_connection("fixture-pass")
+}
+
 fn codex_role_presets() -> Value {
     json!(role_ids()
         .into_iter()
@@ -594,6 +686,32 @@ fn codex_role_presets() -> Value {
         .collect::<Vec<_>>())
 }
 
+fn codex_ai_connections() -> Value {
+    json!([
+        {
+            "id": "codex-local",
+            "label": "Codex CLI",
+            "provider": "codex",
+            "commandArgs": [
+                "codex",
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--cd",
+                "{worktreePath}",
+                "--",
+                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+            ],
+            "healthCheckArgs": ["codex", "--version"],
+            "timeoutSeconds": 1800,
+            "enabled": true
+        }
+    ])
+}
+
+fn codex_role_assignments() -> Value {
+    assignments_for_connection("codex-local")
+}
+
 fn claude_role_presets() -> Value {
     json!(role_ids()
         .into_iter()
@@ -608,6 +726,43 @@ fn claude_role_presets() -> Value {
             ],
             "timeoutSeconds": 1800
         }))
+        .collect::<Vec<_>>())
+}
+
+fn claude_ai_connections() -> Value {
+    json!([
+        {
+            "id": "claude-local",
+            "label": "Claude CLI",
+            "provider": "claude",
+            "commandArgs": [
+                "claude",
+                "-p",
+                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+            ],
+            "healthCheckArgs": ["claude", "--version"],
+            "timeoutSeconds": 1800,
+            "enabled": true
+        }
+    ])
+}
+
+fn claude_role_assignments() -> Value {
+    assignments_for_connection("claude-local")
+}
+
+fn assignments_for_connection(connection_id: &str) -> Value {
+    json!(role_ids()
+        .into_iter()
+        .map(|(role_id, _)| {
+            let multiple = matches!(role_id, "plan_verifier" | "code_reviewer" | "tester");
+            json!({
+                "roleId": role_id,
+                "selectionMode": if multiple { "multiple" } else { "single" },
+                "connectionIds": [connection_id],
+                "aggregationPolicy": if multiple { Value::String("all_pass".to_string()) } else { Value::Null }
+            })
+        })
         .collect::<Vec<_>>())
 }
 
@@ -650,6 +805,28 @@ fn role_command_for_check(role_presets: &Value, role_id: &str) -> CommandResult<
     }
 
     Ok(Vec::new())
+}
+
+fn connection_command_for_check(connection: &Value) -> CommandResult<Vec<String>> {
+    if let Some(args) = connection.get("healthCheckArgs").and_then(Value::as_array) {
+        return string_array(args, "healthCheckArgs는 문자열 배열이어야 합니다.");
+    }
+    if let Some(args) = connection.get("commandArgs").and_then(Value::as_array) {
+        return string_array(args, "commandArgs는 문자열 배열이어야 합니다.");
+    }
+    Ok(Vec::new())
+}
+
+fn string_array(args: &[Value], message: &str) -> CommandResult<Vec<String>> {
+    let mut parsed = Vec::new();
+    for arg in args {
+        parsed.push(
+            arg.as_str()
+                .ok_or_else(|| CommandError::validation(message))?
+                .to_string(),
+        );
+    }
+    Ok(parsed)
 }
 
 fn project_context(state: &State<'_, AppState>, project_id: &str) -> CommandResult<ProjectContext> {
@@ -767,6 +944,7 @@ fn main() {
             list_runner_templates,
             apply_runner_template,
             check_role_runner,
+            check_ai_connection,
             list_epics,
             create_epic,
             list_tasks,

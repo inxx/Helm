@@ -27,10 +27,29 @@ export interface ProjectSummary {
 
 export interface EffectiveSettings {
   rolePresets: unknown;
+  aiConnections: AiConnection[];
+  roleAssignments: RoleAssignment[];
   worktreeRoot: string | null;
   obsidianVaultPath: string | null;
   tokenBudget: number | null;
   artifactRetentionDays: number | null;
+}
+
+export interface AiConnection {
+  id: string;
+  label: string;
+  provider: "fixture" | "codex" | "claude" | string;
+  commandArgs: string[];
+  healthCheckArgs?: string[];
+  timeoutSeconds: number;
+  enabled: boolean;
+}
+
+export interface RoleAssignment {
+  roleId: "planner" | "coder" | "plan_verifier" | "code_reviewer" | "tester";
+  selectionMode: "single" | "multiple";
+  connectionIds: string[];
+  aggregationPolicy?: "all_pass" | "any_pass" | "manual_decision" | null;
 }
 
 export interface RunnerTemplateSummary {
@@ -41,6 +60,13 @@ export interface RunnerTemplateSummary {
 
 export interface RunnerCheckResult {
   roleId: string;
+  available: boolean;
+  command: string[];
+  message: string;
+}
+
+export interface AiConnectionCheckResult {
+  connectionId: string;
   available: boolean;
   command: string[];
   message: string;
@@ -173,6 +199,8 @@ export interface CreateTaskInput {
 
 export interface ProjectSettingsPatch {
   rolePresets?: unknown;
+  aiConnections?: AiConnection[];
+  roleAssignments?: RoleAssignment[];
   worktreeRoot?: string | null;
   obsidianVaultPath?: string | null;
   tokenBudget?: number | null;

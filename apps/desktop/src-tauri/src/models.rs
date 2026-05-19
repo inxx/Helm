@@ -65,6 +65,8 @@ pub struct ProjectSummary {
 #[serde(rename_all = "camelCase")]
 pub struct EffectiveSettings {
     pub role_presets: Value,
+    pub ai_connections: Value,
+    pub role_assignments: Value,
     pub worktree_root: Option<String>,
     pub obsidian_vault_path: Option<String>,
     pub token_budget: Option<i64>,
@@ -83,6 +85,15 @@ pub struct RunnerTemplateSummary {
 #[serde(rename_all = "camelCase")]
 pub struct RunnerCheckResult {
     pub role_id: String,
+    pub available: bool,
+    pub command: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiConnectionCheckResult {
+    pub connection_id: String,
     pub available: bool,
     pub command: Vec<String>,
     pub message: String,
@@ -252,6 +263,8 @@ pub struct CreateTaskInput {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSettingsPatch {
     pub role_presets: Option<Value>,
+    pub ai_connections: Option<Value>,
+    pub role_assignments: Option<Value>,
     pub worktree_root: Option<Option<String>>,
     pub obsidian_vault_path: Option<Option<String>>,
     pub token_budget: Option<Option<i64>>,

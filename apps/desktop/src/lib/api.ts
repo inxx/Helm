@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentRunSummary,
+  AiConnection,
+  AiConnectionCheckResult,
   ApprovalSummary,
   CreateTaskInput,
   GitBranchSummary,
@@ -40,6 +42,9 @@ export const api = {
   },
   checkRoleRunner(projectId: string, roleId: string) {
     return invoke<RunnerCheckResult>("check_role_runner", { projectId, roleId });
+  },
+  checkAiConnection(projectId: string, connection: AiConnection) {
+    return invoke<AiConnectionCheckResult>("check_ai_connection", { projectId, connection });
   },
   updateTaskStatus(
     projectId: string,
