@@ -35,7 +35,7 @@ export function AppShell<T extends string>({
   children,
 }: AppShellProps<T>) {
   return (
-    <div className="grid min-h-screen grid-rows-[auto_minmax(0,1fr)] bg-background text-foreground">
+    <div className="grid h-screen min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-background text-foreground">
       <header
         className="flex items-stretch border-b border-border bg-background"
         role="tablist"
@@ -73,7 +73,7 @@ export function AppShell<T extends string>({
         </div>
       </header>
 
-      <div className="grid min-h-0 grid-cols-[232px_minmax(0,1fr)]">
+      <div className="grid min-h-0 grid-cols-[232px_minmax(0,1fr)] overflow-hidden">
         <aside className="flex flex-col gap-3 border-r border-border bg-sidebar p-3.5">
           <div className="flex min-h-0 flex-col gap-1.5">
             <h3 className="px-1 text-[10.5px] font-semibold tracking-wider text-muted-foreground uppercase">
@@ -137,7 +137,7 @@ export function AppShell<T extends string>({
           </div>
         </aside>
 
-        <main className="main flex min-w-0 flex-col">{children}</main>
+        <main className="main flex min-h-0 min-w-0 flex-col overflow-hidden">{children}</main>
       </div>
     </div>
   );
