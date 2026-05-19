@@ -155,7 +155,7 @@ export function App() {
       onSwitchProject={switchProject}
       busy={busy}
     >
-      {snapshot ? <StatusBar snapshot={snapshot} /> : null}
+      {snapshot && screen !== "terminal" ? <StatusBar snapshot={snapshot} /> : null}
       {error ? <div className="error-banner">{error}</div> : null}
       {bootStatus === "restoring" ? (
         <section className="empty-state">
