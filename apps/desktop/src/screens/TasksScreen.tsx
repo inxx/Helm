@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../lib/api";
 import type { CreateTaskInput, ProjectSnapshot, TaskSummary } from "../lib/types";
+import { AgentUsageBar } from "../components/AgentUsageBar";
 import { ApprovalInbox } from "../components/ApprovalInbox";
 import { TaskBoard } from "../components/TaskBoard";
 import { TaskDetail } from "../components/TaskDetail";
@@ -74,23 +75,23 @@ export function TasksScreen({
       <section className="task-workspace">
         <div className="section-header">
           <div>
-            <h2>태스크</h2>
-            <p>작업을 만들고 상태를 수동으로 관리합니다.</p>
+            <h2>Agent board</h2>
+            <p>계획, 실행, 검토, 테스트, 머지까지 태스크 흐름을 추적합니다.</p>
           </div>
         </div>
 
         <div className="create-panel">
           <div className="segmented">
             <button className={mode === "new" ? "active" : ""} onClick={() => setMode("new")} type="button">
-              새 작업 만들기
+              새 태스크
             </button>
             <button className={mode === "jira" ? "active" : ""} onClick={() => setMode("jira")} type="button">
-              기존 Jira 작업에서 시작
+              Jira에서 시작
             </button>
           </div>
           <div className="form-grid">
             <input
-              placeholder="작업 제목"
+              placeholder="태스크 제목"
               value={title}
               onChange={(event) => setTitle(event.target.value)}
             />
@@ -102,12 +103,12 @@ export function TasksScreen({
               />
             ) : null}
             <input
-              placeholder="설명 또는 기대 결과"
+              placeholder="설명, 기대 결과, acceptance"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
             />
             <button disabled={busy || !title.trim()} onClick={createTask} type="button">
-              작업 만들기
+              만들기
             </button>
           </div>
         </div>
@@ -121,6 +122,7 @@ export function TasksScreen({
             onSelectTask={onSelectTask}
           />
         )}
+        <AgentUsageBar snapshot={snapshot} />
         <ApprovalInbox snapshot={snapshot} onRefresh={onRefresh} />
       </section>
       <TaskDetail

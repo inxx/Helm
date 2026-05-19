@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { GitBranch, Play, Plus, SplitSquareHorizontal, SquareTerminal, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type { ProjectSnapshot, TerminalCommandResult } from "../lib/types";
@@ -40,6 +40,7 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
   const taskOptions = useMemo(() => snapshot?.tasks ?? [], [snapshot]);
   const usesSplitScroll = panes.length >= 5;
   const selectedPaneId = activePaneId ?? panes[0]?.id ?? null;
+  const activePane = panes.find((pane) => pane.id === selectedPaneId) ?? panes[0] ?? null;
 
   useEffect(() => {
     if (!selectedPaneId) return;
@@ -71,6 +72,7 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
   }
 
   const projectRootPath = snapshot.project.rootPath;
+  const repository = snapshot.repository;
 
   function updatePane(id: string, patch: Partial<TerminalPaneState>) {
     setPanes((current) => current.map((pane) => (pane.id === id ? { ...pane, ...patch } : pane)));
@@ -123,6 +125,8 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
   function renderPane(pane: TerminalPaneState, index: number) {
     const worktreeTaskMissing = pane.cwdMode === "worktree" && !pane.taskId;
     const commandMissing = !pane.command.trim();
+    const lastResult = pane.history[0] ?? null;
+    const selectedTask = taskOptions.find((task) => task.id === pane.taskId) ?? null;
     return (
       <article
         className={selectedPaneId === pane.id ? "terminal-pane active" : "terminal-pane"}
@@ -131,7 +135,11 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
         onFocusCapture={() => selectPane(pane.id)}
       >
         <header className="terminal-pane-header">
-          <strong>pane {index + 1}</strong>
+          <div>
+            <span className={pane.running ? "terminal-dot running" : "terminal-dot"} aria-hidden="true" />
+            <strong>pane {index + 1}</strong>
+            <small>{pane.cwdMode === "worktree" ? selectedTask?.title ?? "worktree" : "project root"}</small>
+          </div>
           <button
             className="terminal-close-pane"
             disabled={pane.running}
@@ -196,8 +204,10 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
             disabled={pane.running || worktreeTaskMissing || commandMissing}
             onClick={() => runCommand(pane)}
             type="button"
+            title="명령 실행"
           >
-            {pane.running ? "실행 중" : "실행"}
+            <Play size={14} aria-hidden="true" />
+            <span>{pane.running ? "실행 중" : "실행"}</span>
           </button>
         </div>
 
@@ -222,6 +232,22 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
             </article>
           ))}
         </div>
+        <footer className="terminal-pane-status">
+          <span>{pane.cwdMode === "worktree" ? "worktree" : "root"}</span>
+          <span>
+            <GitBranch size={12} aria-hidden="true" />
+            {repository.currentBranch ?? "detached"}
+          </span>
+          <span>{repository.dirtyCount} files changed</span>
+          {lastResult ? (
+            <span className={lastResult.exitCode === 0 ? "ok" : "failed"}>
+              exit {lastResult.exitCode}
+              {lastResult.timedOut ? " · timeout" : ""}
+            </span>
+          ) : (
+            <span>ready</span>
+          )}
+        </footer>
       </article>
     );
   }
@@ -231,50 +257,96 @@ export function TerminalScreen({ snapshot, onOpenProject }: TerminalScreenProps)
       <header className="terminal-header">
         <div>
           <h2>터미널</h2>
-          <p>프로젝트 root와 태스크 worktree 명령을 pane별로 나눠 실행합니다.</p>
+          <p>{snapshot.project.name} · root와 태스크 worktree를 분할 pane에서 실행합니다.</p>
         </div>
         <button className="terminal-add-pane" onClick={addPane} type="button">
-          pane 추가
+          <Plus size={14} aria-hidden="true" />
+          <span>pane 추가</span>
         </button>
       </header>
 
-      {panes.length > 0 ? (
-        <nav className="terminal-tab-strip" aria-label="열린 터미널">
-          {panes.map((pane, index) => (
-            <button
-              className={selectedPaneId === pane.id ? "active" : ""}
-              key={pane.id}
-              onClick={() => selectPane(pane.id)}
-              type="button"
-            >
-              <span className={pane.running ? "running" : ""} aria-hidden="true" />
-              <strong>pane {index + 1}</strong>
-              <small>{pane.cwdMode === "worktree" ? "worktree" : "root"}</small>
-            </button>
-          ))}
-        </nav>
-      ) : null}
-
-      <div
-        className={
-          panes.length === 0
-            ? "terminal-pane-grid empty"
-            : usesSplitScroll
-              ? "terminal-pane-grid split-scroll"
-              : "terminal-pane-grid"
-        }
-        data-pane-count={panes.length}
-      >
-        {panes.length === 0 ? (
-          <div className="terminal-empty">
-            <p>열린 터미널이 없습니다.</p>
-            <button className="terminal-add-pane" onClick={addPane} type="button">
-              터미널 추가
-            </button>
+      <div className="terminal-workbench">
+        <aside className="terminal-workspaces" aria-label="터미널 워크스페이스">
+          <div className="terminal-workspaces-title">
+            <SquareTerminal size={15} aria-hidden="true" />
+            <span>Sessions</span>
           </div>
-        ) : (
-          panes.map((pane, index) => renderPane(pane, index))
-        )}
+          <nav className="terminal-tab-strip" aria-label="열린 터미널">
+            {panes.map((pane, index) => {
+              const lastResult = pane.history[0] ?? null;
+              return (
+                <button
+                  className={selectedPaneId === pane.id ? "active" : ""}
+                  key={pane.id}
+                  onClick={() => selectPane(pane.id)}
+                  type="button"
+                >
+                  <span
+                    className={
+                      pane.running
+                        ? "terminal-dot running"
+                        : lastResult && lastResult.exitCode !== 0
+                          ? "terminal-dot failed"
+                          : "terminal-dot"
+                    }
+                    aria-hidden="true"
+                  />
+                  <strong>pane {index + 1}</strong>
+                  <small>{pane.cwdMode === "worktree" ? "worktree" : "root"}</small>
+                </button>
+              );
+            })}
+          </nav>
+          <button className="terminal-sidebar-action" onClick={addPane} type="button">
+            <Plus size={14} aria-hidden="true" />
+            <span>새 pane</span>
+          </button>
+          <div className="terminal-workspace-state">
+            <span>branch</span>
+            <strong>{repository.currentBranch ?? "detached"}</strong>
+            <span>changes</span>
+            <strong>{repository.dirtyCount}</strong>
+          </div>
+        </aside>
+
+        <div className="terminal-main">
+          <div className="terminal-split-toolbar">
+            <div>
+              <SplitSquareHorizontal size={15} aria-hidden="true" />
+              <span>
+                {panes.length} pane{panes.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div>
+              <span>{activePane?.cwdMode === "worktree" ? "worktree cwd" : "project cwd"}</span>
+              <span>{repository.stagedCount} staged</span>
+              <span>{repository.untrackedCount} untracked</span>
+            </div>
+          </div>
+
+          <div
+            className={
+              panes.length === 0
+                ? "terminal-pane-grid empty"
+                : usesSplitScroll
+                  ? "terminal-pane-grid split-scroll"
+                  : "terminal-pane-grid"
+            }
+            data-pane-count={panes.length}
+          >
+            {panes.length === 0 ? (
+              <div className="terminal-empty">
+                <p>열린 터미널이 없습니다.</p>
+                <button className="terminal-add-pane" onClick={addPane} type="button">
+                  <Plus size={14} aria-hidden="true" />
+                  <span>터미널 추가</span>
+                </button>
+              </div>
+            ) : (
+              panes.map((pane, index) => renderPane(pane, index))
+            )}
+          </div>
+        </div>
       </div>
     </section>
   );
