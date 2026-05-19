@@ -1,6 +1,7 @@
-import { CheckCircle2, FolderTree, Layers, Plug, Workflow, Wrench, XCircle } from "lucide-react";
+import { CheckCircle2, Download, FolderTree, Info, Layers, Plug, RefreshCw, Workflow, Wrench, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
+import { checkForManualUpdate, type ManualUpdateInfo } from "../lib/updater";
 import type {
   AiConnection,
   AiConnectionCheckResult,
@@ -16,7 +17,7 @@ interface SettingsScreenProps {
   onOpenProject: () => void;
 }
 
-type SettingsCategory = "templates" | "connections" | "assignments" | "worktree" | "advanced";
+type SettingsCategory = "templates" | "connections" | "assignments" | "worktree" | "app" | "advanced";
 
 const CATEGORIES: Array<{
   id: SettingsCategory;
@@ -28,6 +29,7 @@ const CATEGORIES: Array<{
   { id: "connections", label: "AI 연결", hint: "Codex · Claude 등 도구 등록", icon: Plug },
   { id: "assignments", label: "작업별 AI 선택", hint: "계획 · 구현 · 검수 · 테스트 매핑", icon: Workflow },
   { id: "worktree", label: "Worktree", hint: "병렬 작업 디렉터리 위치", icon: FolderTree },
+  { id: "app", label: "앱", hint: "Helm 업데이트 확인", icon: Info },
   { id: "advanced", label: "고급", hint: "Role presets JSON · 기존 runner 확인", icon: Wrench },
 ];
 
@@ -57,6 +59,9 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const [roleAssignments, setRoleAssignments] = useState<RoleAssignment[]>([]);
   const [message, setMessage] = useState<{ tone: MessageTone; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [updaterBusy, setUpdaterBusy] = useState(false);
+  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+  const [pendingUpdate, setPendingUpdate] = useState<ManualUpdateInfo | null>(null);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -146,6 +151,41 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     }
   }
 
+  async function checkUpdates() {
+    setUpdaterBusy(true);
+    setMessage(null);
+    try {
+      const result = await checkForManualUpdate();
+      setCurrentVersion(result.currentVersion);
+      setPendingUpdate(result.update);
+      setMessage({
+        tone: result.update ? "info" : "success",
+        text: result.update
+          ? `Helm ${result.update.version} 업데이트를 찾았습니다.`
+          : "현재 최신 버전입니다.",
+      });
+    } catch (error) {
+      setMessage({ tone: "error", text: errorMessage(error, "업데이트 확인에 실패했습니다.") });
+    } finally {
+      setUpdaterBusy(false);
+    }
+  }
+
+  async function installUpdate() {
+    if (!pendingUpdate) return;
+    setUpdaterBusy(true);
+    setMessage({ tone: "info", text: "업데이트 다운로드 및 설치 중…" });
+    try {
+      await pendingUpdate.install();
+      setMessage({ tone: "success", text: "업데이트가 설치되었습니다. 앱을 다시 시작하면 적용됩니다." });
+      setPendingUpdate(null);
+    } catch (error) {
+      setMessage({ tone: "error", text: errorMessage(error, "업데이트 설치에 실패했습니다.") });
+    } finally {
+      setUpdaterBusy(false);
+    }
+  }
+
   function addConnection(provider: "codex" | "claude") {
     setAiConnections((current) => {
       const candidate = provider === "codex" ? codexConnection() : claudeConnection();
@@ -213,6 +253,19 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
       <section className="empty-state">
         <h2>설정</h2>
         <p>프로젝트를 열면 runner, worktree, AI 연결 설정이 표시됩니다.</p>
+        <div className="settings-actions">
+          <button className="secondary-button" disabled={updaterBusy} onClick={checkUpdates} type="button">
+            <RefreshCw size={14} aria-hidden />
+            {updaterBusy ? "확인 중…" : "업데이트 확인"}
+          </button>
+        </div>
+        {message ? (
+          <span className={`settings-status settings-status-${message.tone}`} role="status">
+            {message.tone === "success" ? <CheckCircle2 size={14} aria-hidden /> : null}
+            {message.tone === "error" ? <XCircle size={14} aria-hidden /> : null}
+            {message.text}
+          </span>
+        ) : null}
         <button className="primary-button" onClick={onOpenProject} type="button">
           프로젝트 열기
         </button>
@@ -531,6 +584,38 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               </section>
             ) : null}
 
+            {activeCategory === "app" ? (
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3>앱 업데이트</h3>
+                  <p className="muted">자동 확인 대신 필요할 때 Helm updater를 수동으로 실행합니다.</p>
+                </div>
+                <div className="update-check-panel">
+                  <div>
+                    <strong>Helm</strong>
+                    <span>현재 버전 {currentVersion ?? "확인 전"}</span>
+                  </div>
+                  <button className="secondary-button" disabled={updaterBusy} onClick={checkUpdates} type="button">
+                    <RefreshCw size={14} aria-hidden />
+                    {updaterBusy ? "확인 중…" : "업데이트 확인"}
+                  </button>
+                </div>
+                {pendingUpdate ? (
+                  <article className="update-card">
+                    <div>
+                      <strong>새 버전 {pendingUpdate.version}</strong>
+                      <span>{pendingUpdate.date ? formatDate(pendingUpdate.date) : "배포일 정보 없음"}</span>
+                    </div>
+                    {pendingUpdate.body ? <p>{pendingUpdate.body}</p> : null}
+                    <button className="primary-button" disabled={updaterBusy} onClick={installUpdate} type="button">
+                      <Download size={14} aria-hidden />
+                      다운로드 및 설치
+                    </button>
+                  </article>
+                ) : null}
+              </section>
+            ) : null}
+
             {activeCategory === "advanced" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
@@ -728,4 +813,14 @@ function errorMessage(error: unknown, fallback: string): string {
     return String((error as { message: unknown }).message);
   }
   return fallback;
+}
+
+function formatDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(date);
 }

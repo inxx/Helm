@@ -2448,6 +2448,49 @@ textarea {
   gap: 6px;
 }
 
+.update-check-panel,
+.update-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 10px;
+}
+
+.update-check-panel > div,
+.update-card > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.update-check-panel strong,
+.update-card strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.update-check-panel span,
+.update-card span,
+.update-card p {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.update-card {
+  align-items: flex-start;
+}
+
+.update-card p {
+  flex: 1;
+  margin: 0;
+  min-width: 0;
+  line-height: 1.5;
+}
+
 .connection-list,
 .role-assignment-list {
   display: grid;
@@ -3017,6 +3060,28 @@ textarea {
   overflow-y: auto;
 }
 
+.terminal-session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  min-height: 44px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  overflow: hidden;
+  color: var(--term-muted);
+}
+
+.terminal-session-row:hover {
+  background: var(--term-surface);
+  color: var(--term-text);
+}
+
+.terminal-session-row.active {
+  border-color: color-mix(in oklch, var(--term-accent) 45%, var(--term-line));
+  background: var(--term-surface);
+  color: var(--term-text);
+}
+
 .terminal-tab-strip button {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -3026,22 +3091,34 @@ textarea {
   width: 100%;
   min-width: 0;
   min-height: 44px;
-  border: 1px solid transparent;
-  border-radius: 7px;
+  border: 0;
+  border-radius: 0;
   background: transparent;
-  color: var(--term-muted);
+  color: inherit;
   padding: 6px 8px;
   text-align: left;
 }
 
+.terminal-tab-strip .terminal-session-remove {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  min-height: 44px;
+  border: 0;
+  border-left: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+
 .terminal-tab-strip button:hover {
-  background: var(--term-surface);
   color: var(--term-text);
 }
 
-.terminal-tab-strip button.active {
-  border-color: color-mix(in oklch, var(--term-accent) 45%, var(--term-line));
-  background: var(--term-surface);
+.terminal-tab-strip .terminal-session-remove:hover:not(:disabled) {
+  border-left-color: var(--term-line);
+  background: color-mix(in oklch, var(--term-line) 38%, transparent);
   color: var(--term-text);
 }
 
@@ -3199,7 +3276,7 @@ textarea {
 .terminal-pane-grid[data-pane-count="3"] .terminal-pane,
 .terminal-pane-grid[data-pane-count="4"] .terminal-pane,
 .terminal-pane-grid.split-scroll .terminal-pane {
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
   min-height: 0;
 }
 
@@ -3209,7 +3286,7 @@ textarea {
 
 .terminal-pane {
   display: grid;
-  grid-template-rows: auto auto minmax(220px, 1fr) auto;
+  grid-template-rows: auto auto minmax(220px, 1fr) auto auto auto;
   min-width: 0;
   min-height: 360px;
   overflow: hidden;
@@ -3280,6 +3357,10 @@ textarea {
   color: var(--term-text);
   border-color: var(--term-muted);
   background: var(--term-line);
+}
+
+.terminal-pane-error {
+  margin: 8px 10px 0;
 }
 
 .terminal-controls {

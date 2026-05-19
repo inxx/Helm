@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default permissions for the main Helm window.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "dialog:allow-open", "updater:default"]
 }
