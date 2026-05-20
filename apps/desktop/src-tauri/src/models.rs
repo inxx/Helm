@@ -97,6 +97,10 @@ pub struct AiConnectionCheckResult {
     pub available: bool,
     pub command: Vec<String>,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_models: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_refresh_message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

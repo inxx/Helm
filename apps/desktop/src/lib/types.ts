@@ -96,6 +96,8 @@ export interface AiConnectionCheckResult {
   available: boolean;
   command: string[];
   message: string;
+  availableModels?: string[];
+  modelRefreshMessage?: string;
 }
 
 export interface EpicSummary {

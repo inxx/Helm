@@ -12,6 +12,7 @@ use crate::models::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -269,6 +270,8 @@ fn check_ai_connection(
             available: false,
             command,
             message: "AI 연결에 command가 없습니다.".to_string(),
+            available_models: None,
+            model_refresh_message: None,
         });
     }
 
@@ -285,12 +288,17 @@ fn check_ai_connection(
     };
 
     match check {
-        Ok(output) if output.status.success() => Ok(AiConnectionCheckResult {
-            connection_id,
-            available: true,
-            command,
-            message: "AI 연결 command를 실행할 수 있습니다.".to_string(),
-        }),
+        Ok(output) if output.status.success() => {
+            let model_refresh = refresh_available_models(&connection);
+            Ok(AiConnectionCheckResult {
+                connection_id,
+                available: true,
+                command,
+                message: "AI 연결 command를 실행할 수 있습니다.".to_string(),
+                available_models: model_refresh.models,
+                model_refresh_message: model_refresh.message,
+            })
+        }
         Ok(output) => {
             let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
             Ok(AiConnectionCheckResult {
@@ -302,6 +310,8 @@ fn check_ai_connection(
                 } else {
                     message
                 },
+                available_models: None,
+                model_refresh_message: None,
             })
         }
         Err(err) => Ok(AiConnectionCheckResult {
@@ -309,6 +319,8 @@ fn check_ai_connection(
             available: false,
             command,
             message: err.to_string(),
+            available_models: None,
+            model_refresh_message: None,
         }),
     }
 }
@@ -982,6 +994,168 @@ fn connection_command_for_check(connection: &Value) -> CommandResult<Vec<String>
         return string_array(args, "commandArgs는 문자열 배열이어야 합니다.");
     }
     Ok(Vec::new())
+}
+
+struct ModelRefreshResult {
+    models: Option<Vec<String>>,
+    message: Option<String>,
+}
+
+fn refresh_available_models(connection: &Value) -> ModelRefreshResult {
+    let Some(provider) = connection.get("provider").and_then(Value::as_str) else {
+        return ModelRefreshResult {
+            models: None,
+            message: Some("provider가 없어 모델 목록을 갱신하지 않았습니다.".to_string()),
+        };
+    };
+
+    match provider {
+        "codex" => refresh_openai_models(),
+        "claude" => refresh_anthropic_models(),
+        _ => ModelRefreshResult {
+            models: None,
+            message: Some("지원하지 않는 provider라 모델 목록을 갱신하지 않았습니다.".to_string()),
+        },
+    }
+}
+
+fn refresh_openai_models() -> ModelRefreshResult {
+    let Some(api_key) = env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        return ModelRefreshResult {
+            models: None,
+            message: Some("OPENAI_API_KEY가 없어 모델 목록을 갱신하지 않았습니다.".to_string()),
+        };
+    };
+
+    match fetch_json_with_curl(
+        "https://api.openai.com/v1/models",
+        vec![format!("Authorization: Bearer {api_key}")],
+    ) {
+        Ok(value) => {
+            let models = sorted_model_ids(&value, is_openai_agent_model);
+            if models.is_empty() {
+                ModelRefreshResult {
+                    models: None,
+                    message: Some(
+                        "OpenAI 모델 목록 응답에서 사용할 모델을 찾지 못했습니다.".to_string(),
+                    ),
+                }
+            } else {
+                ModelRefreshResult {
+                    message: Some(format!("OpenAI 모델 {}개를 갱신했습니다.", models.len())),
+                    models: Some(models),
+                }
+            }
+        }
+        Err(message) => ModelRefreshResult {
+            models: None,
+            message: Some(format!("OpenAI 모델 목록 갱신 실패: {message}")),
+        },
+    }
+}
+
+fn refresh_anthropic_models() -> ModelRefreshResult {
+    let Some(api_key) = env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        return ModelRefreshResult {
+            models: None,
+            message: Some("ANTHROPIC_API_KEY가 없어 모델 목록을 갱신하지 않았습니다.".to_string()),
+        };
+    };
+
+    match fetch_json_with_curl(
+        "https://api.anthropic.com/v1/models",
+        vec![
+            format!("x-api-key: {api_key}"),
+            "anthropic-version: 2023-06-01".to_string(),
+        ],
+    ) {
+        Ok(value) => {
+            let models = sorted_model_ids(&value, is_anthropic_agent_model);
+            if models.is_empty() {
+                ModelRefreshResult {
+                    models: None,
+                    message: Some(
+                        "Anthropic 모델 목록 응답에서 사용할 모델을 찾지 못했습니다.".to_string(),
+                    ),
+                }
+            } else {
+                ModelRefreshResult {
+                    message: Some(format!("Anthropic 모델 {}개를 갱신했습니다.", models.len())),
+                    models: Some(models),
+                }
+            }
+        }
+        Err(message) => ModelRefreshResult {
+            models: None,
+            message: Some(format!("Anthropic 모델 목록 갱신 실패: {message}")),
+        },
+    }
+}
+
+fn fetch_json_with_curl(url: &str, headers: Vec<String>) -> Result<Value, String> {
+    let mut command = Command::new("curl");
+    command.args(["-fsS", "--max-time", "10", url]);
+    for header in headers {
+        command.args(["-H", &header]);
+    }
+
+    let output = command
+        .output()
+        .map_err(|err| format!("curl 실행 실패: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("curl 종료 코드 {:?}", output.status.code())
+        } else {
+            stderr
+        });
+    }
+
+    serde_json::from_slice(&output.stdout).map_err(|err| format!("응답 JSON 파싱 실패: {err}"))
+}
+
+fn sorted_model_ids(value: &Value, keep: fn(&str) -> bool) -> Vec<String> {
+    let mut models = value
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .filter(|id| keep(id))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    models.sort();
+    models.dedup();
+    models
+}
+
+fn is_openai_agent_model(id: &str) -> bool {
+    let excluded = [
+        "audio",
+        "dall-e",
+        "embedding",
+        "image",
+        "moderation",
+        "realtime",
+        "sora",
+        "tts",
+        "transcribe",
+        "whisper",
+    ];
+    if excluded.iter().any(|needle| id.contains(needle)) {
+        return false;
+    }
+    id.starts_with("gpt-") || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4")
+}
+
+fn is_anthropic_agent_model(id: &str) -> bool {
+    id.starts_with("claude-")
 }
 
 fn string_array(args: &[Value], message: &str) -> CommandResult<Vec<String>> {

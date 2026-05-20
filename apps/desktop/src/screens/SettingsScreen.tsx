@@ -126,7 +126,19 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     try {
       const result = await api.checkAiConnection(snapshot.project.id, connection);
       setConnectionChecks((current) => ({ ...current, [connection.id]: result }));
-      setMessage({ tone: "info", text: "AI 연결 확인 완료" });
+      if (result.availableModels?.length) {
+        setAiConnections((current) =>
+          current.map((item) =>
+            item.id === connection.id
+              ? {
+                  ...item,
+                  availableModels: mergeModelLists(item.availableModels ?? [], result.availableModels ?? []),
+                }
+              : item,
+          ),
+        );
+      }
+      setMessage({ tone: "info", text: result.modelRefreshMessage ?? "AI 연결 확인 완료" });
     } catch (error) {
       setMessage({ tone: "error", text: errorMessage(error, "AI 연결 확인에 실패했습니다.") });
     } finally {
@@ -465,6 +477,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                             {connection.commandArgs.join(" ") || "command 없음"}
                           </code>
                           {check?.message ? <p className="muted">{check.message}</p> : null}
+                          {check?.modelRefreshMessage ? <p className="muted">{check.modelRefreshMessage}</p> : null}
                           <div className="connection-card-actions">
                             <button
                               className="secondary-button"
@@ -738,6 +751,10 @@ function modelForConnection(connectionId: string, connections: AiConnection[]): 
 
 function splitModelList(raw: string): string[] {
   return Array.from(new Set(raw.split(",").map((item) => item.trim()).filter(Boolean)));
+}
+
+function mergeModelLists(current: string[], incoming: string[]): string[] {
+  return Array.from(new Set([...current, ...incoming].map((item) => item.trim()).filter(Boolean))).sort();
 }
 
 function defaultModelPlaceholder(provider: string): string {
