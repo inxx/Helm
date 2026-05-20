@@ -13,8 +13,8 @@ Helm에는 정리된 Task를 실행하는 화면만 있으면 부족하다.
 ```text
 막연한 목표 입력
 -> repo context 확인
--> AI와 계획 대화
--> Epic/Task/Subtask 초안 생성
+-> planner와 계획 대화
+-> Epic/Task/Subtask로 작업 분해
 -> Acceptance Criteria / Risk / Test Plan 정리
 -> 사용자 승인
 -> Helm DB에 계획과 Task 저장
@@ -78,19 +78,20 @@ Helm은 현재 repo에서 계획 수립에 필요한 최소 context를 준비한
 
 초기 MVP에서는 전체 코드 분석을 하지 않고, 얕은 repo summary와 사용자가 직접 붙인 context만 사용한다.
 
-### 3. AI planning 대화
+### 3. planner와 계획 대화
 
-AI는 사용자의 목표와 repo context를 바탕으로 질문하거나 계획 초안을 제안한다.
+Planning 탭의 대화 상대는 범용 chat AI가 아니라 Helm의 `planner` role이다. `planner`는 사용자의 목표와 repo context를 바탕으로 질문하거나 계획 초안을 제안한다.
 
-AI가 해야 하는 일:
+planner가 해야 하는 일:
 
 - 목표를 더 작은 delivery 단위로 나눈다.
+- Epic/Task/Subtask 구조로 작업을 분해한다.
+- 각 Task의 acceptance criteria, risk, test plan을 제안한다.
+- Task 간 dependency와 실행 순서를 제안한다.
 - 모호한 요구사항을 open question으로 남긴다.
-- acceptance criteria를 제안한다.
-- 위험과 검증 방법을 제안한다.
 - 어떤 role 흐름으로 실행할지 제안한다.
 
-AI가 하면 안 되는 일:
+planner가 하면 안 되는 일:
 
 - 사용자 승인 없이 Task를 생성하지 않는다.
 - 사용자 승인 없이 runner를 실행하지 않는다.
@@ -98,7 +99,7 @@ AI가 하면 안 되는 일:
 
 ### 4. Plan Draft 생성
 
-AI 응답은 자유 텍스트로만 남기지 않고 구조화된 Plan Draft로 저장한다.
+planner 응답은 자유 텍스트로만 남기지 않고 구조화된 Plan Draft로 저장한다.
 
 Plan Draft에는 최소한 아래 항목이 있어야 한다.
 
@@ -209,9 +210,15 @@ created_at
         {
           "title": "Planning 탭과 세션 목록 추가",
           "description": "App shell에 Planning 도메인을 추가하고 planning session 목록을 표시한다.",
+          "subtasks": [
+            "Planning 탭 라우팅 추가",
+            "planning session 목록 UI 추가",
+            "planner 대화 canvas 추가"
+          ],
           "acceptanceCriteria": [
             "프로젝트를 열면 Planning 탭으로 이동할 수 있다.",
-            "사용자는 새 planning session을 만들 수 있다."
+            "사용자는 planner와 새 planning session을 만들 수 있다.",
+            "planner가 생성한 Task breakdown을 승인 전 확인할 수 있다."
           ],
           "risks": [
             "채팅 UI와 Task 실행 UI의 책임이 섞일 수 있다."
@@ -320,22 +327,22 @@ created_at
 
 - fixture runner로 planning session에서 valid Plan Draft를 생성할 수 있다.
 
-### Step 6. 실제 AI planner 연결
+### Step 6. 실제 planner 연결
 
 목표:
 
-- Codex/Claude runner를 이용해 repo context 기반 계획 초안을 생성한다.
+- Codex/Claude runner를 이용해 repo context 기반 계획 초안과 Task breakdown을 생성한다.
 
 작업:
 
 - planning context pack 생성
 - planner command template 추가
-- AI 응답을 Plan Draft schema로 검증
+- planner 응답을 Plan Draft schema로 검증
 - 실패 시 draft를 저장하지 않고 오류와 raw artifact를 남긴다.
 
 완료 기준:
 
-- Codex/Claude가 설치된 환경에서 사용자의 목표를 Plan Draft로 변환할 수 있다.
+- Codex/Claude가 설치된 환경에서 planner가 사용자의 목표를 Plan Draft와 Epic/Task/Subtask breakdown으로 변환할 수 있다.
 
 ### Step 7. Plan Draft Approval과 materialize
 
@@ -359,7 +366,7 @@ created_at
 - 사용자가 빈 상태에서 Planning 탭으로 시작할 수 있다.
 - 목표를 입력하면 planning session이 생성된다.
 - repo context와 existing task를 참고할 수 있다.
-- AI 또는 fixture runner가 Plan Draft를 생성한다.
+- planner 또는 fixture runner가 Plan Draft와 Task breakdown을 생성한다.
 - 사용자가 draft를 승인해야만 Epic/Task가 생성된다.
 - 생성된 Task는 기존 Task Detail core loop로 이어진다.
 - planning 대화, draft, 승인 이력이 DB와 audit에 남는다.
@@ -373,3 +380,7 @@ created_at
 - 자동 branch/commit/merge
 
 이 항목들은 Planning Workspace의 MVP 이후에 다룬다.
+
+## 상세 기능 계약
+
+Task 생성 전 planner와 계획 문서를 만들고 수정한 뒤, 사용자가 승인한 draft만 Epic/Task로 변환하는 세부 기능 계약은 [ai-plan-conversation-approval-feature.md](ai-plan-conversation-approval-feature.md)를 기준으로 한다.

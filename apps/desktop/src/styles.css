@@ -3807,6 +3807,13 @@ textarea {
   padding: 20px;
 }
 
+.planning-thread {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  max-width: 780px;
+}
+
 .planning-empty {
   display: grid;
   align-content: center;
@@ -3842,12 +3849,24 @@ textarea {
   max-width: 720px;
 }
 
-.planning-message strong {
+.planning-message-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.planning-message-meta strong {
   color: var(--text-muted);
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.planning-message-meta span {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
 }
 
 .planning-message p {
@@ -3857,8 +3876,83 @@ textarea {
 }
 
 .planning-message.user {
+  justify-self: end;
   background: var(--brand-weak);
   border-color: color-mix(in oklch, var(--primary) 30%, transparent);
+}
+
+.planning-message.planner {
+  justify-self: start;
+  border-color: var(--line-strong);
+}
+
+.planner-breakdown {
+  display: grid;
+  gap: 10px;
+}
+
+.planner-task-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 12px;
+}
+
+.planner-task-card-header {
+  display: grid;
+  gap: 3px;
+}
+
+.planner-task-card-header span {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+}
+
+.planner-task-card-header strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.planner-task-card p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.planner-task-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.planner-task-grid div {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+}
+
+.planner-task-grid h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.planner-task-grid ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
 }
 
 .planning-goal-form {
@@ -3887,6 +3981,12 @@ textarea {
   flex: 1;
   color: var(--text-muted);
   font-size: 11.5px;
+}
+
+.planning-form-error {
+  margin: 0;
+  color: var(--red);
+  font-size: 12px;
 }
 
 .planning-goal-actions .primary-button {
@@ -3980,6 +4080,101 @@ textarea {
   line-height: 1.5;
 }
 
+.plan-preview-draft {
+  display: grid;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.plan-preview-draft strong,
+.plan-preview-draft p {
+  margin: 0;
+}
+
+.plan-document-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.plan-document-title span {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.plan-preview-draft ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.plan-document-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.plan-document-grid section {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 8px 10px;
+}
+
+.plan-document-grid h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.plan-document-grid p,
+.plan-document-grid li {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.plan-document-tasks {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.plan-preview-task-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.plan-preview-task-counts span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.plan-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-preview-actions .primary-button {
+  justify-self: start;
+}
+
 /* ============================================================
    Empty states
    ============================================================ */
@@ -4048,6 +4243,14 @@ textarea {
 
   .planning-context {
     display: none;
+  }
+
+  .planner-task-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .plan-document-grid {
+    grid-template-columns: 1fr;
   }
 
   .settings-body {
