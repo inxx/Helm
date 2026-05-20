@@ -118,6 +118,25 @@ pub fn branch_exists(root: &Path, branch_name: &str) -> CommandResult<bool> {
     Ok(output.status.success())
 }
 
+pub fn switch_branch(root: &Path, branch_name: &str) -> CommandResult<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["switch", branch_name])
+        .output()
+        .map_err(|err| CommandError::io("Git branch 전환에 실패했습니다.", err))?;
+
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GitCommandFailed",
+            "Git branch 전환에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn add_worktree(
     root: &Path,
     worktree_path: &Path,

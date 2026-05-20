@@ -10,13 +10,18 @@ import type {
   GitFileStatus,
   EffectiveSettings,
   LaunchState,
+  NodeRuntimeSummary,
+  PlannerConversationInput,
+  PlannerConversationResult,
   ProjectSettingsPatch,
   ProjectSnapshot,
   RunnerCheckResult,
   RunnerTemplateSummary,
   TaskStatus,
+  TaskSummary,
   TaskWorktreeSummary,
   TerminalCommandResult,
+  TerminalDirectoryEntry,
 } from "./types";
 
 export const api = {
@@ -29,6 +34,9 @@ export const api = {
       reconcileStaleRuns: options.reconcileStaleRuns,
     });
   },
+  forgetProject(projectId: string) {
+    return invoke<LaunchState>("forget_project", { projectId });
+  },
   getProjectSnapshot(projectId: string) {
     return invoke<ProjectSnapshot>("get_project_snapshot", { projectId });
   },
@@ -36,10 +44,13 @@ export const api = {
     return invoke("create_epic", { projectId, input: { title } });
   },
   createTask(projectId: string, input: CreateTaskInput) {
-    return invoke("create_task", { projectId, input });
+    return invoke<TaskSummary>("create_task", { projectId, input });
   },
   updateProjectSettings(projectId: string, patch: ProjectSettingsPatch) {
     return invoke<EffectiveSettings>("update_project_settings", { projectId, patch });
+  },
+  runPlannerConversation(projectId: string, input: PlannerConversationInput) {
+    return invoke<PlannerConversationResult>("run_planner_conversation", { projectId, input });
   },
   listRunnerTemplates(projectId: string) {
     return invoke<RunnerTemplateSummary[]>("list_runner_templates", { projectId });
@@ -114,6 +125,15 @@ export const api = {
   getChangedFiles(projectId: string) {
     return invoke<GitFileStatus[]>("get_changed_files", { projectId });
   },
+  switchGitBranch(projectId: string, branchName: string) {
+    return invoke<ProjectSnapshot>("switch_git_branch", { projectId, branchName });
+  },
+  listNodeRuntimes() {
+    return invoke<NodeRuntimeSummary[]>("list_node_runtimes");
+  },
+  listTerminalDirectories(projectId: string, cwd: string) {
+    return invoke<TerminalDirectoryEntry[]>("list_terminal_directories", { projectId, cwd });
+  },
   runTerminalCommand(projectId: string, cwd: string, command: string) {
     return invoke<TerminalCommandResult>("run_terminal_command", {
       projectId,
@@ -127,5 +147,34 @@ export const api = {
       cwd,
       path,
     });
+  },
+  startTerminalPty(
+    projectId: string,
+    terminalId: string,
+    cwd: string,
+    size: { cols: number; rows: number },
+    nodeBinPath?: string | null,
+  ) {
+    return invoke<string>("start_terminal_pty", {
+      projectId,
+      terminalId,
+      cwd,
+      cols: size.cols,
+      rows: size.rows,
+      nodeBinPath,
+    });
+  },
+  writeTerminalPty(terminalId: string, data: string) {
+    return invoke<void>("write_terminal_pty", { terminalId, data });
+  },
+  resizeTerminalPty(terminalId: string, size: { cols: number; rows: number }) {
+    return invoke<void>("resize_terminal_pty", {
+      terminalId,
+      cols: size.cols,
+      rows: size.rows,
+    });
+  },
+  stopTerminalPty(terminalId: string) {
+    return invoke<void>("stop_terminal_pty", { terminalId });
   },
 };

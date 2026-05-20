@@ -5,6 +5,7 @@ import { checkForManualUpdate, type ManualUpdateInfo } from "../lib/updater";
 import type {
   AiConnection,
   AiConnectionCheckResult,
+  JiraConfig,
   ProjectSnapshot,
   RoleAssignment,
   RunnerCheckResult,
@@ -17,7 +18,7 @@ interface SettingsScreenProps {
   onOpenProject: () => void;
 }
 
-type SettingsCategory = "templates" | "connections" | "assignments" | "worktree" | "app" | "advanced";
+type SettingsCategory = "templates" | "connections" | "assignments" | "jira" | "worktree" | "app" | "advanced";
 
 const CATEGORIES: Array<{
   id: SettingsCategory;
@@ -28,6 +29,7 @@ const CATEGORIES: Array<{
   { id: "templates", label: "Runner Templates", hint: "역할 프리셋과 AI 연결을 한 번에 적용", icon: Layers },
   { id: "connections", label: "AI 연결", hint: "Codex · Claude 등 도구 등록", icon: Plug },
   { id: "assignments", label: "작업별 AI 선택", hint: "계획 · 구현 · 검수 · 테스트 매핑", icon: Workflow },
+  { id: "jira", label: "Jira", hint: "프로젝트 키와 기본 이슈 타입", icon: CheckCircle2 },
   { id: "worktree", label: "Worktree", hint: "병렬 작업 디렉터리 위치", icon: FolderTree },
   { id: "app", label: "앱", hint: "Helm 업데이트 확인", icon: Info },
   { id: "advanced", label: "고급", hint: "Role presets JSON · 기존 runner 확인", icon: Wrench },
@@ -57,6 +59,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const [connectionChecks, setConnectionChecks] = useState<Record<string, AiConnectionCheckResult>>({});
   const [aiConnections, setAiConnections] = useState<AiConnection[]>([]);
   const [roleAssignments, setRoleAssignments] = useState<RoleAssignment[]>([]);
+  const [jiraConfig, setJiraConfig] = useState<JiraConfig>(emptyJiraConfig());
   const [message, setMessage] = useState<{ tone: MessageTone; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [updaterBusy, setUpdaterBusy] = useState(false);
@@ -68,6 +71,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     setRolePresets(JSON.stringify(snapshot.settings.rolePresets, null, 2));
     setAiConnections(normalizeAiConnections(snapshot.settings.aiConnections));
     setRoleAssignments(normalizeRoleAssignments(snapshot.settings.roleAssignments));
+    setJiraConfig(normalizeJiraConfig(snapshot.settings.jiraConfig));
     setWorktreeRoot(snapshot.settings.worktreeRoot ?? "");
     void api.listRunnerTemplates(snapshot.project.id).then(setTemplates);
     setRunnerChecks([]);
@@ -91,6 +95,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         aiConnections,
         roleAssignments: normalizeRoleAssignments(roleAssignments),
         worktreeRoot: worktreeRoot.trim() ? worktreeRoot.trim() : null,
+        jiraConfig: normalizeJiraConfig(jiraConfig),
       });
       await onRefresh();
       setMessage({ tone: "success", text: "저장됨" });
@@ -170,6 +175,10 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
       const result = await checkForManualUpdate();
       setCurrentVersion(result.currentVersion);
       setPendingUpdate(result.update);
+      if (result.unavailableReason) {
+        setMessage({ tone: "info", text: result.unavailableReason });
+        return;
+      }
       setMessage({
         tone: result.update ? "info" : "success",
         text: result.update
@@ -258,6 +267,10 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         });
       }),
     );
+  }
+
+  function updateJiraConfig(patch: Partial<JiraConfig>) {
+    setJiraConfig((current) => normalizeJiraConfig({ ...current, ...patch }));
   }
 
   if (!snapshot) {
@@ -476,6 +489,11 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                           <code className="command-preview">
                             {connection.commandArgs.join(" ") || "command 없음"}
                           </code>
+                          {connection.planningCommandArgs?.length ? (
+                            <code className="command-preview">
+                              plan: {connection.planningCommandArgs.join(" ")}
+                            </code>
+                          ) : null}
                           {check?.message ? <p className="muted">{check.message}</p> : null}
                           {check?.modelRefreshMessage ? <p className="muted">{check.modelRefreshMessage}</p> : null}
                           <div className="connection-card-actions">
@@ -579,6 +597,61 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               </section>
             ) : null}
 
+            {activeCategory === "jira" ? (
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3>Jira</h3>
+                  <p className="muted">Planning과 host runner가 공통으로 참조할 Jira 기본값입니다.</p>
+                </div>
+                <label className="toggle-switch">
+                  <input
+                    checked={jiraConfig.enabled}
+                    onChange={(event) => updateJiraConfig({ enabled: event.target.checked })}
+                    type="checkbox"
+                  />
+                  <span className="toggle-switch-track" aria-hidden />
+                  <span className="toggle-switch-label">Jira 연동 정보 사용</span>
+                </label>
+                <div className="connection-fields">
+                  <label>
+                    <span>Site URL</span>
+                    <input
+                      placeholder="https://nugu.atlassian.net"
+                      value={jiraConfig.siteUrl ?? ""}
+                      onChange={(event) => updateJiraConfig({ siteUrl: nullableText(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    <span>Project key</span>
+                    <input
+                      placeholder="예: NC"
+                      value={jiraConfig.projectKey ?? ""}
+                      onChange={(event) => updateJiraConfig({ projectKey: normalizeJiraProjectKey(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    <span>Epic issue type</span>
+                    <input
+                      placeholder="Epic"
+                      value={jiraConfig.epicIssueType ?? ""}
+                      onChange={(event) => updateJiraConfig({ epicIssueType: nullableText(event.target.value) })}
+                    />
+                  </label>
+                  <label>
+                    <span>Task issue type</span>
+                    <input
+                      placeholder="Task"
+                      value={jiraConfig.taskIssueType ?? ""}
+                      onChange={(event) => updateJiraConfig({ taskIssueType: nullableText(event.target.value) })}
+                    />
+                  </label>
+                </div>
+                <p className="muted">
+                  Host runner에는 <code>HELM_JIRA_PROJECT_KEY</code>, <code>HELM_JIRA_SITE_URL</code> 등으로 전달됩니다.
+                </p>
+              </section>
+            ) : null}
+
             {activeCategory === "worktree" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
@@ -676,6 +749,47 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   );
 }
 
+function emptyJiraConfig(): JiraConfig {
+  return {
+    enabled: false,
+    siteUrl: null,
+    projectKey: null,
+    epicIssueType: "Epic",
+    taskIssueType: "Task",
+  };
+}
+
+function normalizeJiraConfig(value: unknown): JiraConfig {
+  if (typeof value !== "object" || value === null) return emptyJiraConfig();
+  const config = value as Partial<JiraConfig>;
+  return {
+    enabled: typeof config.enabled === "boolean" ? config.enabled : false,
+    siteUrl: typeof config.siteUrl === "string" && config.siteUrl.trim() ? config.siteUrl.trim() : null,
+    projectKey:
+      typeof config.projectKey === "string" && config.projectKey.trim()
+        ? normalizeJiraProjectKey(config.projectKey)
+        : null,
+    epicIssueType:
+      typeof config.epicIssueType === "string" && config.epicIssueType.trim()
+        ? config.epicIssueType.trim()
+        : "Epic",
+    taskIssueType:
+      typeof config.taskIssueType === "string" && config.taskIssueType.trim()
+        ? config.taskIssueType.trim()
+        : "Task",
+  };
+}
+
+function nullableText(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeJiraProjectKey(value: string): string | null {
+  const trimmed = value.trim().toUpperCase();
+  return trimmed ? trimmed : null;
+}
+
 function normalizeAiConnections(value: unknown): AiConnection[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -685,8 +799,14 @@ function normalizeAiConnections(value: unknown): AiConnection[] {
       label: typeof item.label === "string" ? item.label : "AI 연결",
       provider: typeof item.provider === "string" ? item.provider : "custom",
       commandArgs: Array.isArray(item.commandArgs) ? item.commandArgs.filter(isString) : [],
+      planningCommandArgs: Array.isArray(item.planningCommandArgs)
+        ? item.planningCommandArgs.filter(isString)
+        : undefined,
+      planningMode: typeof item.planningMode === "string" ? item.planningMode : undefined,
       healthCheckArgs: Array.isArray(item.healthCheckArgs) ? item.healthCheckArgs.filter(isString) : undefined,
       timeoutSeconds: typeof item.timeoutSeconds === "number" ? item.timeoutSeconds : 1800,
+      planningTimeoutSeconds:
+        typeof item.planningTimeoutSeconds === "number" ? item.planningTimeoutSeconds : undefined,
       enabled: typeof item.enabled === "boolean" ? item.enabled : true,
       defaultModel: typeof item.defaultModel === "string" ? item.defaultModel : null,
       availableModels: Array.isArray(item.availableModels) ? item.availableModels.filter(isString) : [],
@@ -783,8 +903,22 @@ function codexConnection(): AiConnection {
       "--",
       "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}.",
     ],
+    planningCommandArgs: [
+      "codex",
+      "exec",
+      "--sandbox",
+      "read-only",
+      "--ask-for-approval",
+      "never",
+      "--cd",
+      "{projectRoot}",
+      "--",
+      "{planPrompt}",
+    ],
+    planningMode: "prompt_guarded",
     healthCheckArgs: ["codex", "--version"],
     timeoutSeconds: 1800,
+    planningTimeoutSeconds: 1800,
     enabled: true,
     defaultModel: "gpt-5.2",
     availableModels: ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"],
@@ -801,8 +935,11 @@ function claudeConnection(): AiConnection {
       "-p",
       "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}.",
     ],
+    planningCommandArgs: ["claude", "--permission-mode", "plan", "-p", "{planPrompt}"],
+    planningMode: "native_plan",
     healthCheckArgs: ["claude", "--version"],
     timeoutSeconds: 1800,
+    planningTimeoutSeconds: 1800,
     enabled: true,
     defaultModel: "sonnet",
     availableModels: ["sonnet", "opus"],

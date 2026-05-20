@@ -361,10 +361,34 @@ materialize_plan_draft(project_id, draft_id) -> PlanMaterializationSummary
 구현 원칙:
 
 - `create_planning_session`은 Task를 만들지 않는다.
+- `run_planner_conversation`은 기존 role runner가 아니라 AI 연결의 `planningCommandArgs`를 사용한다.
 - `run_planner_conversation`은 planner raw output을 artifact로 남기고 schema validation을 통과한 draft만 active draft로 올린다.
 - `save_plan_draft_revision`은 기존 draft를 update하지 않고 새 version을 insert한다.
 - `approve_plan_draft`는 승인과 materialize를 하나의 transaction으로 처리한다.
 - `materialize_plan_draft`는 이미 materialized된 draft면 기존 결과를 반환한다.
+
+### AI plan mode 연결
+
+Planning 탭은 `planner` role에 배정된 AI connection의 planning 전용 command를 먼저 사용한다.
+
+```json
+{
+  "id": "claude-local",
+  "provider": "claude",
+  "planningMode": "native_plan",
+  "planningCommandArgs": ["claude", "--permission-mode", "plan", "-p", "{planPrompt}"]
+}
+```
+
+provider별 기본값:
+
+| provider | planning mode | command 원칙 |
+| --- | --- | --- |
+| `claude` | `native_plan` | `claude --permission-mode plan -p {planPrompt}` |
+| `codex` | `prompt_guarded` | `codex exec --sandbox read-only --ask-for-approval never --cd {projectRoot} -- {planPrompt}` |
+| `fixture` | `fixture` | `fixture-runner.mjs --planning` |
+
+Codex CLI는 현재 로컬 help 기준으로 별도 `plan` subcommand가 없으므로 read-only sandbox와 planning prompt로 감싼다. Claude는 native `--permission-mode plan`을 사용한다.
 
 ## Frontend 변경
 

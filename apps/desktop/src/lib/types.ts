@@ -45,6 +45,7 @@ export interface EffectiveSettings {
   aiConnections: AiConnection[];
   roleAssignments: RoleAssignment[];
   worktreeRoot: string | null;
+  jiraConfig: JiraConfig | null;
   obsidianVaultPath: string | null;
   tokenBudget: number | null;
   artifactRetentionDays: number | null;
@@ -55,8 +56,11 @@ export interface AiConnection {
   label: string;
   provider: "fixture" | "codex" | "claude" | string;
   commandArgs: string[];
+  planningCommandArgs?: string[];
+  planningMode?: "native_plan" | "prompt_guarded" | "fixture" | string;
   healthCheckArgs?: string[];
   timeoutSeconds: number;
+  planningTimeoutSeconds?: number;
   enabled: boolean;
   defaultModel?: string | null;
   availableModels?: string[];
@@ -98,6 +102,30 @@ export interface AiConnectionCheckResult {
   message: string;
   availableModels?: string[];
   modelRefreshMessage?: string;
+}
+
+export interface PlannerConversationInput {
+  message: string;
+  goalText: string;
+  currentDraftJson?: unknown;
+}
+
+export interface PlannerConversationResult {
+  connectionId: string;
+  provider: string | null;
+  command: string[];
+  responseText: string;
+  stderr: string;
+  exitCode: number;
+  timedOut: boolean;
+}
+
+export interface JiraConfig {
+  enabled: boolean;
+  siteUrl: string | null;
+  projectKey: string | null;
+  epicIssueType: string | null;
+  taskIssueType: string | null;
 }
 
 export interface EpicSummary {
@@ -228,6 +256,21 @@ export interface GitFileStatus {
   renamedFrom: string | null;
 }
 
+export interface NodeRuntimeSummary {
+  id: string;
+  label: string;
+  version: string;
+  nodePath: string;
+  binPath: string;
+  source: string;
+}
+
+export interface TerminalDirectoryEntry {
+  path: string;
+  label: string;
+  kind: "projectRoot" | "parent" | "child" | string;
+}
+
 export interface ProjectSnapshot {
   project: ProjectSummary;
   settings: EffectiveSettings;
@@ -255,6 +298,7 @@ export interface ProjectSettingsPatch {
   aiConnections?: AiConnection[];
   roleAssignments?: RoleAssignment[];
   worktreeRoot?: string | null;
+  jiraConfig?: JiraConfig | null;
   obsidianVaultPath?: string | null;
   tokenBudget?: number | null;
   artifactRetentionDays?: number | null;

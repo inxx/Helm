@@ -200,6 +200,7 @@ pub fn effective_settings(conn: &Connection, project_id: &str) -> CommandResult<
         worktree_root: settings
             .remove("worktreeRoot")
             .and_then(|value| value.as_str().map(str::to_string)),
+        jira_config: settings.remove("jiraConfig"),
         obsidian_vault_path: settings
             .remove("obsidianVaultPath")
             .and_then(|value| value.as_str().map(str::to_string)),
@@ -232,6 +233,9 @@ pub fn update_settings(
     }
     if let Some(value) = patch.worktree_root {
         values.push(("worktreeRoot", option_string(value)));
+    }
+    if let Some(value) = patch.jira_config {
+        values.push(("jiraConfig", value.unwrap_or(Value::Null)));
     }
     if let Some(value) = patch.obsidian_vault_path {
         values.push(("obsidianVaultPath", option_string(value)));
@@ -1000,7 +1004,27 @@ pub fn run_host_role(
             .env("HELM_WORKTREE_PATH", worktree.worktree_path.clone())
             .env("HELM_TASK_ID", run.task_id.clone())
             .env("HELM_ROLE_ID", run.role_id.clone())
-            .env("HELM_MODEL", runner_command.model.unwrap_or_default()),
+            .env("HELM_MODEL", runner_command.model.unwrap_or_default())
+            .env(
+                "HELM_JIRA_ENABLED",
+                jira_config_bool(&settings.jira_config, "enabled"),
+            )
+            .env(
+                "HELM_JIRA_SITE_URL",
+                jira_config_string(&settings.jira_config, "siteUrl"),
+            )
+            .env(
+                "HELM_JIRA_PROJECT_KEY",
+                jira_config_string(&settings.jira_config, "projectKey"),
+            )
+            .env(
+                "HELM_JIRA_EPIC_ISSUE_TYPE",
+                jira_config_string(&settings.jira_config, "epicIssueType"),
+            )
+            .env(
+                "HELM_JIRA_TASK_ISSUE_TYPE",
+                jira_config_string(&settings.jira_config, "taskIssueType"),
+            ),
         timeout_seconds,
         cancellation,
     )?;
@@ -1640,6 +1664,25 @@ fn validate_approval_status(status: &str) -> CommandResult<()> {
         return Ok(());
     }
     Err(CommandError::validation("지원하지 않는 승인 상태입니다."))
+}
+
+fn jira_config_string(config: &Option<Value>, key: &str) -> String {
+    config
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn jira_config_bool(config: &Option<Value>, key: &str) -> String {
+    config
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        .to_string()
 }
 
 fn resolve_worktree_root(root: &Path, configured: Option<&str>) -> PathBuf {

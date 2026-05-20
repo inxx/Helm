@@ -4,3 +4,6 @@ dist/
 .DS_Store
 .helm/
 *.log
+.env
+.env.*
+!.env.example

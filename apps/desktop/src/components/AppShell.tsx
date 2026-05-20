@@ -1,4 +1,4 @@
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,7 @@ interface AppShellProps<T extends string> {
   recents: RecentProject[];
   activeProjectId: string | null;
   onSwitchProject: (projectId: string) => void;
+  onForgetProject: (projectId: string) => void;
   busy: boolean;
   children: ReactNode;
 }
@@ -31,6 +32,7 @@ export function AppShell<T extends string>({
   recents,
   activeProjectId,
   onSwitchProject,
+  onForgetProject,
   busy,
   children,
 }: AppShellProps<T>) {
@@ -89,14 +91,14 @@ export function AppShell<T extends string>({
                   const isActive = project.id === activeProjectId;
                   const isDisabled = busy && !isActive;
                   return (
-                    <li key={project.id}>
+                    <li key={project.id} className="flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() => onSwitchProject(project.id)}
                         title={project.rootPath}
                         disabled={isDisabled}
                         className={cn(
-                          "flex w-full flex-col items-start gap-px rounded-md px-2.5 py-1.5 text-left transition-colors",
+                          "flex min-w-0 flex-1 flex-col items-start gap-px rounded-md px-2.5 py-1.5 text-left transition-colors",
                           isActive
                             ? "bg-background text-foreground shadow-sm"
                             : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -115,6 +117,18 @@ export function AppShell<T extends string>({
                           {shortenPath(project.rootPath)}
                         </span>
                       </button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        disabled={busy}
+                        onClick={() => onForgetProject(project.id)}
+                        className="text-muted-foreground hover:text-destructive"
+                        title="프로젝트 목록에서 삭제"
+                        aria-label={`${project.name} 프로젝트 목록에서 삭제`}
+                      >
+                        <Trash2 className="size-3.5" aria-hidden="true" />
+                      </Button>
                     </li>
                   );
                 })}

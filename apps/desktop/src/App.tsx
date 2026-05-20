@@ -128,19 +128,49 @@ export function App() {
     }
   }
 
-  async function refresh() {
-    if (!snapshot) return;
+  async function forgetProject(projectId: string) {
+    const recent = recents.find((project) => project.id === projectId);
+    if (!recent) return;
+    const confirmed = window.confirm(
+      `${recent.name} 프로젝트를 목록에서 삭제할까요?\n프로젝트 폴더와 .helm 데이터는 삭제하지 않습니다.`,
+    );
+    if (!confirmed) return;
+
+    setError(null);
     setBusy(true);
     try {
-      const next = await api.getProjectSnapshot(snapshot.project.id);
-      setSnapshot(next);
-      if (selectedTaskId && !next.tasks.some((task) => task.id === selectedTaskId)) {
-        setSelectedTaskId(next.tasks[0]?.id ?? null);
+      const launch = await api.forgetProject(projectId);
+      setRecents(launch.recentProjects);
+      saveRecents(launch.recentProjects);
+      if (snapshot?.project.id === projectId) {
+        setSnapshot(null);
+        setSelectedTaskId(null);
+        setScreen("tasks");
       }
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function refresh() {
+    if (!snapshot) return;
+    setBusy(true);
+    try {
+      const next = await api.getProjectSnapshot(snapshot.project.id);
+      applySnapshotUpdate(next);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function applySnapshotUpdate(next: ProjectSnapshot) {
+    setSnapshot(next);
+    if (selectedTaskId && !next.tasks.some((task) => task.id === selectedTaskId)) {
+      setSelectedTaskId(next.tasks[0]?.id ?? null);
     }
   }
 
@@ -153,6 +183,7 @@ export function App() {
       recents={recents}
       activeProjectId={snapshot?.project.id ?? null}
       onSwitchProject={switchProject}
+      onForgetProject={forgetProject}
       busy={busy}
     >
       {snapshot && screen !== "terminal" ? <StatusBar snapshot={snapshot} /> : null}
@@ -165,7 +196,15 @@ export function App() {
       ) : (
         <>
           {screen === "planning" ? (
-            <PlanningScreen snapshot={snapshot} onOpenProject={openProject} />
+            <PlanningScreen
+              snapshot={snapshot}
+              onOpenProject={openProject}
+              onRefresh={refresh}
+              onOpenTask={(taskId) => {
+                setSelectedTaskId(taskId);
+                setScreen("tasks");
+              }}
+            />
           ) : null}
           {screen === "tasks" ? (
             <TasksScreen
@@ -182,7 +221,11 @@ export function App() {
             <GitScreen snapshot={snapshot} onOpenProject={openProject} />
           ) : null}
           {screen === "terminal" ? (
-            <TerminalScreen snapshot={snapshot} onOpenProject={openProject} />
+            <TerminalScreen
+              snapshot={snapshot}
+              onOpenProject={openProject}
+              onSnapshotUpdated={applySnapshotUpdate}
+            />
           ) : null}
           {screen === "settings" ? (
             <SettingsScreen snapshot={snapshot} onRefresh={refresh} onOpenProject={openProject} />

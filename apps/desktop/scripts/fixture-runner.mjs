@@ -10,6 +10,33 @@ if (args.includes("--health")) {
   process.exit(0);
 }
 
+if (args.includes("--planning")) {
+  process.stdout.write(
+    JSON.stringify(
+      {
+        title: "Fixture planner draft",
+        summary: "Fixture planner가 목표를 계획 문서 초안으로 정리했습니다.",
+        scope: ["planning conversation", "draft approval", "task materialize"],
+        tasks: [
+          {
+            title: "Fixture planning task",
+            description: "fixture planner conversation 결과를 확인합니다.",
+            subtasks: ["planning command 실행", "Plan Document 갱신", "승인 후 Task 생성"],
+            acceptanceCriteria: ["planner 응답이 Plan Document에 반영된다.", "승인 전 Task가 생성되지 않는다."],
+            risks: ["fixture 응답은 실제 repo 분석을 하지 않는다."],
+            testPlan: ["Planning 탭에서 fixture template으로 대화 실행을 확인한다."],
+          },
+        ],
+        openQuestions: [],
+        risks: ["fixture 응답은 실제 AI plan mode를 대체하지 않는다."],
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(0);
+}
+
 const modeIndex = args.indexOf("--mode");
 const mode = modeIndex >= 0 ? args[modeIndex + 1] ?? "pass" : "pass";
 const artifactDir = mustEnv("HELM_ARTIFACT_DIR");

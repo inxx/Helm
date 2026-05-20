@@ -5,15 +5,19 @@ mod models;
 use crate::models::{
     AgentRunSummary, AiConnectionCheckResult, ApprovalSummary, CommandError, CommandResult,
     CreateEpicInput, CreateTaskInput, EffectiveSettings, EpicSummary, GitBranchSummary,
-    GitCommitSummary, GitFileStatus, GitRepositoryState, ProjectContext, ProjectSettingsPatch,
+    GitCommitSummary, GitFileStatus, GitRepositoryState, NodeRuntimeSummary,
+    PlannerConversationInput, PlannerConversationResult, ProjectContext, ProjectSettingsPatch,
     ProjectSnapshot, ProjectSummary, RunnerCheckResult, RunnerTemplateSummary, TaskSummary,
-    TaskWorktreeSummary, TerminalCommandResult,
+    TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
+use std::ffi::CString;
 use std::fs;
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -21,7 +25,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const MAX_RECENT_PROJECTS: usize = 12;
 
@@ -70,6 +74,26 @@ struct LaunchState {
 struct AppState {
     projects: Mutex<HashMap<String, ProjectContext>>,
     running_runs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    terminal_sessions: Mutex<HashMap<String, PtySession>>,
+}
+
+struct PtySession {
+    child_pid: libc::pid_t,
+    writer: Arc<Mutex<fs::File>>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TerminalPtyOutput {
+    terminal_id: String,
+    data: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TerminalPtyExit {
+    terminal_id: String,
+    exit_code: i32,
 }
 
 #[tauri::command]
@@ -86,6 +110,50 @@ fn open_project(
     )?;
     remember_project(&app, &snapshot.project)?;
     Ok(snapshot)
+}
+
+#[tauri::command]
+fn forget_project(
+    project_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> CommandResult<LaunchState> {
+    let mut stored = load_stored_launch_state(&app)?;
+    let removed_root = stored
+        .recent_projects
+        .iter()
+        .find(|project| project.id == project_id)
+        .map(|project| project.root_path.clone());
+    stored
+        .recent_projects
+        .retain(|project| project.id != project_id);
+
+    let active_removed = stored.active_project_id.as_deref() == Some(project_id.as_str())
+        || removed_root
+            .as_deref()
+            .map(|root| stored.active_project_root_path.as_deref() == Some(root))
+            .unwrap_or(false);
+
+    if active_removed {
+        stored.active_project_id = None;
+        stored.active_project_root_path = None;
+    }
+    stored.updated_at = Some(db::now());
+    save_stored_launch_state(&app, &stored)?;
+
+    state
+        .projects
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "프로젝트 상태를 갱신하지 못했습니다."))?
+        .remove(&project_id);
+
+    Ok(LaunchState {
+        recent_projects: stored.recent_projects,
+        active_project_id: stored.active_project_id,
+        active_project_root_path: stored.active_project_root_path,
+        snapshot: None,
+        restore_error: None,
+    })
 }
 
 #[tauri::command]
@@ -156,6 +224,34 @@ fn update_project_settings(
 }
 
 #[tauri::command]
+fn run_planner_conversation(
+    project_id: String,
+    input: PlannerConversationInput,
+    state: State<'_, AppState>,
+) -> CommandResult<PlannerConversationResult> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    let settings = db::effective_settings(&conn, &project_id)?;
+    let (connection_id, provider, command, timeout_seconds) =
+        resolve_planning_command(&settings, &context.root_path, &input)?;
+    let output = run_direct_command_with_timeout(
+        &context.root_path,
+        &command,
+        Duration::from_secs(timeout_seconds),
+    )?;
+
+    Ok(PlannerConversationResult {
+        connection_id,
+        provider,
+        command,
+        response_text: output.stdout,
+        stderr: output.stderr,
+        exit_code: output.exit_code,
+        timed_out: output.timed_out,
+    })
+}
+
+#[tauri::command]
 fn list_runner_templates(
     project_id: String,
     state: State<'_, AppState>,
@@ -191,6 +287,7 @@ fn apply_runner_template(
             ai_connections: Some((template.connections)()),
             role_assignments: Some((template.assignments)()),
             worktree_root: None,
+            jira_config: None,
             obsidian_vault_path: None,
             token_budget: None,
             artifact_retention_days: None,
@@ -445,6 +542,79 @@ fn get_changed_files(
 }
 
 #[tauri::command]
+fn switch_git_branch(
+    project_id: String,
+    branch_name: String,
+    state: State<'_, AppState>,
+) -> CommandResult<ProjectSnapshot> {
+    let branch_name = branch_name.trim();
+    if branch_name.is_empty() {
+        return Err(CommandError::validation("전환할 branch를 선택해주세요."));
+    }
+
+    let context = project_context(&state, &project_id)?;
+    if !git::branch_exists(&context.root_path, branch_name)? {
+        return Err(CommandError::validation("로컬 branch를 찾을 수 없습니다."));
+    }
+
+    git::switch_branch(&context.root_path, branch_name)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    let project = db::get_project(&conn, &project_id)?;
+    project_snapshot(&conn, &context.root_path, project)
+}
+
+#[tauri::command]
+fn list_node_runtimes() -> CommandResult<Vec<NodeRuntimeSummary>> {
+    Ok(discover_node_runtimes())
+}
+
+#[tauri::command]
+fn list_terminal_directories(
+    project_id: String,
+    cwd: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<TerminalDirectoryEntry>> {
+    let context = project_context(&state, &project_id)?;
+    let current = resolve_terminal_path(&context.root_path, &cwd, ".")?;
+    let mut entries = Vec::new();
+
+    entries.push(TerminalDirectoryEntry {
+        path: context.root_path.to_string_lossy().to_string(),
+        label: "프로젝트 루트".to_string(),
+        kind: "projectRoot".to_string(),
+    });
+
+    if let Some(parent) = current.parent() {
+        entries.push(TerminalDirectoryEntry {
+            path: parent.to_string_lossy().to_string(),
+            label: "↑ ..".to_string(),
+            kind: "parent".to_string(),
+        });
+    }
+
+    let mut child_dirs = fs::read_dir(&current)
+        .map_err(|err| CommandError::io("디렉토리 목록을 읽지 못했습니다.", err))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if matches!(name.as_str(), ".git" | ".helm") {
+                return None;
+            }
+            Some(TerminalDirectoryEntry {
+                path: entry.path().to_string_lossy().to_string(),
+                label: name,
+                kind: "child".to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    child_dirs.sort_by(|left, right| left.label.cmp(&right.label));
+    entries.extend(child_dirs);
+
+    Ok(entries)
+}
+
+#[tauri::command]
 fn run_terminal_command(
     project_id: String,
     cwd: String,
@@ -485,6 +655,112 @@ fn resolve_terminal_cwd(
         return Err(CommandError::validation("이동할 경로를 찾을 수 없습니다."));
     }
     Ok(next.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn start_terminal_pty(
+    project_id: String,
+    terminal_id: String,
+    cwd: String,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    node_bin_path: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> CommandResult<String> {
+    let context = project_context(&state, &project_id)?;
+    let cwd = resolve_terminal_path(&context.root_path, &cwd, ".")?;
+    if !cwd.is_dir() {
+        return Err(CommandError::validation("터미널 cwd를 찾을 수 없습니다."));
+    }
+    let node_bin_path = resolve_node_bin_path(node_bin_path)?;
+
+    stop_terminal_session(&state, &terminal_id);
+
+    let pty = spawn_pty_shell(
+        &terminal_id,
+        &cwd,
+        cols.unwrap_or(120).max(20),
+        rows.unwrap_or(32).max(4),
+        node_bin_path.as_deref(),
+        app,
+    )?;
+    state
+        .terminal_sessions
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "터미널 세션 상태를 저장하지 못했습니다."))?
+        .insert(terminal_id, pty);
+
+    Ok(cwd.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn write_terminal_pty(
+    terminal_id: String,
+    data: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let writer = {
+        let sessions = state
+            .terminal_sessions
+            .lock()
+            .map_err(|_| CommandError::new("IoFailed", "터미널 세션 상태를 읽지 못했습니다."))?;
+        sessions
+            .get(&terminal_id)
+            .map(|session| session.writer.clone())
+            .ok_or_else(|| CommandError::validation("터미널 세션을 찾을 수 없습니다."))?
+    };
+
+    let mut writer = writer
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "터미널 입력 스트림을 열지 못했습니다."))?;
+    writer
+        .write_all(data.as_bytes())
+        .map_err(|err| CommandError::io("터미널 입력 전송에 실패했습니다.", err))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn resize_terminal_pty(
+    terminal_id: String,
+    cols: u16,
+    rows: u16,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let writer = {
+        let sessions = state
+            .terminal_sessions
+            .lock()
+            .map_err(|_| CommandError::new("IoFailed", "터미널 세션 상태를 읽지 못했습니다."))?;
+        sessions
+            .get(&terminal_id)
+            .map(|session| session.writer.clone())
+            .ok_or_else(|| CommandError::validation("터미널 세션을 찾을 수 없습니다."))?
+    };
+
+    let file = writer
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "터미널 크기 변경에 실패했습니다."))?;
+    let winsize = libc::winsize {
+        ws_row: rows.max(4),
+        ws_col: cols.max(20),
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCSWINSZ, &winsize) };
+    if result == -1 {
+        return Err(CommandError::io(
+            "터미널 크기 변경에 실패했습니다.",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_terminal_pty(terminal_id: String, state: State<'_, AppState>) -> CommandResult<()> {
+    stop_terminal_session(&state, &terminal_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -825,8 +1101,11 @@ fn fixture_ai_connections() -> Value {
             "label": "Fixture pass",
             "provider": "fixture",
             "commandArgs": ["node", script, "--mode", "pass"],
+            "planningCommandArgs": ["node", script, "--planning"],
+            "planningMode": "fixture",
             "healthCheckArgs": ["node", script],
             "timeoutSeconds": 60,
+            "planningTimeoutSeconds": 60,
             "enabled": true,
             "defaultModel": null,
             "availableModels": []
@@ -874,8 +1153,22 @@ fn codex_ai_connections() -> Value {
                 "--",
                 "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
+            "planningCommandArgs": [
+                "codex",
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--ask-for-approval",
+                "never",
+                "--cd",
+                "{projectRoot}",
+                "--",
+                "{planPrompt}"
+            ],
+            "planningMode": "prompt_guarded",
             "healthCheckArgs": ["codex", "--version"],
             "timeoutSeconds": 1800,
+            "planningTimeoutSeconds": 1800,
             "enabled": true,
             "defaultModel": "gpt-5.2",
             "availableModels": ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"]
@@ -915,8 +1208,17 @@ fn claude_ai_connections() -> Value {
                 "-p",
                 "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
+            "planningCommandArgs": [
+                "claude",
+                "--permission-mode",
+                "plan",
+                "-p",
+                "{planPrompt}"
+            ],
+            "planningMode": "native_plan",
             "healthCheckArgs": ["claude", "--version"],
             "timeoutSeconds": 1800,
+            "planningTimeoutSeconds": 1800,
             "enabled": true,
             "defaultModel": "sonnet",
             "availableModels": ["sonnet", "opus"],
@@ -953,6 +1255,301 @@ fn role_ids() -> Vec<(&'static str, &'static str)> {
         ("code_reviewer", "코드 리뷰어"),
         ("tester", "테스트 담당자"),
     ]
+}
+
+fn resolve_planning_command(
+    settings: &EffectiveSettings,
+    project_root: &Path,
+    input: &PlannerConversationInput,
+) -> CommandResult<(String, Option<String>, Vec<String>, u64)> {
+    let planner_assignment = settings
+        .role_assignments
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("roleId").and_then(Value::as_str) == Some("planner"))
+        })
+        .ok_or_else(|| CommandError::validation("planner 역할 배정을 찾을 수 없습니다."))?;
+    let selection = first_assignment_selection(planner_assignment)
+        .ok_or_else(|| CommandError::validation("planner에 배정된 AI 연결이 없습니다."))?;
+    let connection_id = selection
+        .get("connectionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CommandError::validation("planner 연결 id를 찾을 수 없습니다."))?;
+    let connection = settings
+        .ai_connections
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(connection_id))
+        })
+        .ok_or_else(|| CommandError::validation("planner에 배정된 AI 연결을 찾을 수 없습니다."))?;
+    if connection.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return Err(CommandError::validation(
+            "planner에 배정된 AI 연결이 비활성화되어 있습니다.",
+        ));
+    }
+
+    let provider = connection
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let model = selection
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            connection
+                .get("defaultModel")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        });
+    let effort = selection
+        .get("effort")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            connection
+                .get("defaultEffort")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        });
+    let prompt = build_planner_prompt(project_root, input);
+    let current_draft_json = input
+        .current_draft_json
+        .as_ref()
+        .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_string()))
+        .unwrap_or_else(|| "null".to_string());
+    let mut placeholders = HashMap::new();
+    placeholders.insert(
+        "projectRoot".to_string(),
+        project_root.to_string_lossy().to_string(),
+    );
+    placeholders.insert("planPrompt".to_string(), prompt);
+    placeholders.insert("message".to_string(), input.message.clone());
+    placeholders.insert("goalText".to_string(), input.goal_text.clone());
+    placeholders.insert("currentDraftJson".to_string(), current_draft_json);
+
+    let args = planning_command_args(connection, provider.as_deref(), &placeholders)?;
+    if args.is_empty() {
+        return Err(CommandError::validation(
+            "planner AI 연결에 planning command가 없습니다.",
+        ));
+    }
+
+    let timeout_seconds = connection
+        .get("planningTimeoutSeconds")
+        .and_then(Value::as_u64)
+        .or_else(|| connection.get("timeoutSeconds").and_then(Value::as_u64))
+        .unwrap_or(1800)
+        .clamp(1, 21600);
+
+    Ok((
+        connection_id.to_string(),
+        provider.clone(),
+        inject_planning_provider_options(args, provider.as_deref(), model, effort),
+        timeout_seconds,
+    ))
+}
+
+fn first_assignment_selection(assignment: &Value) -> Option<Value> {
+    if let Some(selection) = assignment
+        .get("selections")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+    {
+        return Some(selection.clone());
+    }
+    assignment
+        .get("connectionIds")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(Value::as_str)
+        .map(|connection_id| json!({ "connectionId": connection_id }))
+}
+
+fn planning_command_args(
+    connection: &Value,
+    provider: Option<&str>,
+    placeholders: &HashMap<String, String>,
+) -> CommandResult<Vec<String>> {
+    if let Some(args) = connection
+        .get("planningCommandArgs")
+        .and_then(Value::as_array)
+    {
+        return args
+            .iter()
+            .map(|arg| {
+                arg.as_str()
+                    .map(|raw| apply_planning_placeholders(raw, placeholders))
+                    .ok_or_else(|| {
+                        CommandError::validation("planningCommandArgs는 문자열 배열이어야 합니다.")
+                    })
+            })
+            .collect();
+    }
+
+    if provider == Some("fixture") {
+        if let Some(args) = connection.get("commandArgs").and_then(Value::as_array) {
+            let parsed = string_array(args, "commandArgs는 문자열 배열이어야 합니다.")?;
+            if parsed.len() >= 2 && parsed[1].contains("fixture-runner.mjs") {
+                return Ok(vec![
+                    parsed[0].clone(),
+                    parsed[1].clone(),
+                    "--planning".to_string(),
+                ]);
+            }
+        }
+    }
+
+    match provider {
+        Some("codex") => Ok(vec![
+            "codex".to_string(),
+            "exec".to_string(),
+            "--sandbox".to_string(),
+            "read-only".to_string(),
+            "--ask-for-approval".to_string(),
+            "never".to_string(),
+            "--cd".to_string(),
+            "{projectRoot}".to_string(),
+            "--".to_string(),
+            "{planPrompt}".to_string(),
+        ]
+        .into_iter()
+        .map(|arg| apply_planning_placeholders(&arg, placeholders))
+        .collect()),
+        Some("claude") => Ok(vec![
+            "claude".to_string(),
+            "--permission-mode".to_string(),
+            "plan".to_string(),
+            "-p".to_string(),
+            "{planPrompt}".to_string(),
+        ]
+        .into_iter()
+        .map(|arg| apply_planning_placeholders(&arg, placeholders))
+        .collect()),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn build_planner_prompt(project_root: &Path, input: &PlannerConversationInput) -> String {
+    let current_draft = input
+        .current_draft_json
+        .as_ref()
+        .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_string()))
+        .unwrap_or_else(|| "null".to_string());
+    let branch = git::current_branch(project_root).unwrap_or_else(|| "detached".to_string());
+    let head = git::head_hash(project_root).unwrap_or_else(|| "unknown".to_string());
+
+    format!(
+        r#"너는 Helm Planning 탭의 planner role이다.
+
+규칙:
+- 한글로 답한다.
+- 지금은 계획 모드다. 파일 수정, 명령 실행, Git 작업, Task 생성은 하지 않는다.
+- 사용자의 목표를 대화로 더 명확하게 만들고, 승인 가능한 Plan Document draft를 갱신한다.
+- 정보가 부족하면 질문을 먼저 한다.
+- 충분하면 아래 JSON 형태만 반환한다. Markdown fence 없이 JSON만 반환한다.
+
+JSON schema:
+{{
+  "title": "string",
+  "summary": "string",
+  "scope": ["string"],
+  "tasks": [
+    {{
+      "title": "string",
+      "description": "string",
+      "subtasks": ["string"],
+      "acceptanceCriteria": ["string"],
+      "risks": ["string"],
+      "testPlan": ["string"]
+    }}
+  ],
+  "openQuestions": ["string"],
+  "risks": ["string"]
+}}
+
+Project:
+- root: {root}
+- branch: {branch}
+- head: {head}
+
+Goal:
+{goal}
+
+Current Plan Draft JSON:
+{current_draft}
+
+User message:
+{message}
+"#,
+        root = project_root.to_string_lossy(),
+        branch = branch,
+        head = head,
+        goal = input.goal_text,
+        current_draft = current_draft,
+        message = input.message,
+    )
+}
+
+fn apply_planning_placeholders(value: &str, placeholders: &HashMap<String, String>) -> String {
+    let mut rendered = value.to_string();
+    for (key, replacement) in placeholders {
+        rendered = rendered.replace(&format!("{{{key}}}"), replacement);
+    }
+    rendered
+}
+
+fn inject_planning_provider_options(
+    args: Vec<String>,
+    provider: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Vec<String> {
+    let with_model = match (provider, model) {
+        (Some("codex"), Some(model)) if !has_command_arg(&args, &["-m", "--model"]) => {
+            insert_after_command_arg(args, "exec", ["-m".to_string(), model.to_string()])
+        }
+        (Some("claude"), Some(model)) if !has_command_arg(&args, &["--model"]) => {
+            insert_after_arg_index(args, 0, ["--model".to_string(), model.to_string()])
+        }
+        _ => args,
+    };
+
+    match (provider, effort) {
+        (Some("claude"), Some(effort)) if !has_command_arg(&with_model, &["--effort"]) => {
+            insert_after_arg_index(with_model, 0, ["--effort".to_string(), effort.to_string()])
+        }
+        _ => with_model,
+    }
+}
+
+fn has_command_arg(args: &[String], names: &[&str]) -> bool {
+    args.iter().any(|arg| names.iter().any(|name| arg == name))
+}
+
+fn insert_after_command_arg<const N: usize>(
+    args: Vec<String>,
+    command: &str,
+    insert: [String; N],
+) -> Vec<String> {
+    let index = args.iter().position(|arg| arg == command).unwrap_or(0);
+    insert_after_arg_index(args, index, insert)
+}
+
+fn insert_after_arg_index<const N: usize>(
+    mut args: Vec<String>,
+    index: usize,
+    insert: [String; N],
+) -> Vec<String> {
+    let insert_at = (index + 1).min(args.len());
+    for (offset, value) in insert.into_iter().enumerate() {
+        args.insert(insert_at + offset, value);
+    }
+    args
 }
 
 fn role_command_for_check(role_presets: &Value, role_id: &str) -> CommandResult<Vec<String>> {
@@ -1216,6 +1813,371 @@ struct ShellOutput {
     timed_out: bool,
 }
 
+fn discover_node_runtimes() -> Vec<NodeRuntimeSummary> {
+    let mut runtimes = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(system_node) = shell_output_line("command -v node") {
+        push_node_runtime(
+            &mut runtimes,
+            &mut seen,
+            PathBuf::from(system_node),
+            "system",
+        );
+    }
+
+    for nvm_dir in candidate_nvm_dirs() {
+        let versions_dir = nvm_dir.join("versions").join("node");
+        let Ok(entries) = fs::read_dir(versions_dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let node_path = entry.path().join("bin").join("node");
+            if node_path.is_file() {
+                push_node_runtime(&mut runtimes, &mut seen, node_path, "nvm");
+            }
+        }
+    }
+
+    runtimes.sort_by(|left, right| {
+        runtime_source_rank(&left.source)
+            .cmp(&runtime_source_rank(&right.source))
+            .then_with(|| compare_node_versions(&right.version, &left.version))
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    runtimes
+}
+
+fn push_node_runtime(
+    runtimes: &mut Vec<NodeRuntimeSummary>,
+    seen: &mut HashSet<PathBuf>,
+    node_path: PathBuf,
+    source: &str,
+) {
+    let Ok(node_path) = node_path.canonicalize() else {
+        return;
+    };
+    if !seen.insert(node_path.clone()) {
+        return;
+    }
+    let Some(version) = node_version(&node_path) else {
+        return;
+    };
+    let Some(bin_path) = node_path.parent().map(Path::to_path_buf) else {
+        return;
+    };
+    let label = if source == "nvm" {
+        format!("{version} · nvm")
+    } else {
+        format!("{version} · shell")
+    };
+
+    runtimes.push(NodeRuntimeSummary {
+        id: format!("{source}:{version}:{}", node_path.to_string_lossy()),
+        label,
+        version,
+        node_path: node_path.to_string_lossy().to_string(),
+        bin_path: bin_path.to_string_lossy().to_string(),
+        source: source.to_string(),
+    });
+}
+
+fn candidate_nvm_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(value) = env::var_os("NVM_DIR").filter(|value| !value.is_empty()) {
+        dirs.push(PathBuf::from(value));
+    }
+    if let Ok(home) = home_dir() {
+        dirs.push(home.join(".nvm"));
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+fn shell_output_line(command: &str) -> Option<String> {
+    Command::new("/bin/zsh")
+        .args(["-lc", command])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn node_version(node_path: &Path) -> Option<String> {
+    Command::new(node_path)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .split_whitespace()
+                .next()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn runtime_source_rank(source: &str) -> u8 {
+    match source {
+        "nvm" => 0,
+        "system" => 1,
+        _ => 2,
+    }
+}
+
+fn compare_node_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = parse_node_version(left);
+    let right_parts = parse_node_version(right);
+    left_parts.cmp(&right_parts)
+}
+
+fn parse_node_version(version: &str) -> Vec<u64> {
+    version
+        .trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+fn resolve_node_bin_path(node_bin_path: Option<String>) -> CommandResult<Option<PathBuf>> {
+    let Some(node_bin_path) = node_bin_path.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(node_bin_path.trim())
+        .canonicalize()
+        .map_err(|err| CommandError::io("Node bin 경로를 확인하지 못했습니다.", err))?;
+    if !path.is_dir() {
+        return Err(CommandError::validation(
+            "Node bin 디렉토리를 선택해주세요.",
+        ));
+    }
+    Ok(Some(path))
+}
+
+fn nvm_dir_for_node_bin(node_bin_path: &Path) -> Option<PathBuf> {
+    let node_version_dir = node_bin_path.parent()?;
+    let node_versions_dir = node_version_dir.parent()?;
+    if node_versions_dir.file_name()? != "node" {
+        return None;
+    }
+    let versions_dir = node_versions_dir.parent()?;
+    if versions_dir.file_name()? != "versions" {
+        return None;
+    }
+    versions_dir.parent().map(Path::to_path_buf)
+}
+
+fn set_child_env(key: &str, value: &str) {
+    let Ok(key) = CString::new(key) else {
+        return;
+    };
+    let Ok(value) = CString::new(value) else {
+        return;
+    };
+    unsafe {
+        libc::setenv(key.as_ptr(), value.as_ptr(), 1);
+    }
+}
+
+fn spawn_pty_shell(
+    terminal_id: &str,
+    cwd: &Path,
+    cols: u16,
+    rows: u16,
+    node_bin_path: Option<&Path>,
+    app: AppHandle,
+) -> CommandResult<PtySession> {
+    let mut master_fd: libc::c_int = -1;
+    let mut winsize = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    let child_pid = unsafe {
+        libc::forkpty(
+            &mut master_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut winsize,
+        )
+    };
+
+    if child_pid == -1 {
+        return Err(CommandError::io(
+            "PTY 터미널을 시작하지 못했습니다.",
+            std::io::Error::last_os_error(),
+        ));
+    }
+
+    if child_pid == 0 {
+        let cwd = CString::new(cwd.to_string_lossy().as_bytes()).ok();
+        if let Some(cwd) = cwd.as_ref() {
+            unsafe {
+                libc::chdir(cwd.as_ptr());
+            }
+        }
+
+        set_child_env("TERM", "xterm-256color");
+        set_child_env("COLORTERM", "truecolor");
+        if let Some(node_bin_path) = node_bin_path {
+            let node_bin = node_bin_path.to_string_lossy().to_string();
+            let previous_path = env::var("PATH").unwrap_or_default();
+            let next_path = if previous_path.is_empty() {
+                node_bin.clone()
+            } else {
+                format!("{node_bin}:{previous_path}")
+            };
+            set_child_env("PATH", &next_path);
+            set_child_env("NVM_BIN", &node_bin);
+            if let Some(nvm_dir) = nvm_dir_for_node_bin(node_bin_path) {
+                set_child_env("NVM_DIR", &nvm_dir.to_string_lossy());
+            }
+        }
+
+        let shell = CString::new("/bin/zsh").unwrap();
+        let login_arg = CString::new("-l").unwrap();
+        let args = [shell.as_ptr(), login_arg.as_ptr(), std::ptr::null()];
+        unsafe {
+            libc::execv(shell.as_ptr(), args.as_ptr());
+            libc::_exit(127);
+        }
+    }
+
+    let reader = unsafe { fs::File::from_raw_fd(master_fd) };
+    let writer =
+        Arc::new(Mutex::new(reader.try_clone().map_err(|err| {
+            CommandError::io("PTY 입력 스트림을 열지 못했습니다.", err)
+        })?));
+    let terminal_id_for_thread = terminal_id.to_string();
+
+    std::thread::spawn(move || {
+        read_pty_output(reader, child_pid, terminal_id_for_thread, app);
+    });
+
+    Ok(PtySession { child_pid, writer })
+}
+
+fn read_pty_output(
+    mut reader: fs::File,
+    child_pid: libc::pid_t,
+    terminal_id: String,
+    app: AppHandle,
+) {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(size) => {
+                let data = String::from_utf8_lossy(&buffer[..size]).to_string();
+                let _ = app.emit(
+                    "terminal://output",
+                    TerminalPtyOutput {
+                        terminal_id: terminal_id.clone(),
+                        data,
+                    },
+                );
+            }
+            Err(_) => break,
+        }
+    }
+
+    let mut status = 0;
+    unsafe {
+        libc::waitpid(child_pid, &mut status, 0);
+    }
+    let exit_code = if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        -1
+    };
+    let _ = app.emit(
+        "terminal://exit",
+        TerminalPtyExit {
+            terminal_id,
+            exit_code,
+        },
+    );
+}
+
+fn stop_terminal_session(state: &State<'_, AppState>, terminal_id: &str) {
+    let session = state
+        .terminal_sessions
+        .lock()
+        .ok()
+        .and_then(|mut sessions| sessions.remove(terminal_id));
+
+    if let Some(session) = session {
+        unsafe {
+            libc::kill(session.child_pid, libc::SIGHUP);
+        }
+    }
+}
+
+fn run_direct_command_with_timeout(
+    cwd: &std::path::Path,
+    command: &[String],
+    timeout: Duration,
+) -> CommandResult<ShellOutput> {
+    if command.is_empty() {
+        return Err(CommandError::validation(
+            "실행할 planning command가 없습니다.",
+        ));
+    }
+    let mut child = Command::new(&command[0])
+        .args(&command[1..])
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| CommandError::io("planner command를 실행하지 못했습니다.", err))?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if child
+            .try_wait()
+            .map_err(|err| CommandError::io("planner command 상태를 확인하지 못했습니다.", err))?
+            .is_some()
+        {
+            let output = child
+                .wait_with_output()
+                .map_err(|err| CommandError::io("planner command 출력을 읽지 못했습니다.", err))?;
+            return Ok(ShellOutput {
+                stdout: truncate_output(String::from_utf8_lossy(&output.stdout).to_string()),
+                stderr: truncate_output(String::from_utf8_lossy(&output.stderr).to_string()),
+                exit_code: output.status.code().unwrap_or(-1),
+                timed_out: false,
+            });
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().map_err(|err| {
+                CommandError::io("timeout 된 planner command 출력을 읽지 못했습니다.", err)
+            })?;
+            return Ok(ShellOutput {
+                stdout: truncate_output(String::from_utf8_lossy(&output.stdout).to_string()),
+                stderr: truncate_output(String::from_utf8_lossy(&output.stderr).to_string()),
+                exit_code: -1,
+                timed_out: true,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn run_shell_command(
     cwd: &std::path::Path,
     command: &str,
@@ -1313,9 +2275,11 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_launch_state,
             open_project,
+            forget_project,
             get_project_snapshot,
             get_effective_settings,
             update_project_settings,
+            run_planner_conversation,
             list_runner_templates,
             apply_runner_template,
             check_role_runner,
@@ -1332,8 +2296,15 @@ fn main() {
             get_local_branches,
             get_recent_commits,
             get_changed_files,
+            switch_git_branch,
+            list_node_runtimes,
+            list_terminal_directories,
             run_terminal_command,
             resolve_terminal_cwd,
+            start_terminal_pty,
+            write_terminal_pty,
+            resize_terminal_pty,
+            stop_terminal_pty,
             run_stub_role,
             prepare_role_context,
             run_host_role,

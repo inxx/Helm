@@ -68,6 +68,7 @@ pub struct EffectiveSettings {
     pub ai_connections: Value,
     pub role_assignments: Value,
     pub worktree_root: Option<String>,
+    pub jira_config: Option<Value>,
     pub obsidian_vault_path: Option<String>,
     pub token_budget: Option<i64>,
     pub artifact_retention_days: Option<i64>,
@@ -252,6 +253,25 @@ pub struct GitFileStatus {
     pub renamed_from: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeRuntimeSummary {
+    pub id: String,
+    pub label: String,
+    pub version: String,
+    pub node_path: String,
+    pub bin_path: String,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalDirectoryEntry {
+    pub path: String,
+    pub label: String,
+    pub kind: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateEpicInput {
@@ -278,11 +298,32 @@ pub struct CreateTaskInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PlannerConversationInput {
+    pub message: String,
+    pub goal_text: String,
+    pub current_draft_json: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannerConversationResult {
+    pub connection_id: String,
+    pub provider: Option<String>,
+    pub command: Vec<String>,
+    pub response_text: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub timed_out: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectSettingsPatch {
     pub role_presets: Option<Value>,
     pub ai_connections: Option<Value>,
     pub role_assignments: Option<Value>,
     pub worktree_root: Option<Option<String>>,
+    pub jira_config: Option<Option<Value>>,
     pub obsidian_vault_path: Option<Option<String>>,
     pub token_budget: Option<Option<i64>>,
     pub artifact_retention_days: Option<Option<i64>>,

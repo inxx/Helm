@@ -1,7 +1,7 @@
 import { CheckCircle2, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api } from "../lib/api";
-import type { CreateTaskInput, ProjectSnapshot, TaskSummary } from "../lib/types";
+import type { CreateTaskInput, PlannerConversationResult, ProjectSnapshot, TaskSummary } from "../lib/types";
 
 interface PlanningScreenProps {
   snapshot: ProjectSnapshot | null;
@@ -91,14 +91,17 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     setError(null);
   }
 
-  function startPlannerSession() {
+  async function startPlannerSession() {
     const trimmed = goal.trim();
     const trimmedJiraRef = jiraRef.trim();
     if (!trimmed || busy) return;
 
     const existingTask = trimmedJiraRef ? findTaskByJiraRef(projectSnapshot, trimmedJiraRef) : null;
     const jiraState = existingTask ? "AlreadyTracked" : trimmedJiraRef ? "Linked" : "Missing";
-    const draft = buildPlannerDraft(trimmed, existingTask?.title ?? null);
+    const fallbackDraft = buildPlannerDraft(trimmed, existingTask?.title ?? null);
+    setBusy(true);
+    const plannerResult = await runPlannerPlanMode(trimmed, trimmed, null, fallbackDraft);
+    const draft = plannerResult.draft;
     const sessionId = `plan-${Date.now()}`;
 
     const session: PlanningSessionStub = {
@@ -119,7 +122,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         {
           id: `${sessionId}-planner-1`,
           role: "planner",
-          content: plannerOpeningMessage(draft, jiraState),
+          content: plannerResult.message ?? plannerOpeningMessage(draft, jiraState),
           createdLabel: "방금 전",
         },
       ],
@@ -132,17 +135,26 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     setActiveSessionId(session.id);
     setGoal("");
     setPlannerRequest("");
-    setError(null);
+    setError(plannerResult.warning ?? null);
+    setBusy(false);
   }
 
-  function reviseActiveDraft() {
+  async function reviseActiveDraft() {
     const trimmed = plannerRequest.trim();
     if (!activeSession || !trimmed || busy) return;
 
-    const revisedDraft = buildPlannerDraft(
-      `${activeSession.goalText}\n\nplanner 수정 요청: ${trimmed}`,
+    setBusy(true);
+    const fallbackDraft = buildPlannerDraft(
+      `${activeSession.goalText}\n\nplanner message: ${trimmed}`,
       activeSession.taskId ? activeSession.draft.tasks[0]?.title ?? null : null,
     );
+    const plannerResult = await runPlannerPlanMode(
+      trimmed,
+      activeSession.goalText,
+      activeSession.draft,
+      fallbackDraft,
+    );
+    const revisedDraft = plannerResult.draft;
     const nextRevision = activeSession.revision + 1;
 
     setSessions((current) =>
@@ -166,7 +178,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 {
                   id: `${item.id}-planner-${Date.now()}`,
                   role: "planner",
-                  content: plannerRevisionMessage(revisedDraft, nextRevision),
+                  content: plannerResult.message ?? plannerRevisionMessage(revisedDraft, nextRevision),
                   createdLabel: "방금 전",
                 },
               ],
@@ -175,7 +187,43 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       ),
     );
     setPlannerRequest("");
-    setError(null);
+    setError(plannerResult.warning ?? null);
+    setBusy(false);
+  }
+
+  async function runPlannerPlanMode(
+    message: string,
+    goalText: string,
+    currentDraft: PlannerDraft | null,
+    fallbackDraft: PlannerDraft,
+  ): Promise<{ draft: PlannerDraft; message: string | null; warning: string | null }> {
+    try {
+      const result = await api.runPlannerConversation(projectSnapshot.project.id, {
+        message,
+        goalText,
+        currentDraftJson: currentDraft,
+      });
+      const parsedDraft = parsePlannerDraft(result.responseText);
+      const warning = plannerResultWarning(result);
+      if (parsedDraft) {
+        return {
+          draft: parsedDraft,
+          message: plannerMessageFromResult(result, parsedDraft),
+          warning,
+        };
+      }
+      return {
+        draft: fallbackDraft,
+        message: result.responseText.trim() || null,
+        warning: warning ?? "planner 응답을 Plan Document JSON으로 해석하지 못해 local draft를 유지했습니다.",
+      };
+    } catch (err) {
+      return {
+        draft: fallbackDraft,
+        message: null,
+        warning: `planner plan mode 실행 실패: ${errorMessage(err)}`,
+      };
+    }
   }
 
   async function approvePlanDraft() {
@@ -272,272 +320,209 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
           </div>
         </aside>
 
-        <section className="planning-canvas">
-          <header className="section-header">
-            <div>
-              <h2>{activeSession?.title ?? "새 계획"}</h2>
-              <p>planner와 대화하면서 계획 문서를 고정하고, 승인한 문서만 Helm Task로 변환합니다.</p>
-            </div>
-          </header>
-
-          <div className="planning-canvas-body">
-            {activeSession ? (
-              <div className="planning-thread">
-                {activeSession.messages.map((message) => (
-                  <article className={`planning-message ${message.role}`} key={message.id}>
-                    <div className="planning-message-meta">
-                      <strong>{message.role === "planner" ? `Planner · v${activeSession.revision}` : "User"}</strong>
-                      <span>{message.createdLabel}</span>
-                    </div>
-                    <p>{message.content}</p>
-                  </article>
-                ))}
+        <div className="planning-workspace">
+          <section className="planning-canvas">
+            <header className="section-header">
+              <div>
+                <h2>{activeSession?.title ?? "새 계획"}</h2>
+                <p>planner와 대화하면서 계획 문서를 고정하고, 승인한 문서만 Helm Task로 변환합니다.</p>
               </div>
-            ) : (
-              <div className="planning-empty">
-                <h3>planner와 어떤 계획을 세울까요?</h3>
-                <p>
-                  Codex Desktop에서 계획을 잡듯이 요구사항을 설명하고, planner가 만든 계획 문서를 대화로 다듬은 뒤 승인합니다.
-                </p>
-              </div>
-            )}
-          </div>
+            </header>
 
-          <form
-            className="planning-goal-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (activeSession) {
-                reviseActiveDraft();
-              } else {
-                startPlannerSession();
-              }
-            }}
-          >
-            <textarea
-              placeholder={
-                activeSession
-                  ? "planner에게 메시지: 예) 이 범위는 너무 넓어. 먼저 MVP 기준으로 줄이고 승인 조건을 다시 써줘."
-                  : "예: Codex Desktop처럼 대화하면서 계획 문서를 확정하고 Task로 나누고 싶다."
-              }
-              value={activeSession ? plannerRequest : goal}
-              onChange={(event) =>
-                activeSession ? setPlannerRequest(event.target.value) : setGoal(event.target.value)
-              }
-              rows={2}
-            />
-            {activeSession ? null : (
-              <input
-                placeholder="Jira Epic, 이슈 키 또는 URL이 이미 있으면 입력"
-                value={jiraRef}
-                onChange={(event) => setJiraRef(event.target.value)}
-              />
-            )}
-            <div className="planning-goal-actions">
-              <span className="planning-goal-hint">
-                {activeSession
-                  ? "메시지를 보내면 planner가 Plan Document draft를 갱신합니다."
-                  : goal.trim()
-                    ? jiraChecks.summary
-                    : "대화로 계획 문서를 고정하고 승인 후에만 Helm Task를 생성합니다."}
-              </span>
-              <button type="button" className="secondary-button" disabled>
-                repo context 첨부
-              </button>
-              <button
-                type="submit"
-                className="primary-button"
-                disabled={busy || (activeSession ? !plannerRequest.trim() : !goal.trim())}
-              >
-                <Sparkles size={14} />
-                {activeSession ? "planner에게 보내기" : "대화 시작"}
-              </button>
-            </div>
-            {error ? <p className="planning-form-error">{error}</p> : null}
-          </form>
-        </section>
-
-        <aside className="planning-context">
-          <div className="planning-context-block">
-            <h3>저장소</h3>
-            <ul>
-              <li>
-                <span className="ctx-label">branch</span>
-                <span className="ctx-value">{snapshot.repository.currentBranch ?? "detached"}</span>
-              </li>
-              <li>
-                <span className="ctx-label">staged</span>
-                <span className="ctx-value">{snapshot.repository.stagedCount}</span>
-              </li>
-              <li>
-                <span className="ctx-label">unstaged</span>
-                <span className="ctx-value">{snapshot.repository.unstagedCount}</span>
-              </li>
-              <li>
-                <span className="ctx-label">untracked</span>
-                <span className="ctx-value">{snapshot.repository.untrackedCount}</span>
-              </li>
-            </ul>
-          </div>
-
-          <div className="planning-context-block">
-            <h3>기존 태스크</h3>
-            {snapshot.tasks.length === 0 ? (
-              <p className="planning-context-empty">아직 등록된 태스크가 없습니다.</p>
-            ) : (
-              <ul>
-                {snapshot.tasks.slice(0, 5).map((task) => (
-                  <li key={task.id}>
-                    <span className="ctx-label">{task.title}</span>
-                    <span className="ctx-value">{task.status}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="planning-context-block">
-            <h3>외부 레퍼런스</h3>
-            <p className="planning-context-empty">
-              {draftJiraRef ? `${jiraStateLabel(draftJiraState)} · ${draftJiraRef}` : "Jira Epic 또는 링크가 있으면 첨부할 수 있습니다."}
-            </p>
-          </div>
-
-          <div className="planning-context-block">
-            <h3>위험</h3>
-            {draft ? (
-              <ul>
-                {draft.risks.map((risk) => (
-                  <li key={risk}>
-                    <span className="ctx-label">{risk}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="planning-context-empty">planner가 식별한 위험과 검증 방법이 표시됩니다.</p>
-            )}
-          </div>
-        </aside>
-      </div>
-
-      <footer className="plan-preview">
-        <div className="plan-preview-header">
-          <h3>Plan Document</h3>
-          <span className="status-pill">
-            {activeSession
-              ? activeSession.status === "Approved"
-                ? "태스크 생성됨"
-                : jiraStateLabel(activeSession.jiraState)
-              : goal.trim()
-                ? "작성 중"
-                : "아직 초안 없음"}
-          </span>
-        </div>
-        {draftGoal.trim() && draft ? (
-          <div className="plan-preview-draft">
-            <div className="plan-document-title">
-              <strong>{draftTitle}</strong>
-              {activeSession ? <span>Draft v{activeSession.revision}</span> : null}
-            </div>
-            <p>{draft.summary}</p>
-            <div className="plan-preview-task-counts">
-              <span>{draft.tasks.length} Tasks</span>
-              <span>{draft.tasks.reduce((total, task) => total + task.subtasks.length, 0)} Subtasks</span>
-            </div>
-            <div className="plan-document-grid">
-              <section>
-                <h4>Scope</h4>
-                <ul>
-                  {draft.scope.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </section>
-              <section>
-                <h4>Open Questions</h4>
-                {draft.openQuestions.length > 0 ? (
-                  <ul>
-                    {draft.openQuestions.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p>현재 blocking question 없음</p>
-                )}
-              </section>
-              <section>
-                <h4>Context</h4>
-                <ul>
-                  {jiraChecks.items.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </section>
-            </div>
-            <div className="plan-document-tasks">
-              {draft.tasks.map((task, index) => (
-                <article className="planner-task-card" key={`${task.title}-${index}`}>
-                  <div className="planner-task-card-header">
-                    <span>Task {index + 1}</span>
-                    <strong>{task.title}</strong>
-                  </div>
-                  <p>{task.description}</p>
-                  <div className="planner-task-grid">
-                    <div>
-                      <h4>Subtasks</h4>
-                      <ul>
-                        {task.subtasks.map((item) => (
-                          <li key={item}>{item}</li>
-                        ))}
-                      </ul>
-                    </div>
-                    <div>
-                      <h4>Acceptance</h4>
-                      <ul>
-                        {task.acceptanceCriteria.map((item) => (
-                          <li key={item}>{item}</li>
-                        ))}
-                      </ul>
-                    </div>
-                    <div>
-                      <h4>Test</h4>
-                      <ul>
-                        {task.testPlan.map((item) => (
-                          <li key={item}>{item}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  </div>
-                </article>
-              ))}
-            </div>
-            <div className="plan-preview-actions">
-              {activeSession?.taskId && activeSession.status === "Approved" ? (
-                <span className="status-pill">Task 연결 완료</span>
-              ) : null}
+            <div className="planning-canvas-body">
               {activeSession ? (
-                <button
-                  type="button"
-                  className="primary-button"
-                  disabled={busy || activeSession.status === "Approved"}
-                  onClick={() => {
-                    void approvePlanDraft();
-                  }}
-                >
-                  <CheckCircle2 size={14} />
-                  {activeSession.taskId && activeSession.jiraState === "AlreadyTracked"
-                    ? "기존 Task 열기"
-                    : "승인하고 Task 생성"}
-                </button>
-              ) : null}
+                <div className="planning-thread">
+                  {activeSession.messages.map((message) => (
+                    <article className={`planning-message ${message.role}`} key={message.id}>
+                      <div className="planning-message-meta">
+                        <strong>{message.role === "planner" ? `Planner · v${activeSession.revision}` : "User"}</strong>
+                        <span>{message.createdLabel}</span>
+                      </div>
+                      <p>{message.content}</p>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="planning-empty">
+                  <h3>planner와 어떤 계획을 세울까요?</h3>
+                  <p>
+                    Codex Desktop에서 계획을 잡듯이 요구사항을 설명하고, planner가 만든 계획 문서를 대화로 다듬은 뒤 승인합니다.
+                  </p>
+                </div>
+              )}
             </div>
-          </div>
-        ) : (
-          <p className="plan-preview-empty">
-            목표를 입력하면 planner와의 대화가 시작되고, 승인 대상 Plan Document가 여기에서 갱신됩니다.
-          </p>
-        )}
-      </footer>
+
+            <form
+              className="planning-goal-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (activeSession) {
+                  void reviseActiveDraft();
+                } else {
+                  void startPlannerSession();
+                }
+              }}
+            >
+              <textarea
+                placeholder={
+                  activeSession
+                    ? "planner에게 메시지: 예) 이 범위는 너무 넓어. 먼저 MVP 기준으로 줄이고 승인 조건을 다시 써줘."
+                    : "예: Codex Desktop처럼 대화하면서 계획 문서를 확정하고 Task로 나누고 싶다."
+                }
+                value={activeSession ? plannerRequest : goal}
+                onChange={(event) =>
+                  activeSession ? setPlannerRequest(event.target.value) : setGoal(event.target.value)
+                }
+                rows={2}
+              />
+              {activeSession ? null : (
+                <input
+                  placeholder="Jira Epic, 이슈 키 또는 URL이 이미 있으면 입력"
+                  value={jiraRef}
+                  onChange={(event) => setJiraRef(event.target.value)}
+                />
+              )}
+              <div className="planning-goal-actions">
+                <span className="planning-goal-hint">
+                  {activeSession
+                    ? "메시지를 보내면 planner가 Plan Document draft를 갱신합니다."
+                    : goal.trim()
+                      ? jiraChecks.summary
+                      : "대화로 계획 문서를 고정하고 승인 후에만 Helm Task를 생성합니다."}
+                </span>
+                <button
+                  type="submit"
+                  className="primary-button"
+                  disabled={busy || (activeSession ? !plannerRequest.trim() : !goal.trim())}
+                >
+                  <Sparkles size={14} />
+                  {activeSession ? "planner에게 보내기" : "대화 시작"}
+                </button>
+              </div>
+              {error ? <p className="planning-form-error">{error}</p> : null}
+            </form>
+          </section>
+
+          <section className="plan-preview">
+            <div className="plan-preview-header">
+              <h3>Plan Document</h3>
+              <span className="status-pill">
+                {activeSession
+                  ? activeSession.status === "Approved"
+                    ? "태스크 생성됨"
+                    : jiraStateLabel(activeSession.jiraState)
+                  : goal.trim()
+                    ? "작성 중"
+                    : "아직 초안 없음"}
+              </span>
+            </div>
+            {draftGoal.trim() && draft ? (
+              <div className="plan-preview-draft">
+                <div className="plan-document-title">
+                  <strong>{draftTitle}</strong>
+                  {activeSession ? <span>Draft v{activeSession.revision}</span> : null}
+                </div>
+                <p>{draft.summary}</p>
+                <div className="plan-preview-task-counts">
+                  <span>{draft.tasks.length} Tasks</span>
+                  <span>{draft.tasks.reduce((total, task) => total + task.subtasks.length, 0)} Subtasks</span>
+                </div>
+                <div className="plan-document-grid">
+                  <section>
+                    <h4>Scope</h4>
+                    <ul>
+                      {draft.scope.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </section>
+                  <section>
+                    <h4>Open Questions</h4>
+                    {draft.openQuestions.length > 0 ? (
+                      <ul>
+                        {draft.openQuestions.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>현재 blocking question 없음</p>
+                    )}
+                  </section>
+                  <section>
+                    <h4>Context</h4>
+                    <ul>
+                      {jiraChecks.items.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </section>
+                </div>
+                <div className="plan-document-tasks">
+                  {draft.tasks.map((task, index) => (
+                    <article className="planner-task-card" key={`${task.title}-${index}`}>
+                      <div className="planner-task-card-header">
+                        <span>Task {index + 1}</span>
+                        <strong>{task.title}</strong>
+                      </div>
+                      <p>{task.description}</p>
+                      <div className="planner-task-grid">
+                        <div>
+                          <h4>Subtasks</h4>
+                          <ul>
+                            {task.subtasks.map((item) => (
+                              <li key={item}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+                        <div>
+                          <h4>Acceptance</h4>
+                          <ul>
+                            {task.acceptanceCriteria.map((item) => (
+                              <li key={item}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+                        <div>
+                          <h4>Test</h4>
+                          <ul>
+                            {task.testPlan.map((item) => (
+                              <li key={item}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+                <div className="plan-preview-actions">
+                  {activeSession?.taskId && activeSession.status === "Approved" ? (
+                    <span className="status-pill">Task 연결 완료</span>
+                  ) : null}
+                  {activeSession ? (
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={busy || activeSession.status === "Approved"}
+                      onClick={() => {
+                        void approvePlanDraft();
+                      }}
+                    >
+                      <CheckCircle2 size={14} />
+                      {activeSession.taskId && activeSession.jiraState === "AlreadyTracked"
+                        ? "기존 Task 열기"
+                        : "승인하고 Task 생성"}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <p className="plan-preview-empty">
+                목표를 입력하면 planner와의 대화가 시작되고, 승인 대상 Plan Document가 여기에서 갱신됩니다.
+              </p>
+            )}
+          </section>
+        </div>
+      </div>
     </div>
   );
 }
@@ -607,6 +592,83 @@ function buildPlannerDraft(goal: string, linkedTaskTitle: string | null): Planne
       : ["계획 세션과 draft를 backend DB에 언제 영속화할지 결정해야 합니다."],
     risks: Array.from(new Set(tasks.flatMap((task) => task.risks))),
   };
+}
+
+function parsePlannerDraft(raw: string): PlannerDraft | null {
+  const jsonText = extractJson(raw);
+  if (!jsonText) return null;
+  try {
+    const parsed = JSON.parse(jsonText) as Partial<PlannerDraft>;
+    const title = typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : null;
+    const summary = typeof parsed.summary === "string" && parsed.summary.trim() ? parsed.summary.trim() : null;
+    const tasks = Array.isArray(parsed.tasks)
+      ? parsed.tasks.map(normalizePlannerTask).filter((task): task is PlannerDraftTask => Boolean(task))
+      : [];
+    if (!title || !summary || tasks.length === 0) return null;
+    const risks = stringList(parsed.risks);
+    return {
+      title,
+      summary,
+      scope: stringList(parsed.scope),
+      tasks,
+      openQuestions: stringList(parsed.openQuestions),
+      risks: risks.length > 0 ? risks : Array.from(new Set(tasks.flatMap((task) => task.risks))),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function extractJson(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) return fenced[1].trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed;
+  const first = trimmed.indexOf("{");
+  const last = trimmed.lastIndexOf("}");
+  return first >= 0 && last > first ? trimmed.slice(first, last + 1) : null;
+}
+
+function normalizePlannerTask(value: unknown): PlannerDraftTask | null {
+  if (typeof value !== "object" || value === null) return null;
+  const item = value as Partial<PlannerDraftTask>;
+  const title = typeof item.title === "string" && item.title.trim() ? item.title.trim() : null;
+  if (!title) return null;
+  return {
+    title,
+    description:
+      typeof item.description === "string" && item.description.trim()
+        ? item.description.trim()
+        : "planner가 제안한 실행 Task입니다.",
+    subtasks: stringList(item.subtasks),
+    acceptanceCriteria: stringList(item.acceptanceCriteria),
+    risks: stringList(item.risks),
+    testPlan: stringList(item.testPlan),
+  };
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)
+    : [];
+}
+
+function plannerResultWarning(result: PlannerConversationResult): string | null {
+  if (result.timedOut) return "planner plan mode가 timeout 되어 local draft를 유지했습니다.";
+  if (result.exitCode !== 0) {
+    return result.stderr.trim() || `planner plan mode가 exit code ${result.exitCode}로 종료되었습니다.`;
+  }
+  return null;
+}
+
+function plannerMessageFromResult(result: PlannerConversationResult, draft: PlannerDraft): string {
+  const mode = result.provider === "claude" ? "native plan mode" : result.provider === "codex" ? "read-only plan mode" : "planning mode";
+  return [
+    `${result.connectionId} ${mode} 응답을 Plan Document draft로 반영했습니다.`,
+    `${draft.tasks.length}개의 Task 후보와 ${draft.tasks.reduce((total, task) => total + task.subtasks.length, 0)}개의 Subtask 후보가 있습니다.`,
+    draft.openQuestions.length > 0 ? `남은 질문: ${draft.openQuestions.join(" ")}` : "현재 blocking question은 없습니다.",
+  ].join(" ");
 }
 
 function plannerOpeningMessage(draft: PlannerDraft, jiraState: PlanningSessionStub["jiraState"]): string {
