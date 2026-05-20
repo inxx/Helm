@@ -598,6 +598,148 @@ textarea {
   color: var(--text-muted);
 }
 
+.toast-viewport {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  display: grid;
+  gap: 8px;
+  width: min(360px, calc(100vw - 32px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  outline: none;
+}
+
+.toast-root {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  padding: 10px 10px 10px 12px;
+}
+
+.toast-root[data-state="open"] {
+  animation: toast-in 120ms ease-out;
+}
+
+.toast-root[data-state="closed"] {
+  animation: toast-out 100ms ease-in;
+}
+
+.toast-root[data-swipe="move"] {
+  transform: translateX(var(--radix-toast-swipe-move-x));
+}
+
+.toast-root[data-swipe="cancel"] {
+  transform: translateX(0);
+  transition: transform 120ms ease-out;
+}
+
+.toast-root[data-swipe="end"] {
+  animation: toast-swipe-out 100ms ease-out;
+}
+
+.toast-success {
+  border-left-color: var(--green);
+}
+
+.toast-error {
+  border-left-color: var(--red);
+}
+
+.toast-info {
+  border-left-color: var(--slate);
+}
+
+.toast-icon {
+  margin-top: 1px;
+  color: var(--soft);
+}
+
+.toast-success .toast-icon {
+  color: var(--green);
+}
+
+.toast-error .toast-icon {
+  color: var(--red);
+}
+
+.toast-content {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.toast-title {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.toast-description {
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.toast-close {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0;
+}
+
+.toast-close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@keyframes toast-swipe-out {
+  from {
+    transform: translateX(var(--radix-toast-swipe-end-x));
+  }
+  to {
+    transform: translateX(calc(100% + 16px));
+  }
+}
+
 /* ============================================================
    Tasks layout — board + detail aside
    ============================================================ */
@@ -1075,6 +1217,33 @@ textarea {
 .task-console-summary > p {
   color: var(--soft);
   font-size: 12.5px;
+}
+
+.task-status-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 10px;
+}
+
+.task-status-control label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.task-status-control label > span {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.task-status-control select {
+  width: 100%;
+  min-height: 30px;
 }
 
 .task-console .next-action-panel {

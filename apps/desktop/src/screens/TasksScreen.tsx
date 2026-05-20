@@ -5,6 +5,7 @@ import { AgentUsageBar } from "../components/AgentUsageBar";
 import { ApprovalInbox } from "../components/ApprovalInbox";
 import { TaskBoard } from "../components/TaskBoard";
 import { TaskDetail } from "../components/TaskDetail";
+import { useToast } from "../components/ToastProvider";
 
 interface TasksScreenProps {
   snapshot: ProjectSnapshot | null;
@@ -25,6 +26,7 @@ export function TasksScreen({
   onRefresh,
   onGoGit,
 }: TasksScreenProps) {
+  const { showToast } = useToast();
   const [mode, setMode] = useState<"new" | "jira">("new");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -61,13 +63,27 @@ export function TasksScreen({
           : [],
     };
     setBusy(true);
-    const task = await api.createTask(snapshot.project.id, input);
-    await onRefresh();
-    onSelectTask((task as TaskSummary).id);
-    setTitle("");
-    setDescription("");
-    setExternalRef("");
-    setBusy(false);
+    try {
+      const task = await api.createTask(snapshot.project.id, input);
+      await onRefresh();
+      onSelectTask((task as TaskSummary).id);
+      setTitle("");
+      setDescription("");
+      setExternalRef("");
+      showToast({
+        tone: "success",
+        title: "태스크 생성 완료",
+        description: "상태가 계획됨으로 시작되었습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "태스크 생성 실패",
+        description: messageFromError(error, "태스크를 만들지 못했습니다."),
+      });
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -133,4 +149,13 @@ export function TasksScreen({
       />
     </div>
   );
+}
+
+function messageFromError(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  if (typeof error === "string") return error;
+  return fallback;
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useToast } from "./ToastProvider";
 import { api } from "../lib/api";
 import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
 import type {
@@ -30,6 +31,7 @@ interface TaskDetailProps {
 }
 
 export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailProps) {
+  const { showToast } = useToast();
   const [status, setStatus] = useState<TaskStatus>("Planned");
   const [busy, setBusy] = useState(false);
   const [runs, setRuns] = useState<AgentRunSummary[]>([]);
@@ -76,47 +78,120 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
 
   async function updateStatus() {
     if (!task) return;
+    if (status === task.status) {
+      showToast({
+        tone: "info",
+        title: "상태 변경 없음",
+        description: `이미 ${TASK_STATUS_LABEL[status]} 상태입니다.`,
+      });
+      return;
+    }
+    const previousStatus = task.status;
     setBusy(true);
-    await api.updateTaskStatus(snapshot.project.id, task.id, status, "수동 상태 변경");
-    await onRefresh();
-    setBusy(false);
+    try {
+      await api.updateTaskStatus(snapshot.project.id, task.id, status, "수동 상태 변경");
+      await onRefresh();
+      showToast({
+        tone: "success",
+        title: "상태 변경 완료",
+        description: `${TASK_STATUS_LABEL[previousStatus]} → ${TASK_STATUS_LABEL[status]}`,
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "상태 변경 실패",
+        description: messageFromError(error, "태스크 상태를 변경하지 못했습니다."),
+      });
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function runRole(roleId: string) {
     if (!task) return;
     setBusy(true);
-    await api.runStubRole(snapshot.project.id, task.id, roleId);
-    const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
-    setRuns(nextRuns);
-    await onRefresh();
-    setActiveTab("artifacts");
-    setBusy(false);
+    try {
+      const run = await api.runStubRole(snapshot.project.id, task.id, roleId);
+      const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
+      setRuns(nextRuns);
+      await onRefresh();
+      setActiveTab("artifacts");
+      showToast({
+        tone: "success",
+        title: `${roleLabel(roleId)} 실행 완료`,
+        description: run.resultStatus ? `결과 ${run.resultStatus}가 반영되었습니다.` : "태스크 상태를 갱신했습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: `${roleLabel(roleId)} 실행 실패`,
+        description: messageFromError(error, "역할 실행에 실패했습니다."),
+      });
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function prepareContext(roleId: string) {
     if (!task) return;
     setBusy(true);
-    await api.prepareRoleContext(snapshot.project.id, task.id, roleId);
-    const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
-    setRuns(nextRuns);
-    await onRefresh();
-    setActiveTab("runs");
-    setBusy(false);
+    try {
+      await api.prepareRoleContext(snapshot.project.id, task.id, roleId);
+      const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
+      setRuns(nextRuns);
+      await onRefresh();
+      setActiveTab("runs");
+      showToast({
+        tone: "success",
+        title: `${roleLabel(roleId)} 실행 준비 완료`,
+        description: "Context Pack과 대기 실행을 만들었습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: `${roleLabel(roleId)} 실행 준비 실패`,
+        description: messageFromError(error, "역할 실행 준비에 실패했습니다."),
+      });
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function prepareWorktree() {
     if (!task) return;
     setBusy(true);
-    const nextWorktree = await api.ensureTaskWorktree(snapshot.project.id, task.id);
-    setWorktree(nextWorktree);
-    await onRefresh();
-    setBusy(false);
+    try {
+      const nextWorktree = await api.ensureTaskWorktree(snapshot.project.id, task.id);
+      setWorktree(nextWorktree);
+      await onRefresh();
+      showToast({
+        tone: "success",
+        title: "Worktree 준비 완료",
+        description: nextWorktree.branchName,
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "Worktree 준비 실패",
+        description: messageFromError(error, "태스크 worktree를 준비하지 못했습니다."),
+      });
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function showArtifact(runId: string, artifactName: string) {
-    const content = await api.readRunArtifact(snapshot.project.id, runId, artifactName);
-    setArtifact(content);
-    setActiveTab("artifacts");
+    try {
+      const content = await api.readRunArtifact(snapshot.project.id, runId, artifactName);
+      setArtifact(content);
+      setActiveTab("artifacts");
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "산출물 열기 실패",
+        description: messageFromError(error, "산출물을 읽지 못했습니다."),
+      });
+    }
   }
 
   async function runHost(runId: string) {
@@ -131,6 +206,17 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
       setRuns(nextRuns);
       await onRefresh();
       setActiveTab("artifacts");
+      showToast({
+        tone: "success",
+        title: "Host 실행 완료",
+        description: "실행 결과와 태스크 상태를 갱신했습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "Host 실행 실패",
+        description: messageFromError(error, "Host role 실행에 실패했습니다."),
+      });
     } finally {
       setBusy(false);
     }
@@ -139,20 +225,50 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
   async function retryHost(runId: string) {
     if (!task) return;
     setBusy(true);
-    await api.retryHostRole(snapshot.project.id, runId);
-    const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
-    setRuns(nextRuns);
-    await onRefresh();
-    setActiveTab("runs");
-    setBusy(false);
+    try {
+      await api.retryHostRole(snapshot.project.id, runId);
+      const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
+      setRuns(nextRuns);
+      await onRefresh();
+      setActiveTab("runs");
+      showToast({
+        tone: "success",
+        title: "재시도 준비 완료",
+        description: "실행 상태를 갱신했습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "재시도 실패",
+        description: messageFromError(error, "실행을 재시도하지 못했습니다."),
+      });
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function cancelHost(runId: string) {
     if (!task) return;
-    await api.cancelHostRole(snapshot.project.id, runId);
-    setRuns((current) =>
-      current.map((run) => (run.id === runId ? { ...run, status: "Canceled" } : run)),
-    );
+    setBusy(true);
+    try {
+      await api.cancelHostRole(snapshot.project.id, runId);
+      setRuns((current) =>
+        current.map((run) => (run.id === runId ? { ...run, status: "Canceled" } : run)),
+      );
+      showToast({
+        tone: "success",
+        title: "실행 취소 완료",
+        description: "실행 상태가 Canceled로 변경되었습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "실행 취소 실패",
+        description: messageFromError(error, "실행을 취소하지 못했습니다."),
+      });
+    } finally {
+      setBusy(false);
+    }
   }
 
   const activeRoleId = roleForTaskStatus(task.status);
@@ -165,6 +281,26 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
           <h2>{task.title}</h2>
         </div>
         {task.description ? <p>{task.description}</p> : <p className="muted">설명 없음</p>}
+        <div className="task-status-control" aria-label="태스크 상태 변경">
+          <label>
+            <span>상태 변경</span>
+            <select value={status} onChange={(event) => setStatus(event.target.value as TaskStatus)}>
+              {TASK_STATUS_ORDER.map((nextStatus) => (
+                <option key={nextStatus} value={nextStatus}>
+                  {TASK_STATUS_LABEL[nextStatus]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="primary-button"
+            disabled={busy || status === task.status}
+            onClick={updateStatus}
+            type="button"
+          >
+            변경
+          </button>
+        </div>
       </div>
 
       <section className="detail-section next-action-panel">
@@ -211,22 +347,6 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
             ) : (
               <p className="muted">연결된 외부 참조 없음</p>
             )}
-          </section>
-
-          <section className="detail-section">
-            <h3>상태 변경</h3>
-            <div className="inline-form">
-              <select value={status} onChange={(event) => setStatus(event.target.value as TaskStatus)}>
-                {TASK_STATUS_ORDER.map((nextStatus) => (
-                  <option key={nextStatus} value={nextStatus}>
-                    {TASK_STATUS_LABEL[nextStatus]}
-                  </option>
-                ))}
-              </select>
-              <button disabled={busy} onClick={updateStatus} type="button">
-                변경
-              </button>
-            </div>
           </section>
 
           <section className="detail-section task-console-metrics">
@@ -567,4 +687,13 @@ function roleForTaskStatus(status: TaskStatus): RoleId | null {
   if (status === "CodeReview") return "code_reviewer";
   if (status === "Testing" || status === "MergeWaiting") return "tester";
   return null;
+}
+
+function messageFromError(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  if (typeof error === "string") return error;
+  return fallback;
 }
