@@ -5,6 +5,7 @@ import type {
   AiConnectionCheckResult,
   ApprovalSummary,
   CreateTaskInput,
+  EpicSummary,
   GitBranchSummary,
   GitCommitSummary,
   GitFileStatus,
@@ -17,8 +18,8 @@ import type {
   ProjectSnapshot,
   RunnerCheckResult,
   RunnerTemplateSummary,
-  TaskStatus,
   TaskSummary,
+  TaskStatus,
   TaskWorktreeSummary,
   TerminalCommandResult,
   TerminalDirectoryEntry,
@@ -47,7 +48,7 @@ export const api = {
     return invoke<ProjectSnapshot>("get_project_snapshot", { projectId });
   },
   createEpic(projectId: string, title: string) {
-    return invoke("create_epic", { projectId, input: { title } });
+    return invoke<EpicSummary>("create_epic", { projectId, input: { title } });
   },
   createTask(projectId: string, input: CreateTaskInput) {
     return invoke<TaskSummary>("create_task", { projectId, input });

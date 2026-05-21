@@ -167,6 +167,11 @@ export function App() {
     }
   }
 
+  function openTask(taskId: string) {
+    setSelectedTaskId(taskId);
+    setScreen("tasks");
+  }
+
   return (
     <AppShell
       navItems={navItems}
@@ -193,10 +198,7 @@ export function App() {
               snapshot={snapshot}
               onOpenProject={openProject}
               onRefresh={refresh}
-              onOpenTask={(taskId) => {
-                setSelectedTaskId(taskId);
-                setScreen("tasks");
-              }}
+              onOpenTask={openTask}
             />
           ) : null}
           {screen === "tasks" ? (
