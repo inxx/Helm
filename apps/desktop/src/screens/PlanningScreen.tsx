@@ -685,63 +685,165 @@ function buildPlannerDraft(goal: string, linkedTaskTitle: string | null): Planne
 }
 
 function parsePlannerDraft(raw: string): PlannerDraft | null {
-  const jsonText = extractJson(raw);
-  if (!jsonText) return null;
-  try {
-    const parsed = JSON.parse(jsonText) as Partial<PlannerDraft>;
-    const title = typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : null;
-    const summary = typeof parsed.summary === "string" && parsed.summary.trim() ? parsed.summary.trim() : null;
-    const tasks = Array.isArray(parsed.tasks)
-      ? parsed.tasks.map(normalizePlannerTask).filter((task): task is PlannerDraftTask => Boolean(task))
-      : [];
-    if (!title || !summary || tasks.length === 0) return null;
-    const risks = stringList(parsed.risks);
-    return {
-      title,
-      summary,
-      scope: stringList(parsed.scope),
-      tasks,
-      openQuestions: stringList(parsed.openQuestions),
-      risks: risks.length > 0 ? risks : Array.from(new Set(tasks.flatMap((task) => task.risks))),
-    };
-  } catch {
-    return null;
+  for (const jsonText of extractJsonCandidates(raw)) {
+    try {
+      const draft = normalizePlannerDraft(JSON.parse(jsonText));
+      if (draft) return draft;
+    } catch {
+      continue;
+    }
   }
+  return null;
 }
 
-function extractJson(raw: string): string | null {
+function normalizePlannerDraft(value: unknown): PlannerDraft | null {
+  const parsed = plannerDraftCandidate(value);
+  if (!parsed) return null;
+
+  const title = stringField(parsed, ["title"]);
+  const summary = stringField(parsed, ["summary"]);
+  const tasks = plannerTasks(parsed);
+  if (!title || !summary || tasks.length === 0) return null;
+
+  const risks = stringArrayField(parsed, ["risks"]);
+  return {
+    title,
+    summary,
+    scope: scopeList(parsed.scope),
+    tasks,
+    openQuestions: stringArrayField(parsed, ["openQuestions", "open_questions"]),
+    risks: risks.length > 0 ? risks : Array.from(new Set(tasks.flatMap((task) => task.risks))),
+  };
+}
+
+function plannerDraftCandidate(value: unknown, depth = 0): Record<string, unknown> | null {
+  if (depth > 2 || !isRecord(value)) return null;
+  if (looksLikePlannerDraft(value)) return value;
+
+  for (const key of ["planDocument", "plan_document", "planDraft", "plan_draft", "draft", "document"]) {
+    const candidate = plannerDraftCandidate(value[key], depth + 1);
+    if (candidate) return candidate;
+  }
+
+  return null;
+}
+
+function looksLikePlannerDraft(value: Record<string, unknown>): boolean {
+  return typeof value.title === "string" && typeof value.summary === "string" && (Array.isArray(value.tasks) || Array.isArray(value.epics));
+}
+
+function plannerTasks(value: Record<string, unknown>): PlannerDraftTask[] {
+  const directTasks = Array.isArray(value.tasks)
+    ? value.tasks.map(normalizePlannerTask).filter((task): task is PlannerDraftTask => Boolean(task))
+    : [];
+  if (directTasks.length > 0) return directTasks;
+
+  if (!Array.isArray(value.epics)) return [];
+  return value.epics.flatMap((epic) => {
+    if (!isRecord(epic) || !Array.isArray(epic.tasks)) return [];
+    return epic.tasks.map((task) => normalizePlannerTask(task)).filter((task): task is PlannerDraftTask => Boolean(task));
+  });
+}
+
+function extractJsonCandidates(raw: string): string[] {
   const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) return fenced[1].trim();
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed;
-  const first = trimmed.indexOf("{");
-  const last = trimmed.lastIndexOf("}");
-  return first >= 0 && last > first ? trimmed.slice(first, last + 1) : null;
+  if (!trimmed) return [];
+
+  const candidates: string[] = [];
+  const fencedPattern = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let fenced: RegExpExecArray | null;
+  while ((fenced = fencedPattern.exec(trimmed))) {
+    if (fenced[1]?.trim()) candidates.push(fenced[1].trim());
+  }
+
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) candidates.push(trimmed);
+  for (let index = trimmed.indexOf("{"); index >= 0; index = trimmed.indexOf("{", index + 1)) {
+    const candidate = balancedJsonObject(trimmed, index);
+    if (candidate) candidates.push(candidate);
+  }
+
+  return Array.from(new Set(candidates));
+}
+
+function balancedJsonObject(value: string, start: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return value.slice(start, index + 1);
+    }
+  }
+
+  return null;
 }
 
 function normalizePlannerTask(value: unknown): PlannerDraftTask | null {
-  if (typeof value !== "object" || value === null) return null;
-  const item = value as Partial<PlannerDraftTask>;
-  const title = typeof item.title === "string" && item.title.trim() ? item.title.trim() : null;
+  if (!isRecord(value)) return null;
+  const title = stringField(value, ["title"]);
   if (!title) return null;
   return {
     title,
-    description:
-      typeof item.description === "string" && item.description.trim()
-        ? item.description.trim()
-        : "planner가 제안한 실행 Task입니다.",
-    subtasks: stringList(item.subtasks),
-    acceptanceCriteria: stringList(item.acceptanceCriteria),
-    risks: stringList(item.risks),
-    testPlan: stringList(item.testPlan),
+    description: stringField(value, ["description"]) ?? "planner가 제안한 실행 Task입니다.",
+    subtasks: stringArrayField(value, ["subtasks", "subTasks", "sub_tasks"]),
+    acceptanceCriteria: stringArrayField(value, ["acceptanceCriteria", "acceptance_criteria"]),
+    risks: stringArrayField(value, ["risks"]),
+    testPlan: stringArrayField(value, ["testPlan", "test_plan"]),
   };
+}
+
+function stringField(value: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const field = value[key];
+    if (typeof field === "string" && field.trim()) return field.trim();
+  }
+  return null;
+}
+
+function stringArrayField(value: Record<string, unknown>, keys: string[]): string[] {
+  for (const key of keys) {
+    const items = stringList(value[key]);
+    if (items.length > 0) return items;
+  }
+  return [];
+}
+
+function scopeList(value: unknown): string[] {
+  const directScope = stringList(value);
+  if (directScope.length > 0 || !isRecord(value)) return directScope;
+
+  return [
+    ...stringList(value.in).map((item) => `포함: ${item}`),
+    ...stringList(value.out).map((item) => `제외: ${item}`),
+  ];
 }
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)
     : [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function plannerResultWarning(result: PlannerConversationResult): string | null {

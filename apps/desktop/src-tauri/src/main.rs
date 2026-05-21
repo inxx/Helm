@@ -1495,8 +1495,9 @@ fn build_planner_prompt(project_root: &Path, input: &PlannerConversationInput) -
 - 한글로 답한다.
 - 지금은 계획 모드다. 파일 수정, 명령 실행, Git 작업, Task 생성은 하지 않는다.
 - 사용자의 목표를 대화로 더 명확하게 만들고, 승인 가능한 Plan Document draft를 갱신한다.
-- 정보가 부족하면 질문을 먼저 한다.
-- 충분하면 아래 JSON 형태만 반환한다. Markdown fence 없이 JSON만 반환한다.
+- 정보가 부족해도 질문만 따로 쓰지 말고 아래 JSON 형태만 반환한다.
+- 질문은 openQuestions 배열에 넣고, tasks에는 현재 확정 가능한 최소 실행 후보를 넣는다.
+- Markdown fence, 설명 문장, 머리말 없이 JSON만 반환한다.
 
 JSON schema:
 {{
