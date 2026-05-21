@@ -1,12 +1,22 @@
 # Helm Core Loop Completion Plan
 
 작성일: 2026-05-19
+업데이트: 2026-05-21, Envoy/Hermes Desktop 레퍼런스 검토 반영 및 P0-02/P0-03 1차 구현 반영
 
 ## 목적
 
 현재 구현은 Phase 3a의 기반 기능까지 들어왔지만, 완성 제품의 핵심 목표인 "AI 개발 작업을 계획, 실행, 검토, 테스트, 승인, 머지까지 관리하는 데스크톱 control plane"으로 보기에는 아직 core loop가 얇다.
 
 이 문서는 지금 구현을 버리지 않고, 사용자가 태스크 하나를 실제로 끝까지 운영할 수 있게 만드는 추가 작업 계획이다.
+
+## 구현 진행 현황
+
+2026-05-21 기준:
+
+- 완료: P0-02 Runner onboarding 1차 구현. Settings의 Runner Templates 화면에서 역할별 runner 준비 상태, 활성 AI CLI 연결 수, template 적용 필요 여부를 확인할 수 있다.
+- 완료: P0-03 Task Detail 제품 경로 1차 구현. 다음 액션은 runner 설정, worktree 준비, Context Pack 생성, host 실행, merge 준비 확인 순서로 노출된다.
+- 유지: 개발용 context/stub role 버튼은 제품 primary path에서 제외하고 실행 탭의 접힌 개발 도구 안에만 둔다.
+- 검증: `npm run typecheck`, `npm run build` 통과.
 
 ## 핵심 목표
 
@@ -40,7 +50,7 @@ Task 생성
 - Context Pack 생성
 - HelmHostRunner 기본 실행
 - run artifact viewer
-- 기본 터미널 명령 실행기
+- xterm 기반 분할 PTY 터미널과 Node runtime 선택
 
 기능적으로 미비한 점:
 
@@ -54,10 +64,70 @@ Task 생성
 - 실패/차단 흐름이 얇다. `needs_changes`, review fail, test fail, schema mismatch, command fail 이후 사용자가 무엇을 수정하고 어떤 role을 retry해야 하는지 task detail에서 안내하지 못한다.
 - MergeWaiting 이후가 비어 있다. merge readiness, base/head 비교, diff 요약, blocker, merge command preview, merge approval이 없다.
 - Git 화면은 project-level read-only viewer에 머문다. task worktree branch/path/diff와 Git 화면이 연결되지 않는다.
-- Terminal은 분할 pane 기반 단일 명령 실행까지 가능하다. 아직 interactive PTY, task workflow와 연결된 test/check 실행, 결과 저장, audit 연결은 없다.
+- Terminal은 xterm 기반 분할 PTY까지 가능하다. 아직 workflow preset, task workflow와 연결된 test/check 실행, 결과 저장, audit 연결, launch diagnostics는 약하다.
 - Audit log는 쌓이지만 사용자 의사결정 화면으로 정리되지 않는다. approval, run, gate, status transition을 한 태스크 타임라인으로 읽기 어렵다.
 - 테스트가 migration/path/schema 수준이라 핵심 사용자 플로우를 보호하지 못한다. fixture runner 기반 end-to-end core loop 테스트가 없다.
 - README와 Phase 문서가 현재 구현 범위와 남은 기능을 같은 기준으로 설명하지 못한다.
+
+## 외부 레퍼런스 검토 반영
+
+검토 기준:
+
+- Helm의 source of truth는 로컬 프로젝트와 `.helm/helm.sqlite`다.
+- 사용자 승인, Git diff, gate 판정, 다음 role 결정은 Helm backend가 소유한다.
+- 외부 프로젝트는 코드 복사보다 제품 패턴, 보안 경계, 데이터 계약을 차용한다.
+- Envoy 공개 repo는 proprietary 배포/문서 repo다. 코드 차용 대상이 아니라 shared context/authority 모델만 참고한다.
+- Hermes Desktop은 MIT지만 SwiftUI/macOS 네이티브 앱이므로 Tauri/React/Rust 구조에 맞는 패턴만 선별한다.
+
+### Envoy에서 차용할 것
+
+| 차용 항목 | Helm 적용 | 우선순위 |
+| --- | --- | --- |
+| Shared context space 모델 | Task 하나를 단순 카드가 아니라 messages, decisions, evidence, approvals, handoff를 가진 작업 공간으로 취급한다. | P0 |
+| Command Evidence | role run, test, git command, check command 결과를 명령/작업 디렉터리/exit code/요약/산출물 hash로 남긴다. | P0 |
+| Decision/Approval Record | PlanApproval, MergeApproval, 위험 명령 승인에 approver, basis, conditions, remaining risk를 저장한다. | P0 |
+| Provenance와 audit | 어떤 role이 어떤 artifact와 diff를 근거로 다음 상태로 갔는지 gate result와 audit timeline에서 추적한다. | P0 |
+| Authority refresh 원칙 | message text가 권한이 아니며, 로컬 사용자 지시/승인 상태/task state/role scope를 mutation 전 다시 확인한다. | P0 |
+| Repo Conductor skill의 역할 분리 | Builder, Reviewer, Verifier, Human Approver를 Helm role lane과 review/gate 화면에 반영한다. | P0 |
+| Objection/Repair record | review/test 실패를 덮어쓰지 않고 objection, required repair, status로 보존한다. | P0 |
+| Handoff record | task가 Blocked, MergeWaiting, Done일 때 "현재 상태/남은 risk/다음 명령"을 재개 가능한 형태로 남긴다. | P1 |
+| Shared Brain record | 프로젝트 운영 지식, 사용자 선호, 반복 결정은 source와 confidence를 가진 memory record로 남긴다. | P2 |
+| Bounded MCP adapter | 향후 `helm-mcp`는 stdio JSON-RPC, allowlist tool, pinned project/profile, timeout, stderr diagnostics, 환경 변수 allowlist만 허용한다. | P2 |
+| Local-only 기본값 | cross-machine/relay/초대 기반 협업은 기본값이 아니며, 명시 요청 전까지 로컬 프로젝트 내부 상태만 사용한다. | P2 |
+| Release checksum 검증 | 향후 CLI/desktop 배포 시 signed checksum manifest와 fail-closed installer 원칙을 참고한다. | P2 |
+
+차용하지 않을 것:
+
+- Envoy relay, Connected, billing, invite/capability crypto
+- Envoy CLI/MCP binary나 proprietary repo 코드
+- Helm을 Envoy space client로 강제하는 구조
+
+### Hermes Desktop에서 차용할 것
+
+| 차용 항목 | Helm 적용 | 우선순위 |
+| --- | --- | --- |
+| Direct source-of-truth 원칙 | 원격 기능을 붙이더라도 gateway/local mirror를 만들지 않고 대상 repo 또는 host 상태를 직접 읽는다. | P1 |
+| Connection profile | SSH alias/host/user/port/profile/custom path를 Helm runner profile로 모델링한다. | P2 |
+| Workspace fingerprint | project root, host, user, profile 조합으로 terminal/workflow/pinned state를 scope한다. | P1 |
+| Service SSH와 terminal SSH 분리 | 원격 host runner는 no-TTY service command, 사용자가 조작하는 terminal은 별도 PTY로 분리한다. | P2 |
+| SSH 실패 메시지 분류 | auth, host key, DNS, connection refused, timeout, python/path 문제를 사용자가 조치 가능한 문구로 나눈다. | P2 |
+| Remote script payload wrapper | 원격 service command가 필요해지면 base64 JSON payload + shared helper + JSON stdout 계약을 사용한다. | P2 |
+| 안전한 파일 편집 | UTF-8 검증, 크기 제한, symlink 검사, content hash conflict, atomic write, fsync를 plan/config 편집에 적용한다. | P0 |
+| Workflow preset | 반복 prompt/check/role 실행 조합을 프로젝트 scope로 저장하고 terminal 또는 host runner로 실행한다. | P1 |
+| Workflow launch diagnostics | preset 실행 시 prompt hash, normalized prompt, delivery mode, terminal start/exit 이벤트를 최신 로그에 남긴다. | P1 |
+| Session pin/search | run/session history에서 중요한 실행을 pin하고 prompt, artifact, status로 검색한다. | P1 |
+| Usage breakdown | role/provider/model별 token/실행 시간/상태 trend를 Settings 또는 Usage 화면에 표시한다. | P2 |
+| Update check | GitHub Releases metadata 조회는 opt-in/저빈도, 자동 설치 없이 알림만 제공한다. | P2 |
+| Release manifest | desktop zip, app metadata, architecture, checksum을 manifest로 만들고 verify script를 제공한다. | P2 |
+| Storage permission | local preference, connection profile, diagnostics는 private permission 또는 OS secret store 정책을 문서화한다. | P1 |
+| 테스트 전략 | transport/model/service/fixture/launch diagnostics 단위 테스트를 Rust/TS 테스트로 대응한다. | P0 |
+
+차용하지 않을 것:
+
+- SwiftUI/SwiftTerm UI 코드와 macOS-only native 구조
+- Hermes 전용 Kanban/Cron/Skills 화면을 그대로 복제하는 것
+- 원격 host를 Helm의 기본 운영 모델로 바꾸는 것
+- Hermes Desktop의 updater나 release trust 설명을 Helm에 맞지 않게 과장하는 것
 
 ## 기능 갭 인벤토리
 
@@ -72,9 +142,17 @@ Task 생성
 | 실패 처리 | retry/cancel 일부 있음 | 실패 이유별 next action과 Blocked 전이 약함 | P0 |
 | Merge readiness | 상태값만 있음 | readiness command/UI/approval/preview 없음 | P1 |
 | Git 연계 | project git viewer 있음 | task worktree diff와 연결 부족 | P1 |
-| Terminal | 분할 pane 단일 명령 실행 | interactive PTY, tester/check artifact, audit 연결 없음 | P1 |
+| Terminal | xterm 기반 분할 PTY | workflow preset, tester/check artifact, audit 연결, launch diagnostics 없음 | P1 |
 | Audit/Timeline | audit row 저장 | 태스크 타임라인 UI 없음 | P1 |
 | 자동 검증 | 단위 테스트 일부 | fixture core loop 테스트 없음 | P0 |
+| Evidence/Decision | run artifact와 approval 일부 있음 | command evidence, decision basis, handoff record가 구조화되지 않음 | P0 |
+| 안전한 문서/설정 편집 | artifact viewer 중심 | plan/config/context 편집 시 stale conflict/atomic write 계약 없음 | P0 |
+| Workflow preset | runner template만 있음 | 반복 작업 프리셋과 실행 diagnostics 없음 | P1 |
+| Session/Run 탐색 | task detail run list | pin/search/filter가 없음 | P1 |
+| Usage | tokenBudget 설정 후보만 있음 | role/provider/model별 사용량 집계 화면 없음 | P2 |
+| MCP/외부 agent 연동 | 없음 | allowlist 기반 `helm-mcp` tool surface 없음 | P2 |
+| 원격 host profile | 로컬 host 중심 | SSH profile, failure diagnostics, service/terminal 분리 계약 없음 | P2 |
+| 배포 검증 | 개발 빌드 중심 | release manifest/checksum/update check 정책 없음 | P2 |
 
 ## 성공 기준
 
@@ -93,6 +171,7 @@ Task 생성
 10. Tester가 설정된 check command를 실행하고 결과를 남긴다.
 11. 모든 gate가 통과하면 TaskStatus가 MergeWaiting이 된다.
 12. 사용자는 MergeWaiting 화면에서 diff, run history, approval, audit trail을 한 번에 확인한다.
+13. 사용자는 command evidence, decision basis, handoff record를 보고 왜 이 상태가 되었는지 재구성할 수 있다.
 ```
 
 이 시나리오는 실제 Codex/Claude가 없어도 fixture runner로 검증 가능해야 하고, 로컬에 Codex/Claude가 있으면 실제 runner로도 검증 가능해야 한다.
@@ -113,6 +192,7 @@ Task 생성
 - 기본 터미널 실행기는 "개발자 명시 실행 도구"로 분류하고, agent runner와 권한 모델을 분리해 문서화한다.
 - `docs/phase-3a-implementation-plan.md`의 "구현 완료" 항목 중 검증이 부족한 항목은 "기본 구현 완료, 제품화 필요"로 조정한다.
 - 다음 구현 기준 문서를 이 문서로 연결한다.
+- Envoy/Hermes Desktop에서 차용하는 항목과 차용하지 않는 항목을 이 문서와 `orchestrator-design.md`에 고정한다.
 
 완료 기준:
 
@@ -174,19 +254,23 @@ apply_runner_template(project_id, template_id)
 - MergeWaiting에서는 diff와 gate 결과가 먼저 보인다.
 - 사용자는 전체 role 버튼 목록을 보지 않고도 다음 작업을 진행할 수 있다.
 
-### Step 3. GateResult 모델과 diff consistency 도입
+### Step 3. GateResult, EvidenceRecord, DecisionRecord 도입
 
 목표:
 
 - structured result와 실제 Git 상태를 이용해 role 결과를 판정한다.
+- role 실행과 사용자 승인의 근거를 재개 가능한 evidence/decision record로 남긴다.
 
 추가 schema 후보:
 
 ```text
 gate_results
+evidence_records
+decision_records
+handoff_records
 ```
 
-최소 컬럼:
+`gate_results` 최소 컬럼:
 
 - `id`
 - `project_id`
@@ -196,6 +280,45 @@ gate_results
 - `status`
 - `summary`
 - `payload_json`
+- `created_at`
+
+`evidence_records` 최소 컬럼:
+
+- `id`
+- `project_id`
+- `task_id`
+- `run_id`
+- `evidence_type`
+- `command`
+- `cwd`
+- `exit_code`
+- `summary`
+- `artifact_path`
+- `artifact_sha256`
+- `created_at`
+
+`decision_records` 최소 컬럼:
+
+- `id`
+- `project_id`
+- `entity_type`
+- `entity_id`
+- `approval_id`
+- `decision`
+- `basis`
+- `conditions`
+- `remaining_risk`
+- `created_at`
+
+`handoff_records` 최소 컬럼:
+
+- `id`
+- `project_id`
+- `task_id`
+- `status`
+- `current_summary`
+- `next_action`
+- `open_risks_json`
 - `created_at`
 
 허용 gate type:
@@ -224,12 +347,17 @@ NeedsInspection
 - gate result를 Task Detail에 표시한다.
 - `exit_code`, schema validation, result status, diff consistency를 별도 gate로 남긴다.
 - gate 실패 시 task 상태를 자동 전이하지 않고 run status와 task blocker를 분리해 표시한다.
+- 모든 host runner/check/git command는 command evidence로 남긴다.
+- approval 승인/거절 시 사용자가 입력한 사유를 decision basis로 승격한다.
+- Blocked, MergeWaiting, Done 전이 시 handoff record를 생성한다.
+- Task Detail timeline에서 gate/evidence/decision/handoff를 함께 읽을 수 있게 한다.
 
 완료 기준:
 
 - agent가 `changedFiles`를 비워두고 실제 diff가 있으면 Helm이 표시한다.
 - schema는 pass지만 diff consistency가 깨지면 자동 진행하지 않는다.
 - 모든 자동 상태 전이는 gate pass 기록을 근거로 설명된다.
+- 사용자는 run artifact 원문을 열지 않아도 command, exit code, evidence hash, 승인 근거를 확인할 수 있다.
 
 ### Step 4. Reviewer/Tester chain 완성
 
@@ -254,6 +382,7 @@ NeedsInspection
 review-findings.json
 test-result.json
 gate-result.json
+command-evidence.json
 ```
 
 완료 기준:
@@ -341,11 +470,130 @@ fixture runner 요구:
 - planning session, plan draft, draft approval skeleton을 추가한다.
 - 승인된 draft를 Epic/Task/External Ref로 변환한다.
 - 기존 Jira key/URL 시작 흐름과 새 목표 시작 흐름을 같은 Task pipeline으로 합친다.
+- plan draft와 project 설정 편집에는 UTF-8 검증, content hash conflict check, atomic write 원칙을 적용한다.
 
 완료 기준:
 
 - 사용자가 자연어 목표만 입력해도 Task가 생성되고 Planner 실행으로 이어진다.
 - Jira 링크가 있으면 external ref로 연결되지만 Jira 없이도 기능이 줄어들지 않는다.
+
+### Step 8. Workflow preset과 session/run 탐색
+
+목표:
+
+- 반복 작업을 매번 수동으로 조립하지 않게 한다.
+- 중요한 실행 기록을 나중에 빠르게 찾을 수 있게 한다.
+
+작업:
+
+- 프로젝트 scope workflow preset 모델을 추가한다.
+- preset은 이름, prompt, 대상 role, 선택 runner template, 선택 check command, 실행 destination을 가진다.
+- destination은 `host_runner`, `terminal`, `fixture`로 시작한다.
+- preset 실행은 prompt hash, normalized prompt, command, run id, delivery mode를 diagnostics log에 남긴다.
+- run/session list에 search, filter, pin을 추가한다.
+- pinned run은 task detail과 dashboard에서 우선 표시한다.
+- fixture core-loop preset을 built-in preset으로 제공한다.
+
+완료 기준:
+
+- 사용자는 "fixture core loop 검증" preset을 선택해 반복 검증 흐름을 시작할 수 있다.
+- workflow 실행 실패 시 diagnostics log만 보고 어느 단계에서 실패했는지 확인할 수 있다.
+- 오래된 run history에서도 prompt, role, status, artifact 이름으로 검색할 수 있다.
+
+### Step 9. 안전한 파일 편집 계약
+
+목표:
+
+- plan, context, settings, 향후 skill/playbook 편집을 덮어쓰기 사고 없이 제공한다.
+
+작업:
+
+- `EditableDocumentSnapshot` 모델을 추가한다.
+- read 시 UTF-8 검증, 크기 제한, symlink/dangling symlink 검사, SHA-256 content hash를 반환한다.
+- write 시 expected hash가 다르면 저장을 막고 reload/merge 안내를 표시한다.
+- write는 temp file, fsync, atomic replace를 사용한다.
+- `.helm/` 내부 문서와 사용자가 선택한 tracked 문서를 구분한다.
+- binary 또는 대용량 파일은 viewer/edit 대상에서 제외한다.
+
+완료 기준:
+
+- 열어둔 plan/config가 외부에서 바뀌면 Helm이 저장을 막는다.
+- 저장 실패 시 사용자의 draft를 잃지 않는다.
+- 편집 결과는 audit/evidence에 남는다.
+
+### Step 10. 원격 host profile 후보
+
+목표:
+
+- 당장 로컬 중심을 유지하되, 나중에 remote Mac/VPS repo를 다룰 수 있는 경계를 미리 정한다.
+
+작업:
+
+- `RunnerProfile` 또는 `HostProfile` 후보 모델을 설계한다.
+- 필드는 SSH alias, host, user, port, project root, profile label, environment path override로 시작한다.
+- service command는 no-TTY, terminal shell은 PTY로 분리한다.
+- service command는 BatchMode, connect timeout, server alive, 명시적 destination을 사용한다.
+- SSH 실패를 auth, host key, DNS, refused, timeout, path missing으로 분류한다.
+- 원격 실행은 기본값이 아니며, 프로젝트별 opt-in 설정으로 둔다.
+
+완료 기준:
+
+- 로컬 host runner 설계를 깨지 않고 remote runner를 붙일 수 있다.
+- remote 실행 실패 메시지가 "명령 실패" 하나로 뭉개지지 않는다.
+
+### Step 11. Bounded MCP와 외부 agent 연동 후보
+
+목표:
+
+- 외부 agent가 Helm 상태를 읽고 제한적으로 조작할 수 있는 안전한 protocol boundary를 둔다.
+
+작업:
+
+- `helm-mcp`는 별도 후보로 두고 core loop 이후 설계한다.
+- stdout은 JSON-RPC 전용, diagnostics는 stderr로 보낸다.
+- tool은 allowlist만 제공한다.
+- project/profile은 서버 시작 시 고정하고 tool별 임의 path switching을 금지한다.
+- child command timeout과 env allowlist를 둔다.
+- mutation tool은 현재 task state와 approval/authority를 다시 읽은 뒤 실행한다.
+
+초기 tool 후보:
+
+```text
+helm_status
+helm_task_list
+helm_task_snapshot
+helm_task_create
+helm_run_list
+helm_run_artifact
+helm_approval_list
+helm_approval_decide
+helm_gate_results
+```
+
+완료 기준:
+
+- 외부 agent는 Helm DB를 직접 열지 않고 Helm이 허용한 tool만 사용할 수 있다.
+- message body나 prompt text만으로 승인/실행 권한이 생기지 않는다.
+
+### Step 12. 배포/업데이트 검증 후보
+
+목표:
+
+- desktop 배포를 시작할 때 trust boundary를 과장하지 않고 검증 가능한 release artifact를 제공한다.
+
+작업:
+
+- app bundle zip, SHA-256, release manifest를 생성한다.
+- manifest에는 bundle id, version, build number, minimum OS, executable, architecture, zip size, checksum을 담는다.
+- verify script는 checksum, unzip, bundle metadata, code signature 상태를 확인한다.
+- update check는 GitHub Releases metadata 조회만 하고 자동 설치는 하지 않는다.
+- update check는 opt-in 또는 24시간 이상 간격의 저빈도 동작으로 제한한다.
+- 문서에는 ad-hoc signing, notarization, checksum이 각각 무엇을 보장하지 않는지 명시한다.
+
+완료 기준:
+
+- 사용자가 release zip을 받아 로컬에서 동일성 검증을 할 수 있다.
+- 앱은 업데이트 확인 때문에 project path, prompt, artifact 내용을 외부로 보내지 않는다.
 
 ## 우선순위
 
@@ -355,10 +603,15 @@ fixture runner 요구:
 2. Step 1: Runner onboarding 완성
 3. Step 2: Task Detail 제품 경로 재구성
 4. Step 6 일부: fixture core loop acceptance test
-5. Step 3: GateResult와 diff consistency
+5. Step 3: GateResult, EvidenceRecord, DecisionRecord
 6. Step 4: Reviewer/Tester chain
 7. Step 5: Merge readiness
 8. Step 7: Planning Workspace
+9. Step 8: Workflow preset과 session/run 탐색
+10. Step 9: 안전한 파일 편집 계약
+11. Step 10: 원격 host profile 후보
+12. Step 11: Bounded MCP와 외부 agent 연동 후보
+13. Step 12: 배포/업데이트 검증 후보
 
 이 순서가 좋은 이유는 현재 가장 큰 병목이 "기능이 없어서"가 아니라 "실제 태스크 하나를 자연스럽게 끝까지 돌릴 실행 경로가 없어서"이기 때문이다.
 
@@ -370,11 +623,13 @@ fixture runner 요구:
 - Slack 알림
 - Obsidian backfill 자동화
 - Docker Hermes observer
-- full interactive PTY
 - 자동 merge/push/PR 생성
 - multi-agent parallel execution
-- 전역 최근 프로젝트 목록
 - backup/recovery
+- Envoy relay/Connected/invite/capability 구현
+- Envoy나 Hermes Desktop을 runtime dependency로 강제하는 구조
+- Hermes Desktop식 Kanban/Cron/Skills 전체 복제
+- 원격 host를 기본 source of truth로 전환하는 것
 
 ## 구현 완료 판정
 
@@ -382,6 +637,7 @@ fixture runner 요구:
 
 - Helm repo 자신을 대상으로 fixture runner core loop가 통과한다.
 - 실제 Codex 또는 Claude runner template으로 최소 Planner -> PlanApproval -> Coder까지 동작한다.
-- run artifact, gate result, audit log, worktree diff가 서로 어긋나지 않는다.
+- run artifact, gate result, evidence record, audit log, worktree diff가 서로 어긋나지 않는다.
 - 사용자가 Task Detail만 보고 다음 액션과 blocker를 알 수 있다.
+- 사용자가 승인 근거, command evidence, handoff record를 보고 작업 이력을 재구성할 수 있다.
 - README와 Phase 문서가 현재 구현 상태와 다음 범위를 과장 없이 설명한다.

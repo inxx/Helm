@@ -1,6 +1,7 @@
 import { CheckCircle2, Download, FolderTree, Info, Layers, Plug, RefreshCw, Workflow, Wrench, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
+import { roleLabel, runnerReadinessFor } from "../lib/runnerReadiness";
 import { checkForManualUpdate, type ManualUpdateInfo } from "../lib/updater";
 import type {
   AiConnection,
@@ -26,9 +27,9 @@ const CATEGORIES: Array<{
   hint: string;
   icon: typeof Layers;
 }> = [
-  { id: "templates", label: "Runner Templates", hint: "역할 프리셋과 AI 연결을 한 번에 적용", icon: Layers },
-  { id: "connections", label: "AI 연결", hint: "Codex · Claude 등 도구 등록", icon: Plug },
-  { id: "assignments", label: "작업별 AI 선택", hint: "계획 · 구현 · 검수 · 테스트 매핑", icon: Workflow },
+  { id: "templates", label: "Runner Templates", hint: "역할 프리셋과 AI CLI 연결을 한 번에 적용", icon: Layers },
+  { id: "connections", label: "AI CLI 연결", hint: "Codex · Claude CLI command 등록", icon: Plug },
+  { id: "assignments", label: "작업별 CLI 선택", hint: "계획 · 구현 · 검수 · 테스트 매핑", icon: Workflow },
   { id: "jira", label: "Jira", hint: "프로젝트 키와 기본 이슈 타입", icon: CheckCircle2 },
   { id: "worktree", label: "Worktree", hint: "병렬 작업 디렉터리 위치", icon: FolderTree },
   { id: "app", label: "앱", hint: "Helm 업데이트 확인", icon: Info },
@@ -83,6 +84,21 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     () => aiConnections.filter((connection) => connection.enabled),
     [aiConnections],
   );
+  const parsedRolePresets = useMemo(() => parseRolePresets(rolePresets), [rolePresets]);
+  const runnerOnboarding = useMemo(() => {
+    if (!snapshot) return [];
+    const effectiveSettings = {
+      ...snapshot.settings,
+      rolePresets: parsedRolePresets ?? snapshot.settings.rolePresets,
+      aiConnections,
+      roleAssignments: normalizeRoleAssignments(roleAssignments),
+    };
+    return ROLE_DEFINITIONS.map((role) => ({
+      ...role,
+      readiness: runnerReadinessFor(effectiveSettings, role.roleId),
+    }));
+  }, [aiConnections, parsedRolePresets, roleAssignments, snapshot]);
+  const readyRunnerCount = runnerOnboarding.filter((item) => item.readiness.ready).length;
 
   async function save() {
     if (!snapshot) return;
@@ -143,9 +159,9 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
           ),
         );
       }
-      setMessage({ tone: "info", text: result.modelRefreshMessage ?? "AI 연결 확인 완료" });
+      setMessage({ tone: "info", text: result.modelRefreshMessage ?? "AI CLI 확인 완료" });
     } catch (error) {
-      setMessage({ tone: "error", text: errorMessage(error, "AI 연결 확인에 실패했습니다.") });
+      setMessage({ tone: "error", text: errorMessage(error, "AI CLI 확인에 실패했습니다.") });
     } finally {
       setBusy(false);
     }
@@ -277,7 +293,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     return (
       <section className="empty-state">
         <h2>설정</h2>
-        <p>프로젝트를 열면 runner, worktree, AI 연결 설정이 표시됩니다.</p>
+        <p>프로젝트를 열면 runner, worktree, AI CLI 설정이 표시됩니다.</p>
         <div className="settings-actions">
           <button className="secondary-button" disabled={updaterBusy} onClick={checkUpdates} type="button">
             <RefreshCw size={14} aria-hidden />
@@ -356,7 +372,31 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               <section className="settings-section">
                 <div className="settings-section-head">
                   <h3>Runner Templates</h3>
-                  <p className="muted">기존 role preset과 새 AI 연결/작업별 선택 기본값을 함께 적용합니다.</p>
+                  <p className="muted">기존 role preset과 새 AI CLI command/작업별 선택 기본값을 함께 적용합니다.</p>
+                </div>
+                <div className="runner-onboarding-panel">
+                  <div className="runner-onboarding-summary">
+                    <div>
+                      <strong>Runner 준비 상태</strong>
+                      <span>
+                        {readyRunnerCount}/{ROLE_DEFINITIONS.length} 역할 준비됨 · 활성 CLI 연결 {enabledConnections.length}개
+                      </span>
+                    </div>
+                    <span className={readyRunnerCount === ROLE_DEFINITIONS.length ? "check-pass" : "check-fail"}>
+                      {readyRunnerCount === ROLE_DEFINITIONS.length ? "준비 완료" : "설정 필요"}
+                    </span>
+                  </div>
+                  <ul className="runner-onboarding-roles">
+                    {runnerOnboarding.map((item) => (
+                      <li key={item.roleId}>
+                        <span className={item.readiness.ready ? "check-pass" : "check-fail"}>
+                          {item.readiness.ready ? "ready" : "missing"}
+                        </span>
+                        <strong>{item.label}</strong>
+                        <span>{item.readiness.ready ? item.readiness.label : item.readiness.description}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
                 {templates.length === 0 ? (
                   <p className="muted">사용 가능한 template이 없습니다.</p>
@@ -386,8 +426,8 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
             {activeCategory === "connections" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
-                  <h3>AI 연결</h3>
-                  <p className="muted">각 AI 도구를 연결 단위로 등록하고 health check를 확인합니다.</p>
+                  <h3>AI CLI 연결</h3>
+                  <p className="muted">Codex, Claude 같은 로컬 CLI command를 연결 단위로 등록하고 health check를 확인합니다.</p>
                 </div>
                 <div className="settings-actions">
                   <button
@@ -410,7 +450,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                 <div className="connection-list">
                   {aiConnections.length === 0 ? (
                     <p className="settings-empty">
-                      등록된 AI 연결이 없습니다. template을 적용하거나 연결을 추가하세요.
+                      등록된 AI CLI 연결이 없습니다. template을 적용하거나 CLI 연결을 추가하세요.
                     </p>
                   ) : (
                     aiConnections.map((connection) => {
@@ -503,7 +543,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                               onClick={() => checkConnection(connection)}
                               type="button"
                             >
-                              연결 확인
+                              CLI 확인
                             </button>
                             <button
                               className="secondary-button danger"
@@ -525,12 +565,12 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
             {activeCategory === "assignments" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
-                  <h3>작업별 AI 선택</h3>
+                  <h3>작업별 CLI 선택</h3>
                   <p className="muted">계획/구현은 단일 선택, 검수/테스트는 다중 선택으로 저장합니다.</p>
                 </div>
                 {enabledConnections.length === 0 ? (
                   <p className="settings-empty">
-                    활성화된 AI 연결이 없습니다. <strong>AI 연결</strong> 탭에서 먼저 등록하세요.
+                    활성화된 AI CLI 연결이 없습니다. <strong>AI CLI 연결</strong> 탭에서 먼저 등록하세요.
                   </p>
                 ) : (
                   <div className="role-assignment-list">
@@ -706,7 +746,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               <section className="settings-section">
                 <div className="settings-section-head">
                   <h3>고급</h3>
-                  <p className="muted">일반적으로 template과 AI 연결 탭만으로 충분합니다.</p>
+                  <p className="muted">일반적으로 template과 AI CLI 연결 탭만으로 충분합니다.</p>
                 </div>
                 <details className="settings-disclosure">
                   <summary>Role presets JSON 직접 편집</summary>
@@ -790,28 +830,44 @@ function normalizeJiraProjectKey(value: string): string | null {
   return trimmed ? trimmed : null;
 }
 
+function parseRolePresets(raw: string): unknown | null {
+  if (!raw.trim()) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 function normalizeAiConnections(value: unknown): AiConnection[] {
   if (!Array.isArray(value)) return [];
   return value
     .filter((item): item is Partial<AiConnection> => typeof item === "object" && item !== null)
-    .map((item) => ({
-      id: typeof item.id === "string" ? item.id : crypto.randomUUID(),
-      label: typeof item.label === "string" ? item.label : "AI 연결",
-      provider: typeof item.provider === "string" ? item.provider : "custom",
-      commandArgs: Array.isArray(item.commandArgs) ? item.commandArgs.filter(isString) : [],
-      planningCommandArgs: Array.isArray(item.planningCommandArgs)
-        ? item.planningCommandArgs.filter(isString)
-        : undefined,
-      planningMode: typeof item.planningMode === "string" ? item.planningMode : undefined,
-      healthCheckArgs: Array.isArray(item.healthCheckArgs) ? item.healthCheckArgs.filter(isString) : undefined,
-      timeoutSeconds: typeof item.timeoutSeconds === "number" ? item.timeoutSeconds : 1800,
-      planningTimeoutSeconds:
-        typeof item.planningTimeoutSeconds === "number" ? item.planningTimeoutSeconds : undefined,
-      enabled: typeof item.enabled === "boolean" ? item.enabled : true,
-      defaultModel: typeof item.defaultModel === "string" ? item.defaultModel : null,
-      availableModels: Array.isArray(item.availableModels) ? item.availableModels.filter(isString) : [],
-      defaultEffort: typeof item.defaultEffort === "string" ? item.defaultEffort : null,
-    }));
+    .map((item) => {
+      const provider = typeof item.provider === "string" ? item.provider : "custom";
+      return {
+        id: typeof item.id === "string" ? item.id : crypto.randomUUID(),
+        label: typeof item.label === "string" ? item.label : "AI CLI 연결",
+        provider,
+        commandArgs: normalizeCliArgs(
+          provider,
+          Array.isArray(item.commandArgs) ? item.commandArgs.filter(isString) : [],
+        ),
+        planningCommandArgs: Array.isArray(item.planningCommandArgs)
+          ? normalizeCliArgs(provider, item.planningCommandArgs.filter(isString))
+          : undefined,
+        planningMode: typeof item.planningMode === "string" ? item.planningMode : undefined,
+        planningModel: typeof item.planningModel === "string" ? item.planningModel : null,
+        healthCheckArgs: Array.isArray(item.healthCheckArgs) ? item.healthCheckArgs.filter(isString) : undefined,
+        timeoutSeconds: typeof item.timeoutSeconds === "number" ? item.timeoutSeconds : 1800,
+        planningTimeoutSeconds:
+          typeof item.planningTimeoutSeconds === "number" ? item.planningTimeoutSeconds : undefined,
+        enabled: typeof item.enabled === "boolean" ? item.enabled : true,
+        defaultModel: typeof item.defaultModel === "string" ? item.defaultModel : null,
+        availableModels: Array.isArray(item.availableModels) ? item.availableModels.filter(isString) : [],
+        defaultEffort: typeof item.defaultEffort === "string" ? item.defaultEffort : null,
+      };
+    });
 }
 
 function normalizeRoleAssignments(value: unknown): RoleAssignment[] {
@@ -908,21 +964,37 @@ function codexConnection(): AiConnection {
       "exec",
       "--sandbox",
       "read-only",
-      "--ask-for-approval",
-      "never",
       "--cd",
       "{projectRoot}",
       "--",
       "{planPrompt}",
     ],
     planningMode: "prompt_guarded",
+    planningModel: "gpt-5.4-mini",
     healthCheckArgs: ["codex", "--version"],
     timeoutSeconds: 1800,
-    planningTimeoutSeconds: 1800,
+    planningTimeoutSeconds: 120,
     enabled: true,
     defaultModel: "gpt-5.2",
     availableModels: ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"],
   };
+}
+
+function normalizeCliArgs(provider: string, args: string[]): string[] {
+  if (provider !== "codex") return args;
+
+  const normalized: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--ask-for-approval") {
+      const next = args[index + 1];
+      if (next === "never" || next === "on-request" || next === "on-failure" || next === "untrusted") {
+        index += 1;
+      }
+      continue;
+    }
+    normalized.push(args[index]);
+  }
+  return normalized;
 }
 
 function claudeConnection(): AiConnection {
@@ -937,24 +1009,14 @@ function claudeConnection(): AiConnection {
     ],
     planningCommandArgs: ["claude", "--permission-mode", "plan", "-p", "{planPrompt}"],
     planningMode: "native_plan",
+    planningModel: null,
     healthCheckArgs: ["claude", "--version"],
     timeoutSeconds: 1800,
-    planningTimeoutSeconds: 1800,
+    planningTimeoutSeconds: 120,
     enabled: true,
     defaultModel: "sonnet",
     availableModels: ["sonnet", "opus"],
   };
-}
-
-function roleLabel(roleId: string): string {
-  const labels: Record<string, string> = {
-    planner: "설계자",
-    coder: "구현자",
-    plan_verifier: "계획 검토자",
-    code_reviewer: "코드 리뷰어",
-    tester: "테스트 담당자",
-  };
-  return labels[roleId] ?? roleId;
 }
 
 function isString(value: unknown): value is string {

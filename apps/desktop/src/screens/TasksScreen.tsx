@@ -15,6 +15,7 @@ interface TasksScreenProps {
   onOpenProject: () => void;
   onRefresh: () => Promise<void>;
   onGoGit: () => void;
+  onGoSettings: () => void;
 }
 
 export function TasksScreen({
@@ -25,6 +26,7 @@ export function TasksScreen({
   onOpenProject,
   onRefresh,
   onGoGit,
+  onGoSettings,
 }: TasksScreenProps) {
   const { showToast } = useToast();
   const [mode, setMode] = useState<"new" | "jira">("new");
@@ -146,6 +148,7 @@ export function TasksScreen({
         task={selectedTask}
         onRefresh={onRefresh}
         onGoGit={onGoGit}
+        onGoSettings={onGoSettings}
       />
     </div>
   );

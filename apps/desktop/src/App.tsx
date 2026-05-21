@@ -46,24 +46,13 @@ export function App() {
         const launch = await api.getLaunchState();
         if (cancelled) return;
 
-        if (launch.recentProjects.length > 0) {
-          setRecents(launch.recentProjects);
-          saveRecents(launch.recentProjects);
-        }
+        setRecents(launch.recentProjects);
+        saveRecents(launch.recentProjects);
 
         if (launch.snapshot) {
           hydrateSnapshot(launch.snapshot);
         } else if (launch.restoreError) {
           setError(launch.restoreError.message);
-        } else if (recents[0]) {
-          const next = await api.openProject(recents[0].rootPath, { reconcileStaleRuns: true });
-          if (cancelled) return;
-          hydrateSnapshot(next);
-          const nextRecents = upsertRecent(recents, next.project, {
-            preserveExistingPosition: true,
-          });
-          setRecents(nextRecents);
-          saveRecents(nextRecents);
         }
       } catch (err) {
         if (!cancelled) {
@@ -115,12 +104,16 @@ export function App() {
   }
 
   async function switchProject(projectId: string) {
-    const recent = recents.find((project) => project.id === projectId);
-    if (!recent) return;
     setError(null);
     setBusy(true);
     try {
-      await openProjectPath(recent.rootPath, { preserveRecentPosition: true });
+      const next = await api.openProjectById(projectId, { reconcileStaleRuns: true });
+      hydrateSnapshot(next);
+      const nextRecents = upsertRecent(recents, next.project, {
+        preserveExistingPosition: true,
+      });
+      setRecents(nextRecents);
+      saveRecents(nextRecents);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -215,6 +208,7 @@ export function App() {
               onOpenProject={openProject}
               onRefresh={refresh}
               onGoGit={() => setScreen("git")}
+              onGoSettings={() => setScreen("settings")}
             />
           ) : null}
           {screen === "git" ? (

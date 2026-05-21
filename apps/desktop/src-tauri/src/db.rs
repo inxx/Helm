@@ -1858,10 +1858,10 @@ fn role_assignment_command(
                 .iter()
                 .find(|item| item.get("id").and_then(Value::as_str) == Some(connection_id))
         })
-        .ok_or_else(|| CommandError::validation("역할에 배정된 AI 연결을 찾을 수 없습니다."))?;
+        .ok_or_else(|| CommandError::validation("역할에 배정된 AI CLI 연결을 찾을 수 없습니다."))?;
     if connection.get("enabled").and_then(Value::as_bool) == Some(false) {
         return Err(CommandError::validation(
-            "역할에 배정된 AI 연결이 비활성화되어 있습니다.",
+            "역할에 배정된 AI CLI 연결이 비활성화되어 있습니다.",
         ));
     }
 

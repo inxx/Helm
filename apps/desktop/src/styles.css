@@ -1253,7 +1253,7 @@ textarea {
 
 .task-console-tabs {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   background: var(--surface);
@@ -1370,6 +1370,14 @@ textarea {
 .role-grid button {
   width: 100%;
   justify-content: center;
+}
+
+.task-devtools {
+  margin-top: 4px;
+}
+
+.task-devtools .role-grid + .role-grid {
+  margin-top: 6px;
 }
 
 .role-lane-list {
@@ -2609,6 +2617,72 @@ textarea {
 .template-card p {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.runner-onboarding-panel {
+  display: grid;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
+}
+
+.runner-onboarding-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.runner-onboarding-summary > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.runner-onboarding-summary strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.runner-onboarding-summary span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.runner-onboarding-roles {
+  display: grid;
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--line);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.runner-onboarding-roles li {
+  display: grid;
+  grid-template-columns: 72px 90px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  background: var(--surface);
+  padding: 7px 8px;
+}
+
+.runner-onboarding-roles strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.runner-onboarding-roles li > span:last-child {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-actions {
@@ -4011,6 +4085,47 @@ textarea {
 .planning-message.planner {
   justify-self: start;
   border-color: var(--line-strong);
+}
+
+.planning-message.pending {
+  overflow: hidden;
+  position: relative;
+}
+
+.planning-message .planning-typing {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 3px;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.planning-typing span {
+  animation: planning-typing-dot 1s ease-in-out infinite;
+  opacity: 0.35;
+}
+
+.planning-typing span:nth-child(2) {
+  animation-delay: 0.12s;
+}
+
+.planning-typing span:nth-child(3) {
+  animation-delay: 0.24s;
+}
+
+@keyframes planning-typing-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
 }
 
 .planner-breakdown {

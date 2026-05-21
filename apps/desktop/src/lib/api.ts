@@ -34,6 +34,12 @@ export const api = {
       reconcileStaleRuns: options.reconcileStaleRuns,
     });
   },
+  openProjectById(projectId: string, options: { reconcileStaleRuns?: boolean } = {}) {
+    return invoke<ProjectSnapshot>("open_project_by_id", {
+      projectId,
+      reconcileStaleRuns: options.reconcileStaleRuns,
+    });
+  },
   forgetProject(projectId: string) {
     return invoke<LaunchState>("forget_project", { projectId });
   },

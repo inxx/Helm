@@ -58,6 +58,7 @@ export interface AiConnection {
   commandArgs: string[];
   planningCommandArgs?: string[];
   planningMode?: "native_plan" | "prompt_guarded" | "fixture" | string;
+  planningModel?: string | null;
   healthCheckArgs?: string[];
   timeoutSeconds: number;
   planningTimeoutSeconds?: number;

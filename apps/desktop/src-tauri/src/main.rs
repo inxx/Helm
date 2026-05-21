@@ -113,6 +113,40 @@ fn open_project(
 }
 
 #[tauri::command]
+fn open_project_by_id(
+    project_id: String,
+    reconcile_stale_runs: Option<bool>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> CommandResult<ProjectSnapshot> {
+    let stored = load_stored_launch_state(&app)?;
+    let root_path = stored
+        .recent_projects
+        .iter()
+        .find(|project| project.id == project_id)
+        .map(|project| project.root_path.clone())
+        .or_else(|| {
+            if stored.active_project_id.as_deref() == Some(project_id.as_str()) {
+                stored.active_project_root_path.clone()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            CommandError::validation(
+                "등록된 프로젝트 경로를 찾지 못했습니다. 프로젝트 추가로 Git 저장소를 다시 등록해주세요.",
+            )
+        })?;
+    let snapshot = open_project_from_path(
+        Path::new(&root_path),
+        &state,
+        reconcile_stale_runs.unwrap_or(false),
+    )?;
+    remember_project(&app, &snapshot.project)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn forget_project(
     project_id: String,
     state: State<'_, AppState>,
@@ -366,7 +400,7 @@ fn check_ai_connection(
             connection_id,
             available: false,
             command,
-            message: "AI 연결에 command가 없습니다.".to_string(),
+            message: "AI CLI 연결에 command가 없습니다.".to_string(),
             available_models: None,
             model_refresh_message: None,
         });
@@ -391,7 +425,7 @@ fn check_ai_connection(
                 connection_id,
                 available: true,
                 command,
-                message: "AI 연결 command를 실행할 수 있습니다.".to_string(),
+                message: "AI CLI command를 실행할 수 있습니다.".to_string(),
                 available_models: model_refresh.models,
                 model_refresh_message: model_refresh.message,
             })
@@ -1158,8 +1192,6 @@ fn codex_ai_connections() -> Value {
                 "exec",
                 "--sandbox",
                 "read-only",
-                "--ask-for-approval",
-                "never",
                 "--cd",
                 "{projectRoot}",
                 "--",
@@ -1168,7 +1200,8 @@ fn codex_ai_connections() -> Value {
             "planningMode": "prompt_guarded",
             "healthCheckArgs": ["codex", "--version"],
             "timeoutSeconds": 1800,
-            "planningTimeoutSeconds": 1800,
+            "planningTimeoutSeconds": 120,
+            "planningModel": "gpt-5.4-mini",
             "enabled": true,
             "defaultModel": "gpt-5.2",
             "availableModels": ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"]
@@ -1218,7 +1251,8 @@ fn claude_ai_connections() -> Value {
             "planningMode": "native_plan",
             "healthCheckArgs": ["claude", "--version"],
             "timeoutSeconds": 1800,
-            "planningTimeoutSeconds": 1800,
+            "planningTimeoutSeconds": 120,
+            "planningModel": null,
             "enabled": true,
             "defaultModel": "sonnet",
             "availableModels": ["sonnet", "opus"],
@@ -1272,7 +1306,7 @@ fn resolve_planning_command(
         })
         .ok_or_else(|| CommandError::validation("planner 역할 배정을 찾을 수 없습니다."))?;
     let selection = first_assignment_selection(planner_assignment)
-        .ok_or_else(|| CommandError::validation("planner에 배정된 AI 연결이 없습니다."))?;
+        .ok_or_else(|| CommandError::validation("planner에 배정된 AI CLI 연결이 없습니다."))?;
     let connection_id = selection
         .get("connectionId")
         .and_then(Value::as_str)
@@ -1285,10 +1319,10 @@ fn resolve_planning_command(
                 .iter()
                 .find(|item| item.get("id").and_then(Value::as_str) == Some(connection_id))
         })
-        .ok_or_else(|| CommandError::validation("planner에 배정된 AI 연결을 찾을 수 없습니다."))?;
+        .ok_or_else(|| CommandError::validation("planner에 배정된 AI CLI 연결을 찾을 수 없습니다."))?;
     if connection.get("enabled").and_then(Value::as_bool) == Some(false) {
         return Err(CommandError::validation(
-            "planner에 배정된 AI 연결이 비활성화되어 있습니다.",
+            "planner에 배정된 AI CLI 연결이 비활성화되어 있습니다.",
         ));
     }
 
@@ -1296,10 +1330,22 @@ fn resolve_planning_command(
         .get("provider")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let model = selection
+    let planning_model = connection
+        .get("planningModel")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let explicit_role_model = selection
         .get("model")
         .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
+        .filter(|value| !value.trim().is_empty());
+    let default_planning_model = if provider.as_deref() == Some("codex") {
+        Some("gpt-5.4-mini")
+    } else {
+        None
+    };
+    let model = planning_model
+        .or(explicit_role_model)
+        .or(default_planning_model)
         .or_else(|| {
             connection
                 .get("defaultModel")
@@ -1335,21 +1381,22 @@ fn resolve_planning_command(
     let args = planning_command_args(connection, provider.as_deref(), &placeholders)?;
     if args.is_empty() {
         return Err(CommandError::validation(
-            "planner AI 연결에 planning command가 없습니다.",
+            "planner AI CLI 연결에 planning command가 없습니다.",
         ));
     }
 
     let timeout_seconds = connection
         .get("planningTimeoutSeconds")
         .and_then(Value::as_u64)
-        .or_else(|| connection.get("timeoutSeconds").and_then(Value::as_u64))
-        .unwrap_or(1800)
-        .clamp(1, 21600);
+        .unwrap_or(120)
+        .clamp(1, 600);
+
+    let command_args = inject_planning_provider_options(args, provider.as_deref(), model, effort);
 
     Ok((
         connection_id.to_string(),
         provider.clone(),
-        inject_planning_provider_options(args, provider.as_deref(), model, effort),
+        normalize_planning_cli_args(command_args, provider.as_deref()),
         timeout_seconds,
     ))
 }
@@ -1410,8 +1457,6 @@ fn planning_command_args(
             "exec".to_string(),
             "--sandbox".to_string(),
             "read-only".to_string(),
-            "--ask-for-approval".to_string(),
-            "never".to_string(),
             "--cd".to_string(),
             "{projectRoot}".to_string(),
             "--".to_string(),
@@ -1525,6 +1570,30 @@ fn inject_planning_provider_options(
         }
         _ => with_model,
     }
+}
+
+fn normalize_planning_cli_args(args: Vec<String>, provider: Option<&str>) -> Vec<String> {
+    if provider != Some("codex") {
+        return args;
+    }
+
+    let mut normalized = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--ask-for-approval" {
+            index += 1;
+            if args
+                .get(index)
+                .is_some_and(|value| matches!(value.as_str(), "never" | "on-request" | "on-failure" | "untrusted"))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        normalized.push(args[index].clone());
+        index += 1;
+    }
+    normalized
 }
 
 fn has_command_arg(args: &[String], names: &[&str]) -> bool {
@@ -2275,6 +2344,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_launch_state,
             open_project,
+            open_project_by_id,
             forget_project,
             get_project_snapshot,
             get_effective_settings,

@@ -385,7 +385,7 @@ provider별 기본값:
 | provider | planning mode | command 원칙 |
 | --- | --- | --- |
 | `claude` | `native_plan` | `claude --permission-mode plan -p {planPrompt}` |
-| `codex` | `prompt_guarded` | `codex exec --sandbox read-only --ask-for-approval never --cd {projectRoot} -- {planPrompt}` |
+| `codex` | `prompt_guarded` | `codex exec --sandbox read-only --cd {projectRoot} -- {planPrompt}` |
 | `fixture` | `fixture` | `fixture-runner.mjs --planning` |
 
 Codex CLI는 현재 로컬 help 기준으로 별도 `plan` subcommand가 없으므로 read-only sandbox와 planning prompt로 감싼다. Claude는 native `--permission-mode plan`을 사용한다.

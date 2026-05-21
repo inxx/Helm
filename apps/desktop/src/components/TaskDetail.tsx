@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useToast } from "./ToastProvider";
 import { api } from "../lib/api";
+import { runnerReadinessFor, roleLabel, type RoleId } from "../lib/runnerReadiness";
 import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
 import type {
   AgentRunSummary,
@@ -10,15 +11,13 @@ import type {
   TaskWorktreeSummary,
 } from "../lib/types";
 
-type DetailTab = "overview" | "runs" | "git" | "artifacts" | "devtools";
-type RoleId = "planner" | "coder" | "plan_verifier" | "code_reviewer" | "tester";
+type DetailTab = "overview" | "runs" | "git" | "artifacts";
 
 const DETAIL_TABS: Array<{ id: DetailTab; label: string }> = [
   { id: "overview", label: "개요" },
   { id: "runs", label: "실행" },
   { id: "git", label: "Git" },
   { id: "artifacts", label: "산출물" },
-  { id: "devtools", label: "개발 도구" },
 ];
 
 const ROLE_IDS: RoleId[] = ["planner", "coder", "plan_verifier", "code_reviewer", "tester"];
@@ -28,9 +27,10 @@ interface TaskDetailProps {
   task: TaskSummary | null;
   onRefresh: () => Promise<void>;
   onGoGit: () => void;
+  onGoSettings: () => void;
 }
 
-export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailProps) {
+export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }: TaskDetailProps) {
   const { showToast } = useToast();
   const [status, setStatus] = useState<TaskStatus>("Planned");
   const [busy, setBusy] = useState(false);
@@ -272,6 +272,10 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
   }
 
   const activeRoleId = roleForTaskStatus(task.status);
+  const activeRunnerReadiness = activeRoleId ? runnerReadinessFor(snapshot.settings, activeRoleId) : null;
+  const activeQueuedRun = activeRoleId
+    ? runs.find((run) => run.roleId === activeRoleId && run.status === "Queued") ?? null
+    : null;
 
   return (
     <aside className="detail-panel task-console">
@@ -310,9 +314,13 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
           pendingPlanApproval={Boolean(pendingPlanApproval)}
           task={task}
           worktree={worktree}
+          runnerReadiness={activeRunnerReadiness}
+          queuedRun={activeQueuedRun}
           onPrepareWorktree={prepareWorktree}
           onPrepareContext={prepareContext}
-          onRunStubRole={runRole}
+          onRunHost={runHost}
+          onGoSettings={onGoSettings}
+          onGoGit={onGoGit}
         />
       </section>
 
@@ -375,26 +383,39 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
               {ROLE_IDS.map((roleId) => {
                 const latestRun = runs.find((run) => run.roleId === roleId);
                 const isCurrentRole = activeRoleId === roleId && !pendingPlanApproval;
-                const needsWorktree = roleId !== "planner" && isCurrentRole && !worktree;
+                const readiness = runnerReadinessFor(snapshot.settings, roleId);
+                const needsRunner = isCurrentRole && !readiness.ready;
+                const needsWorktree = isCurrentRole && readiness.ready && !worktree;
                 return (
                   <li className={isCurrentRole ? "role-lane active" : "role-lane"} key={roleId}>
                     <div>
                       <strong>{roleLabel(roleId)}</strong>
-                      <span>{latestRun ? `${latestRun.status} · ${latestRun.resultStatus ?? "-"}` : "대기"}</span>
+                      <span>
+                        {latestRun
+                          ? `${latestRun.status} · ${latestRun.resultStatus ?? "-"}`
+                          : readiness.ready
+                            ? readiness.label
+                            : readiness.description}
+                      </span>
                     </div>
                     <div className="artifact-actions">
+                      {needsRunner ? (
+                        <button disabled={busy} onClick={onGoSettings} type="button">
+                          runner 설정
+                        </button>
+                      ) : null}
                       {needsWorktree ? (
                         <button disabled={busy} onClick={prepareWorktree} type="button">
                           worktree 준비
                         </button>
                       ) : null}
-                      {isCurrentRole && !needsWorktree && !latestRun ? (
+                      {isCurrentRole && !needsRunner && !needsWorktree && !latestRun ? (
                         <button
                           disabled={busy}
-                          onClick={() => (roleId === "planner" ? runRole(roleId) : prepareContext(roleId))}
+                          onClick={() => prepareContext(roleId)}
                           type="button"
                         >
-                          {roleId === "planner" ? "Planner 실행" : "실행 준비"}
+                          실행 준비
                         </button>
                       ) : null}
                       {latestRun?.status === "Queued" ? (
@@ -423,6 +444,24 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
                 );
               })}
             </ul>
+            <details className="settings-disclosure task-devtools">
+              <summary>개발용 실행 도구</summary>
+              <p className="muted">fixture 검증이나 context pack 재생성이 필요할 때만 사용합니다.</p>
+              <div className="role-grid">
+                {ROLE_IDS.map((roleId) => (
+                  <button disabled={busy} key={`context-${roleId}`} onClick={() => prepareContext(roleId)} type="button">
+                    {roleLabel(roleId)} context
+                  </button>
+                ))}
+              </div>
+              <div className="role-grid">
+                {ROLE_IDS.map((roleId) => (
+                  <button disabled={busy} key={`stub-${roleId}`} onClick={() => runRole(roleId)} type="button">
+                    {roleLabel(roleId)} stub
+                  </button>
+                ))}
+              </div>
+            </details>
           </section>
         </div>
       ) : null}
@@ -489,31 +528,6 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit }: TaskDetailPro
         </div>
       ) : null}
 
-      {activeTab === "devtools" ? (
-        <div className="task-console-tab-panel">
-          <section className="detail-section">
-            <h3>Context Pack</h3>
-            <div className="role-grid">
-              {ROLE_IDS.map((roleId) => (
-                <button disabled={busy} key={roleId} onClick={() => prepareContext(roleId)} type="button">
-                  {roleLabel(roleId)}
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className="detail-section">
-            <h3>Stub role 실행</h3>
-            <div className="role-grid">
-              {ROLE_IDS.map((roleId) => (
-                <button disabled={busy} key={roleId} onClick={() => runRole(roleId)} type="button">
-                  {roleLabel(roleId)}
-                </button>
-              ))}
-            </div>
-          </section>
-        </div>
-      ) : null}
     </aside>
   );
 }
@@ -523,9 +537,13 @@ interface NextActionProps {
   pendingPlanApproval: boolean;
   task: TaskSummary;
   worktree: TaskWorktreeSummary | null;
+  runnerReadiness: ReturnType<typeof runnerReadinessFor> | null;
+  queuedRun: AgentRunSummary | null;
   onPrepareWorktree: () => Promise<void>;
   onPrepareContext: (roleId: string) => Promise<void>;
-  onRunStubRole: (roleId: string) => Promise<void>;
+  onRunHost: (runId: string) => Promise<void>;
+  onGoSettings: () => void;
+  onGoGit: () => void;
 }
 
 function NextAction({
@@ -533,9 +551,13 @@ function NextAction({
   pendingPlanApproval,
   task,
   worktree,
+  runnerReadiness,
+  queuedRun,
   onPrepareWorktree,
   onPrepareContext,
-  onRunStubRole,
+  onRunHost,
+  onGoSettings,
+  onGoGit,
 }: NextActionProps) {
   if (pendingPlanApproval) {
     return (
@@ -546,12 +568,68 @@ function NextAction({
     );
   }
 
-  const action = nextActionFor(task.status, Boolean(worktree));
-  if (!action) {
+  if (task.status === "MergeWaiting") {
+    return (
+      <div className="next-action-card">
+        <div>
+          <strong>머지 준비 확인</strong>
+          <p>Git 화면에서 diff, branch 상태, merge readiness를 확인합니다.</p>
+        </div>
+        <button className="primary-button" disabled={busy} onClick={onGoGit} type="button">
+          Git에서 보기
+        </button>
+      </div>
+    );
+  }
+
+  const action = contextActionFor(task.status);
+  if (!action || !runnerReadiness) {
     return (
       <div className="next-action-card">
         <strong>대기 중</strong>
         <p>현재 상태에서 자동으로 제안할 다음 액션이 없습니다.</p>
+      </div>
+    );
+  }
+
+  if (!runnerReadiness.ready) {
+    return (
+      <div className="next-action-card waiting">
+        <div>
+          <strong>{roleLabel(action.roleId)} runner 설정 필요</strong>
+          <p>{runnerReadiness.description}</p>
+        </div>
+        <button className="primary-button" disabled={busy} onClick={onGoSettings} type="button">
+          설정 열기
+        </button>
+      </div>
+    );
+  }
+
+  if (!worktree) {
+    return (
+      <div className="next-action-card">
+        <div>
+          <strong>Worktree 준비</strong>
+          <p>실제 role 실행을 위해 태스크 전용 branch와 worktree를 만듭니다.</p>
+        </div>
+        <button className="primary-button" disabled={busy} onClick={() => void onPrepareWorktree()} type="button">
+          worktree 준비
+        </button>
+      </div>
+    );
+  }
+
+  if (queuedRun) {
+    return (
+      <div className="next-action-card">
+        <div>
+          <strong>{roleLabel(action.roleId)} host 실행</strong>
+          <p>준비된 Context Pack으로 host runner를 실행합니다.</p>
+        </div>
+        <button className="primary-button" disabled={busy} onClick={() => void onRunHost(queuedRun.id)} type="button">
+          host 실행
+        </button>
       </div>
     );
   }
@@ -565,15 +643,7 @@ function NextAction({
       <button
         className="primary-button"
         disabled={busy}
-        onClick={() => {
-          if (action.kind === "worktree") {
-            void onPrepareWorktree();
-          } else if (action.kind === "stub") {
-            void onRunStubRole(action.roleId);
-          } else {
-            void onPrepareContext(action.roleId);
-          }
-        }}
+        onClick={() => void onPrepareContext(action.roleId)}
         type="button"
       >
         {action.button}
@@ -582,48 +652,22 @@ function NextAction({
   );
 }
 
-function nextActionFor(status: TaskStatus, hasWorktree: boolean):
-  | {
-      kind: "stub";
-      roleId: string;
-      title: string;
-      description: string;
-      button: string;
-    }
-  | {
-      kind: "context";
-      roleId: string;
-      title: string;
-      description: string;
-      button: string;
-    }
-  | {
-      kind: "worktree";
-      title: string;
-      description: string;
-      button: string;
-    }
-  | null {
+function contextActionFor(status: TaskStatus): {
+  roleId: RoleId;
+  title: string;
+  description: string;
+  button: string;
+} | null {
   if (status === "Planned" || status === "Blocked") {
     return {
-      kind: "stub",
       roleId: "planner",
-      title: "계획 생성",
-      description: "Planner를 실행해 계획 산출물과 PlanApproval을 만듭니다.",
-      button: "Planner 실행",
-    };
-  }
-  if (!hasWorktree && ["Ready", "PlanVerification", "CodeReview", "Testing"].includes(status)) {
-    return {
-      kind: "worktree",
-      title: "Worktree 준비",
-      description: "실제 role 실행을 위해 태스크 전용 branch와 worktree를 만듭니다.",
-      button: "worktree 준비",
+      title: "계획 컨텍스트 준비",
+      description: "Planner가 실행할 Context Pack을 만들고 host 실행 대기 상태로 둡니다.",
+      button: "Planner 준비",
     };
   }
   if (status === "Ready") {
     return {
-      kind: "context",
       roleId: "coder",
       title: "구현 컨텍스트 준비",
       description: "Coder가 실행할 Context Pack을 생성합니다.",
@@ -632,7 +676,6 @@ function nextActionFor(status: TaskStatus, hasWorktree: boolean):
   }
   if (status === "PlanVerification") {
     return {
-      kind: "context",
       roleId: "plan_verifier",
       title: "계획 준수 검토",
       description: "구현 diff가 승인된 계획을 따르는지 검토합니다.",
@@ -641,7 +684,6 @@ function nextActionFor(status: TaskStatus, hasWorktree: boolean):
   }
   if (status === "CodeReview") {
     return {
-      kind: "context",
       roleId: "code_reviewer",
       title: "코드 리뷰",
       description: "변경 코드의 위험과 품질 이슈를 검토합니다.",
@@ -650,34 +692,13 @@ function nextActionFor(status: TaskStatus, hasWorktree: boolean):
   }
   if (status === "Testing") {
     return {
-      kind: "context",
       roleId: "tester",
       title: "테스트 검증",
       description: "설정된 테스트 역할로 변경사항을 검증합니다.",
       button: "테스트 준비",
     };
   }
-  if (status === "MergeWaiting") {
-    return {
-      kind: "context",
-      roleId: "tester",
-      title: "머지 대기",
-      description: "diff와 실행 기록을 확인하고 merge readiness를 판단합니다.",
-      button: "최신 테스트 준비",
-    };
-  }
   return null;
-}
-
-function roleLabel(roleId: string): string {
-  const labels: Record<string, string> = {
-    planner: "설계자",
-    coder: "구현자",
-    plan_verifier: "계획 검토자",
-    code_reviewer: "코드 리뷰어",
-    tester: "테스트 담당자",
-  };
-  return labels[roleId] ?? roleId;
 }
 
 function roleForTaskStatus(status: TaskStatus): RoleId | null {
@@ -685,7 +706,7 @@ function roleForTaskStatus(status: TaskStatus): RoleId | null {
   if (status === "Ready") return "coder";
   if (status === "PlanVerification") return "plan_verifier";
   if (status === "CodeReview") return "code_reviewer";
-  if (status === "Testing" || status === "MergeWaiting") return "tester";
+  if (status === "Testing") return "tester";
   return null;
 }
 

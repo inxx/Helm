@@ -1,5 +1,5 @@
 import { CheckCircle2, Sparkles } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type { CreateTaskInput, PlannerConversationResult, ProjectSnapshot, TaskSummary } from "../lib/types";
 
@@ -30,6 +30,7 @@ interface PlanningMessage {
   role: "user" | "planner";
   content: string;
   createdLabel: string;
+  pending?: boolean;
 }
 
 interface PlannerDraft {
@@ -58,8 +59,19 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   const [sessions, setSessions] = useState<PlanningSessionStub[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const threadEndRef = useRef<HTMLDivElement | null>(null);
 
   const sortedSessions = useMemo(() => sessions, [sessions]);
+  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
+  const latestMessage = activeSession?.messages[activeSession.messages.length - 1] ?? null;
+  const latestMessageScrollKey = latestMessage
+    ? `${latestMessage.id}:${latestMessage.pending ? "pending" : "ready"}:${latestMessage.content.length}`
+    : null;
+
+  useEffect(() => {
+    if (!latestMessageScrollKey) return;
+    threadEndRef.current?.scrollIntoView({ block: "end" });
+  }, [activeSessionId, latestMessageScrollKey]);
 
   if (!snapshot) {
     return (
@@ -74,7 +86,6 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   }
 
   const projectSnapshot = snapshot;
-  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
   const hasSessions = sessions.length > 0;
   const draftGoal = activeSession?.goalText ?? goal;
   const draftTitle = activeSession?.title ?? titleFromGoal(goal);
@@ -99,16 +110,13 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     const existingTask = trimmedJiraRef ? findTaskByJiraRef(projectSnapshot, trimmedJiraRef) : null;
     const jiraState = existingTask ? "AlreadyTracked" : trimmedJiraRef ? "Linked" : "Missing";
     const fallbackDraft = buildPlannerDraft(trimmed, existingTask?.title ?? null);
-    setBusy(true);
-    const plannerResult = await runPlannerPlanMode(trimmed, trimmed, null, fallbackDraft);
-    const draft = plannerResult.draft;
     const sessionId = `plan-${Date.now()}`;
-
+    const pendingMessageId = `${sessionId}-planner-pending`;
     const session: PlanningSessionStub = {
       id: sessionId,
-      title: draft.title,
-      status: "ReadyForApproval",
-      updatedLabel: "방금 전",
+      title: fallbackDraft.title,
+      status: "Drafting",
+      updatedLabel: "응답 대기",
       goalText: trimmed,
       jiraRef: trimmedJiraRef || null,
       jiraState,
@@ -120,13 +128,14 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
           createdLabel: "방금 전",
         },
         {
-          id: `${sessionId}-planner-1`,
+          id: pendingMessageId,
           role: "planner",
-          content: plannerResult.message ?? plannerOpeningMessage(draft, jiraState),
-          createdLabel: "방금 전",
+          content: "...",
+          createdLabel: "진행 중",
+          pending: true,
         },
       ],
-      draft,
+      draft: fallbackDraft,
       revision: 1,
       taskId: existingTask?.id,
     };
@@ -135,8 +144,39 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     setActiveSessionId(session.id);
     setGoal("");
     setPlannerRequest("");
-    setError(plannerResult.warning ?? null);
-    setBusy(false);
+    setError(null);
+    setBusy(true);
+    try {
+      await waitForNextPaint();
+      const plannerResult = await runPlannerPlanMode(trimmed, trimmed, null, fallbackDraft);
+      const draft = plannerResult.draft;
+      setSessions((current) =>
+        current.map((item) =>
+          item.id === sessionId
+            ? {
+                ...item,
+                title: draft.title,
+                status: "ReadyForApproval",
+                updatedLabel: "방금 전",
+                draft,
+                messages: item.messages.map((message) =>
+                  message.id === pendingMessageId
+                    ? {
+                        ...message,
+                        content: plannerResult.message ?? plannerOpeningMessage(draft, jiraState),
+                        createdLabel: "방금 전",
+                        pending: false,
+                      }
+                    : message,
+                ),
+              }
+            : item,
+        ),
+      );
+      setError(plannerResult.warning ?? null);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function reviseActiveDraft() {
@@ -144,42 +184,29 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     if (!activeSession || !trimmed || busy) return;
 
     setBusy(true);
-    const fallbackDraft = buildPlannerDraft(
-      `${activeSession.goalText}\n\nplanner message: ${trimmed}`,
-      activeSession.taskId ? activeSession.draft.tasks[0]?.title ?? null : null,
-    );
-    const plannerResult = await runPlannerPlanMode(
-      trimmed,
-      activeSession.goalText,
-      activeSession.draft,
-      fallbackDraft,
-    );
-    const revisedDraft = plannerResult.draft;
-    const nextRevision = activeSession.revision + 1;
-
+    const submittedAt = Date.now();
+    const pendingMessageId = `${activeSession.id}-planner-pending-${submittedAt}`;
     setSessions((current) =>
       current.map((item) =>
         item.id === activeSession.id
           ? {
               ...item,
-              title: revisedDraft.title,
-              status: "ReadyForApproval",
-              updatedLabel: "방금 전",
-              draft: revisedDraft,
-              revision: nextRevision,
+              status: "Drafting",
+              updatedLabel: "응답 대기",
               messages: [
                 ...item.messages,
                 {
-                  id: `${item.id}-user-${Date.now()}`,
+                  id: `${item.id}-user-${submittedAt}`,
                   role: "user",
                   content: trimmed,
                   createdLabel: "방금 전",
                 },
                 {
-                  id: `${item.id}-planner-${Date.now()}`,
+                  id: pendingMessageId,
                   role: "planner",
-                  content: plannerResult.message ?? plannerRevisionMessage(revisedDraft, nextRevision),
-                  createdLabel: "방금 전",
+                  content: "...",
+                  createdLabel: "진행 중",
+                  pending: true,
                 },
               ],
             }
@@ -187,8 +214,50 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       ),
     );
     setPlannerRequest("");
-    setError(plannerResult.warning ?? null);
-    setBusy(false);
+    setError(null);
+    try {
+      await waitForNextPaint();
+      const fallbackDraft = buildPlannerDraft(
+        `${activeSession.goalText}\n\nplanner message: ${trimmed}`,
+        activeSession.taskId ? activeSession.draft.tasks[0]?.title ?? null : null,
+      );
+      const plannerResult = await runPlannerPlanMode(
+        trimmed,
+        activeSession.goalText,
+        activeSession.draft,
+        fallbackDraft,
+      );
+      const revisedDraft = plannerResult.draft;
+      const nextRevision = activeSession.revision + 1;
+
+      setSessions((current) =>
+        current.map((item) =>
+          item.id === activeSession.id
+            ? {
+                ...item,
+                title: revisedDraft.title,
+                status: "ReadyForApproval",
+                updatedLabel: "방금 전",
+                draft: revisedDraft,
+                revision: nextRevision,
+                messages: item.messages.map((message) =>
+                  message.id === pendingMessageId
+                    ? {
+                        ...message,
+                        content: plannerResult.message ?? plannerRevisionMessage(revisedDraft, nextRevision),
+                        createdLabel: "방금 전",
+                        pending: false,
+                      }
+                    : message,
+                ),
+              }
+            : item,
+        ),
+      );
+      setError(plannerResult.warning ?? null);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function runPlannerPlanMode(
@@ -333,14 +402,26 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
               {activeSession ? (
                 <div className="planning-thread">
                   {activeSession.messages.map((message) => (
-                    <article className={`planning-message ${message.role}`} key={message.id}>
+                    <article
+                      className={`planning-message ${message.role}${message.pending ? " pending" : ""}`}
+                      key={message.id}
+                    >
                       <div className="planning-message-meta">
                         <strong>{message.role === "planner" ? `Planner · v${activeSession.revision}` : "User"}</strong>
                         <span>{message.createdLabel}</span>
                       </div>
-                      <p>{message.content}</p>
+                      {message.pending ? (
+                        <p className="planning-typing" aria-label="Planner가 입력 중입니다.">
+                          <span>.</span>
+                          <span>.</span>
+                          <span>.</span>
+                        </p>
+                      ) : (
+                        <p>{message.content}</p>
+                      )}
                     </article>
                   ))}
+                  <div ref={threadEndRef} />
                 </div>
               ) : (
                 <div className="planning-empty">
@@ -373,6 +454,15 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 onChange={(event) =>
                   activeSession ? setPlannerRequest(event.target.value) : setGoal(event.target.value)
                 }
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+                  event.preventDefault();
+                  if (activeSession) {
+                    void reviseActiveDraft();
+                  } else {
+                    void startPlannerSession();
+                  }
+                }}
                 rows={2}
               />
               {activeSession ? null : (
@@ -396,7 +486,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                   disabled={busy || (activeSession ? !plannerRequest.trim() : !goal.trim())}
                 >
                   <Sparkles size={14} />
-                  {activeSession ? "planner에게 보내기" : "대화 시작"}
+                  {busy ? "planner 실행 중..." : activeSession ? "planner에게 보내기" : "대화 시작"}
                 </button>
               </div>
               {error ? <p className="planning-form-error">{error}</p> : null}
@@ -828,6 +918,12 @@ function normalizeJiraRef(value: string): string {
   const trimmed = value.trim();
   const keyMatch = trimmed.match(/[A-Z][A-Z0-9]+-\d+/i);
   return keyMatch ? keyMatch[0].toUpperCase() : trimmed.toLowerCase();
+}
+
+function waitForNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
 }
 
 function errorMessage(error: unknown): string {
