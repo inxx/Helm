@@ -1,3 +1,4 @@
+import { Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useToast } from "./ToastProvider";
 import { api } from "../lib/api";
@@ -36,7 +37,7 @@ interface TaskDetailProps {
 export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }: TaskDetailProps) {
   const { showToast } = useToast();
   const [status, setStatus] = useState<TaskStatus>("Planned");
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<{ key: string; label: string } | null>(null);
   const [runs, setRuns] = useState<AgentRunSummary[]>([]);
   const [timeline, setTimeline] = useState<TaskTimelineEntry[]>([]);
   const [worktree, setWorktree] = useState<TaskWorktreeSummary | null>(null);
@@ -52,6 +53,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
           approval.status === "Pending",
       )
     : null;
+  const busy = Boolean(busyAction);
 
   useEffect(() => {
     setStatus(task?.status ?? "Planned");
@@ -98,7 +100,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
       return;
     }
     const previousStatus = task.status;
-    setBusy(true);
+    setBusyAction({ key: "status", label: "상태 변경 중" });
     try {
       await api.updateTaskStatus(snapshot.project.id, task.id, status, "수동 상태 변경");
       await onRefresh();
@@ -114,13 +116,13 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
         description: messageFromError(error, "태스크 상태를 변경하지 못했습니다."),
       });
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
   async function runRole(roleId: string) {
     if (!task) return;
-    setBusy(true);
+    setBusyAction({ key: `stub:${roleId}`, label: `${roleLabel(roleId)} fixture 실행 중` });
     try {
       const run = await api.runStubRole(snapshot.project.id, task.id, roleId);
       const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
@@ -140,13 +142,13 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
         description: messageFromError(error, "역할 실행에 실패했습니다."),
       });
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
   async function prepareContext(roleId: string) {
     if (!task) return;
-    setBusy(true);
+    setBusyAction({ key: `prepare:${roleId}`, label: `${roleLabel(roleId)} context 준비 중` });
     try {
       await api.prepareRoleContext(snapshot.project.id, task.id, roleId);
       const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
@@ -166,13 +168,13 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
         description: messageFromError(error, "역할 실행 준비에 실패했습니다."),
       });
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
   async function prepareWorktree() {
     if (!task) return;
-    setBusy(true);
+    setBusyAction({ key: "worktree", label: "Worktree 준비 중" });
     try {
       const nextWorktree = await api.ensureTaskWorktree(snapshot.project.id, task.id);
       setWorktree(nextWorktree);
@@ -190,7 +192,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
         description: messageFromError(error, "태스크 worktree를 준비하지 못했습니다."),
       });
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -222,7 +224,8 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
 
   async function runHost(runId: string) {
     if (!task) return;
-    setBusy(true);
+    const run = runs.find((item) => item.id === runId);
+    setBusyAction({ key: `host:${runId}`, label: `${roleLabel(run?.roleId ?? "host")} host 실행 중` });
     setRuns((current) =>
       current.map((run) => (run.id === runId ? { ...run, status: "Running" } : run)),
     );
@@ -249,13 +252,13 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
         description: messageFromError(error, "Host role 실행에 실패했습니다."),
       });
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
   async function retryHost(runId: string) {
     if (!task) return;
-    setBusy(true);
+    setBusyAction({ key: `retry:${runId}`, label: "재시도 준비 중" });
     try {
       await api.retryHostRole(snapshot.project.id, runId);
       const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
@@ -276,13 +279,13 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
         description: messageFromError(error, "실행을 재시도하지 못했습니다."),
       });
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
   async function cancelHost(runId: string) {
     if (!task) return;
-    setBusy(true);
+    setBusyAction({ key: `cancel:${runId}`, label: "실행 취소 중" });
     try {
       await api.cancelHostRole(snapshot.project.id, runId);
       setRuns((current) =>
@@ -301,7 +304,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
         description: messageFromError(error, "실행을 취소하지 못했습니다."),
       });
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -344,6 +347,13 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
         </div>
       </div>
 
+      {busyAction ? (
+        <div className="operation-status task-operation-status" role="status">
+          <Loader2 className="loading-icon" size={14} aria-hidden />
+          <span>{busyAction.label}</span>
+        </div>
+      ) : null}
+
       <section className="detail-section next-action-panel">
         <h3>다음 액션</h3>
         <NextAction
@@ -354,6 +364,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
           runnerReadiness={activeRunnerReadiness}
           queuedRun={activeQueuedRun}
           retryableRun={activeRetryableRun}
+          busyAction={busyAction}
           onPrepareWorktree={prepareWorktree}
           onPrepareContext={prepareContext}
           onRunHost={runHost}
@@ -446,8 +457,18 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
                 const readiness = runnerReadinessFor(snapshot.settings, roleId);
                 const needsRunner = isCurrentRole && !readiness.ready;
                 const needsWorktree = isCurrentRole && readiness.ready && !worktree;
+                const prepareBusy = busyAction?.key === `prepare:${roleId}`;
+                const stubBusy = busyAction?.key === `stub:${roleId}`;
+                const hostBusy = latestRun ? busyAction?.key === `host:${latestRun.id}` : false;
+                const retryBusy = latestRun ? busyAction?.key === `retry:${latestRun.id}` : false;
+                const cancelBusy = latestRun ? busyAction?.key === `cancel:${latestRun.id}` : false;
+                const roleBusy = prepareBusy || stubBusy || hostBusy || retryBusy || cancelBusy;
                 return (
-                  <li className={isCurrentRole ? "role-lane active" : "role-lane"} key={roleId}>
+                  <li
+                    aria-busy={roleBusy ? true : undefined}
+                    className={`${isCurrentRole ? "role-lane active" : "role-lane"}${roleBusy ? " busy" : ""}`}
+                    key={roleId}
+                  >
                     <div>
                       <strong>{roleLabel(roleId)}</strong>
                       <span>
@@ -465,17 +486,27 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
                         </button>
                       ) : null}
                       {needsWorktree ? (
-                        <button disabled={busy} onClick={prepareWorktree} type="button">
-                          worktree 준비
+                        <button
+                          aria-busy={busyAction?.key === "worktree" ? true : undefined}
+                          className={busyAction?.key === "worktree" ? "loading-button is-loading" : "loading-button"}
+                          disabled={busy}
+                          onClick={prepareWorktree}
+                          type="button"
+                        >
+                          {busyAction?.key === "worktree" ? <Loader2 className="loading-icon" size={12} aria-hidden /> : null}
+                          {busyAction?.key === "worktree" ? "준비 중..." : "worktree 준비"}
                         </button>
                       ) : null}
                       {isCurrentRole && !needsRunner && !needsWorktree && !latestRun ? (
                         <button
+                          aria-busy={prepareBusy ? true : undefined}
+                          className={prepareBusy ? "loading-button is-loading" : "loading-button"}
                           disabled={busy}
                           onClick={() => prepareContext(roleId)}
                           type="button"
                         >
-                          실행 준비
+                          {prepareBusy ? <Loader2 className="loading-icon" size={12} aria-hidden /> : null}
+                          {prepareBusy ? "준비 중..." : "실행 준비"}
                         </button>
                       ) : null}
                       {latestRun?.status === "Queued" ? (
@@ -483,19 +514,40 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
                           <button onClick={() => showArtifact(latestRun.id, "context-pack.md")} type="button">
                             context
                           </button>
-                          <button disabled={busy} onClick={() => runHost(latestRun.id)} type="button">
-                            host 실행
+                          <button
+                            aria-busy={hostBusy ? true : undefined}
+                            className={hostBusy ? "loading-button is-loading" : "loading-button"}
+                            disabled={busy}
+                            onClick={() => runHost(latestRun.id)}
+                            type="button"
+                          >
+                            {hostBusy ? <Loader2 className="loading-icon" size={12} aria-hidden /> : null}
+                            {hostBusy ? "실행 중..." : "host 실행"}
                           </button>
                         </>
                       ) : null}
                       {latestRun?.status === "Running" ? (
-                        <button onClick={() => cancelHost(latestRun.id)} type="button">
-                          cancel
+                        <button
+                          aria-busy={cancelBusy ? true : undefined}
+                          className={cancelBusy ? "loading-button is-loading" : "loading-button"}
+                          disabled={busy}
+                          onClick={() => cancelHost(latestRun.id)}
+                          type="button"
+                        >
+                          {cancelBusy ? <Loader2 className="loading-icon" size={12} aria-hidden /> : null}
+                          {cancelBusy ? "취소 중..." : "cancel"}
                         </button>
                       ) : null}
                       {latestRun && isRetryableRunStatus(latestRun.status) ? (
-                        <button disabled={busy} onClick={() => retryHost(latestRun.id)} type="button">
-                          retry
+                        <button
+                          aria-busy={retryBusy ? true : undefined}
+                          className={retryBusy ? "loading-button is-loading" : "loading-button"}
+                          disabled={busy}
+                          onClick={() => retryHost(latestRun.id)}
+                          type="button"
+                        >
+                          {retryBusy ? <Loader2 className="loading-icon" size={12} aria-hidden /> : null}
+                          {retryBusy ? "준비 중..." : "retry"}
                         </button>
                       ) : null}
                       {!isCurrentRole && !latestRun ? <span>현재 단계 아님</span> : null}
@@ -508,18 +560,40 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
               <summary>개발용 실행 도구</summary>
               <p className="muted">fixture 검증이나 context pack 재생성이 필요할 때만 사용합니다.</p>
               <div className="role-grid">
-                {ROLE_IDS.map((roleId) => (
-                  <button disabled={busy} key={`context-${roleId}`} onClick={() => prepareContext(roleId)} type="button">
-                    {roleLabel(roleId)} context
-                  </button>
-                ))}
+                {ROLE_IDS.map((roleId) => {
+                  const prepareBusy = busyAction?.key === `prepare:${roleId}`;
+                  return (
+                    <button
+                      aria-busy={prepareBusy ? true : undefined}
+                      className={prepareBusy ? "loading-button is-loading" : "loading-button"}
+                      disabled={busy}
+                      key={`context-${roleId}`}
+                      onClick={() => prepareContext(roleId)}
+                      type="button"
+                    >
+                      {prepareBusy ? <Loader2 className="loading-icon" size={12} aria-hidden /> : null}
+                      {prepareBusy ? `${roleLabel(roleId)} 준비 중` : `${roleLabel(roleId)} context`}
+                    </button>
+                  );
+                })}
               </div>
               <div className="role-grid">
-                {ROLE_IDS.map((roleId) => (
-                  <button disabled={busy} key={`stub-${roleId}`} onClick={() => runRole(roleId)} type="button">
-                    {roleLabel(roleId)} stub
-                  </button>
-                ))}
+                {ROLE_IDS.map((roleId) => {
+                  const stubBusy = busyAction?.key === `stub:${roleId}`;
+                  return (
+                    <button
+                      aria-busy={stubBusy ? true : undefined}
+                      className={stubBusy ? "loading-button is-loading" : "loading-button"}
+                      disabled={busy}
+                      key={`stub-${roleId}`}
+                      onClick={() => runRole(roleId)}
+                      type="button"
+                    >
+                      {stubBusy ? <Loader2 className="loading-icon" size={12} aria-hidden /> : null}
+                      {stubBusy ? `${roleLabel(roleId)} 실행 중` : `${roleLabel(roleId)} stub`}
+                    </button>
+                  );
+                })}
               </div>
             </details>
           </section>
@@ -546,8 +620,15 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
             ) : (
               <p className="muted">아직 태스크 전용 worktree가 없습니다.</p>
             )}
-            <button className="secondary-button" disabled={busy} onClick={prepareWorktree} type="button">
-              worktree 준비
+            <button
+              aria-busy={busyAction?.key === "worktree" ? true : undefined}
+              className={busyAction?.key === "worktree" ? "secondary-button loading-button is-loading" : "secondary-button loading-button"}
+              disabled={busy}
+              onClick={prepareWorktree}
+              type="button"
+            >
+              {busyAction?.key === "worktree" ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+              {busyAction?.key === "worktree" ? "준비 중..." : "worktree 준비"}
             </button>
           </section>
 
@@ -575,11 +656,20 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
             <h3>실행 기록</h3>
             {runs.length === 0 ? <p className="muted">아직 실행 기록이 없습니다.</p> : null}
             <ul className="run-list">
-              {runs.map((run) => (
-                <li key={run.id}>
+              {runs.map((run) => {
+                const runBusy =
+                  run.status === "Running" ||
+                  busyAction?.key === `host:${run.id}` ||
+                  busyAction?.key === `retry:${run.id}` ||
+                  busyAction?.key === `cancel:${run.id}`;
+                return (
+                <li aria-busy={runBusy ? true : undefined} className={runBusy ? "busy" : undefined} key={run.id}>
                   <div>
                     <strong>{roleLabel(run.roleId)}</strong>
-                    <span>{run.status} · {run.resultStatus ?? "-"}</span>
+                    <span>
+                      {runBusy ? <Loader2 className="loading-icon" size={12} aria-hidden /> : null}
+                      {run.status} · {run.resultStatus ?? "-"}
+                    </span>
                   </div>
                   <div className="artifact-actions">
                     <button onClick={() => showArtifact(run.id, "summary.md")} type="button">summary</button>
@@ -597,7 +687,8 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
                     ) : null}
                   </div>
                 </li>
-              ))}
+                );
+              })}
             </ul>
             {artifact ? <pre className="artifact-viewer">{artifact}</pre> : null}
           </section>
@@ -616,6 +707,7 @@ interface NextActionProps {
   runnerReadiness: ReturnType<typeof runnerReadinessFor> | null;
   queuedRun: AgentRunSummary | null;
   retryableRun: AgentRunSummary | null;
+  busyAction: { key: string; label: string } | null;
   onPrepareWorktree: () => Promise<void>;
   onPrepareContext: (roleId: string) => Promise<void>;
   onRunHost: (runId: string) => Promise<void>;
@@ -632,6 +724,7 @@ function NextAction({
   runnerReadiness,
   queuedRun,
   retryableRun,
+  busyAction,
   onPrepareWorktree,
   onPrepareContext,
   onRunHost,
@@ -686,6 +779,8 @@ function NextAction({
     );
   }
 
+  const worktreeBusy = busyAction?.key === "worktree";
+
   if (!worktree) {
     return (
       <div className="next-action-card">
@@ -693,8 +788,15 @@ function NextAction({
           <strong>Worktree 준비</strong>
           <p>실제 role 실행을 위해 태스크 전용 branch와 worktree를 만듭니다.</p>
         </div>
-        <button className="primary-button" disabled={busy} onClick={() => void onPrepareWorktree()} type="button">
-          worktree 준비
+        <button
+          aria-busy={worktreeBusy ? true : undefined}
+          className={worktreeBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+          disabled={busy}
+          onClick={() => void onPrepareWorktree()}
+          type="button"
+        >
+          {worktreeBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+          {worktreeBusy ? "준비 중..." : "worktree 준비"}
         </button>
       </div>
     );
@@ -715,18 +817,28 @@ function NextAction({
   }
 
   if (queuedRun) {
+    const hostBusy = busyAction?.key === `host:${queuedRun.id}`;
     return (
       <div className="next-action-card">
         <div>
           <strong>{roleLabel(action.roleId)} host 실행</strong>
           <p>준비된 Context Pack으로 host runner를 실행합니다.</p>
         </div>
-        <button className="primary-button" disabled={busy} onClick={() => void onRunHost(queuedRun.id)} type="button">
-          host 실행
+        <button
+          aria-busy={hostBusy ? true : undefined}
+          className={hostBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+          disabled={busy}
+          onClick={() => void onRunHost(queuedRun.id)}
+          type="button"
+        >
+          {hostBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+          {hostBusy ? "실행 중..." : "host 실행"}
         </button>
       </div>
     );
   }
+
+  const prepareBusy = busyAction?.key === `prepare:${action.roleId}`;
 
   return (
     <div className="next-action-card">
@@ -735,12 +847,14 @@ function NextAction({
         <p>{action.description}</p>
       </div>
       <button
-        className="primary-button"
+        aria-busy={prepareBusy ? true : undefined}
+        className={prepareBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
         disabled={busy}
         onClick={() => void onPrepareContext(action.roleId)}
         type="button"
       >
-        {action.button}
+        {prepareBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+        {prepareBusy ? "준비 중..." : action.button}
       </button>
     </div>
   );

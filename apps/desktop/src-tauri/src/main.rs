@@ -2030,18 +2030,21 @@ fn refresh_available_models(connection: &Value, cwd: &Path) -> ModelRefreshResul
     match cli_refresh.models {
         Some(models) if !models.is_empty() => ModelRefreshResult {
             message: Some(format!(
-                "{} CLI /model fallback으로 모델 {}개를 갱신했습니다.",
+                "{} {}",
                 api_refresh
                     .message
                     .unwrap_or_else(|| "API 모델 목록을 사용할 수 없습니다.".to_string()),
-                models.len()
+                cli_refresh.message.unwrap_or_else(|| format!(
+                    "CLI fallback으로 모델 {}개를 갱신했습니다.",
+                    models.len()
+                ))
             )),
             models: Some(models),
         },
         _ => ModelRefreshResult {
             models: None,
             message: Some(format!(
-                "{} CLI /model fallback도 실패했습니다. {}",
+                "{} {}",
                 api_refresh
                     .message
                     .unwrap_or_else(|| "API 모델 목록을 사용할 수 없습니다.".to_string()),
@@ -2157,13 +2160,7 @@ fn fetch_json_with_curl(url: &str, headers: Vec<String>) -> Result<Value, String
 fn refresh_cli_models(connection: &Value, provider: &str, cwd: &Path) -> ModelRefreshResult {
     if provider == "codex" {
         let debug_refresh = refresh_codex_debug_models(connection, cwd);
-        if debug_refresh
-            .models
-            .as_ref()
-            .is_some_and(|models| !models.is_empty())
-        {
-            return debug_refresh;
-        }
+        return debug_refresh;
     }
 
     if provider == "claude" {
@@ -2277,7 +2274,8 @@ fn refresh_codex_debug_models(connection: &Value, cwd: &Path) -> ModelRefreshRes
     ];
     match run_direct_command_with_timeout(cwd, &command, Duration::from_secs(10)) {
         Ok(output) if output.exit_code == 0 && !output.timed_out => {
-            match serde_json::from_str::<Value>(&output.stdout) {
+            let raw_output = format!("{}\n{}", output.stdout, output.stderr);
+            match parse_json_value_from_output(&raw_output) {
                 Ok(value) => {
                     let models = codex_debug_model_ids(&value);
                     if models.is_empty() {
@@ -2299,7 +2297,10 @@ fn refresh_codex_debug_models(connection: &Value, cwd: &Path) -> ModelRefreshRes
                 }
                 Err(err) => ModelRefreshResult {
                     models: None,
-                    message: Some(format!("Codex debug models JSON 파싱 실패: {err}")),
+                    message: Some(format!(
+                        "Codex debug models JSON 파싱 실패: {err}. {}",
+                        compact_output_excerpt(&strip_terminal_controls(&raw_output))
+                    )),
                 },
             }
         }
@@ -2331,6 +2332,36 @@ fn codex_debug_model_ids(value: &Value) -> Vec<String> {
     models.sort();
     models.dedup();
     models
+}
+
+fn parse_json_value_from_output(output: &str) -> Result<Value, String> {
+    let text = strip_terminal_controls(output);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("출력이 비어 있습니다.".to_string());
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return Ok(value);
+    }
+
+    for (start, open, close) in [(trimmed.find('{'), '{', '}'), (trimmed.find('['), '[', ']')] {
+        let Some(start) = start else {
+            continue;
+        };
+        for (end, _) in trimmed.rmatch_indices(close) {
+            if end <= start {
+                continue;
+            }
+            let candidate = &trimmed[start..=end];
+            if let Ok(value) = serde_json::from_str::<Value>(candidate) {
+                return Ok(value);
+            }
+        }
+        return Err(format!("JSON {open}{close} 구간을 파싱하지 못했습니다."));
+    }
+
+    Err("출력에서 JSON 시작점을 찾지 못했습니다.".to_string())
 }
 
 fn cli_model_command(connection: &Value, provider: &str, cwd: &Path) -> Option<Vec<String>> {

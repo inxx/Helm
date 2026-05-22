@@ -1,4 +1,4 @@
-import { CheckCircle2, Sparkles } from "lucide-react";
+import { CheckCircle2, Loader2, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type { CreateTaskInput, PlannerConversationResult, ProjectSnapshot, TaskSummary } from "../lib/types";
@@ -58,6 +58,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   const [jiraRef, setJiraRef] = useState("");
   const [sessions, setSessions] = useState<PlanningSessionStub[]>([]);
   const [busy, setBusy] = useState(false);
+  const [plannerOperation, setPlannerOperation] = useState<"planner" | "approve" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -93,6 +94,9 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   const draftJiraState = activeSession?.jiraState ?? jiraStateForInput(projectSnapshot, jiraRef);
   const jiraChecks = jiraPlanningChecks(projectSnapshot, draftJiraRef, draftJiraState);
   const draft = activeSession?.draft ?? (goal.trim() ? buildPlannerDraft(goal, null) : null);
+  const plannerPending = Boolean(activeSession?.messages.some((message) => message.pending));
+  const plannerRunning = plannerOperation === "planner" || plannerPending;
+  const approvingPlan = plannerOperation === "approve";
 
   function startNewPlan() {
     setActiveSessionId(null);
@@ -145,6 +149,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     setGoal("");
     setPlannerRequest("");
     setError(null);
+    setPlannerOperation("planner");
     setBusy(true);
     try {
       await waitForNextPaint();
@@ -175,6 +180,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       );
       setError(plannerResult.warning ?? null);
     } finally {
+      setPlannerOperation(null);
       setBusy(false);
     }
   }
@@ -183,6 +189,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     const trimmed = plannerRequest.trim();
     if (!activeSession || !trimmed || busy) return;
 
+    setPlannerOperation("planner");
     setBusy(true);
     const submittedAt = Date.now();
     const pendingMessageId = `${activeSession.id}-planner-pending-${submittedAt}`;
@@ -256,6 +263,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       );
       setError(plannerResult.warning ?? null);
     } finally {
+      setPlannerOperation(null);
       setBusy(false);
     }
   }
@@ -302,6 +310,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       return;
     }
 
+    setPlannerOperation("approve");
     setBusy(true);
     try {
       if (activeSession.taskId && activeSession.jiraState === "AlreadyTracked") {
@@ -344,6 +353,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     } catch (err) {
       setError(errorMessage(err));
     } finally {
+      setPlannerOperation(null);
       setBusy(false);
     }
   }
@@ -390,17 +400,29 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         </aside>
 
         <div className="planning-workspace">
-          <section className="planning-canvas">
+          <section className="planning-canvas" aria-busy={plannerRunning ? true : undefined}>
             <header className="section-header">
               <div>
                 <h2>{activeSession?.title ?? "새 계획"}</h2>
                 <p>planner와 대화하면서 계획 문서를 고정하고, 승인한 문서만 Helm Task로 변환합니다.</p>
               </div>
+              {plannerRunning ? (
+                <span className="operation-pill" role="status">
+                  <Loader2 className="loading-icon" size={14} aria-hidden />
+                  planner 실행 중
+                </span>
+              ) : null}
             </header>
 
             <div className="planning-canvas-body">
               {activeSession ? (
                 <div className="planning-thread">
+                  {plannerRunning ? (
+                    <div className="operation-status planning-operation-status" role="status">
+                      <Loader2 className="loading-icon" size={14} aria-hidden />
+                      <span>planner가 응답을 만들고 있습니다.</span>
+                    </div>
+                  ) : null}
                   {activeSession.messages.map((message) => (
                     <article
                       className={`planning-message ${message.role}${message.pending ? " pending" : ""}`}
@@ -482,11 +504,16 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 </span>
                 <button
                   type="submit"
-                  className="primary-button"
+                  aria-busy={plannerRunning ? true : undefined}
+                  className={plannerRunning ? "primary-button loading-button is-loading" : "primary-button loading-button"}
                   disabled={busy || (activeSession ? !plannerRequest.trim() : !goal.trim())}
                 >
-                  <Sparkles size={14} />
-                  {busy ? "planner 실행 중..." : activeSession ? "planner에게 보내기" : "대화 시작"}
+                  {plannerRunning ? (
+                    <Loader2 className="loading-icon" size={14} aria-hidden />
+                  ) : (
+                    <Sparkles size={14} aria-hidden />
+                  )}
+                  {plannerRunning ? "planner 실행 중..." : activeSession ? "planner에게 보내기" : "대화 시작"}
                 </button>
               </div>
               {error ? <p className="planning-form-error">{error}</p> : null}
@@ -498,9 +525,11 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
               <h3>Plan Document</h3>
               <span className="status-pill">
                 {activeSession
-                  ? activeSession.status === "Approved"
-                    ? "태스크 생성됨"
-                    : jiraStateLabel(activeSession.jiraState)
+                  ? plannerRunning
+                    ? "planner 실행 중"
+                    : activeSession.status === "Approved"
+                      ? "태스크 생성됨"
+                      : jiraStateLabel(activeSession.jiraState)
                   : goal.trim()
                     ? "작성 중"
                     : "아직 초안 없음"}
@@ -591,14 +620,21 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                   {activeSession ? (
                     <button
                       type="button"
-                      className="primary-button"
+                      aria-busy={approvingPlan ? true : undefined}
+                      className={approvingPlan ? "primary-button loading-button is-loading" : "primary-button loading-button"}
                       disabled={busy || activeSession.status === "Approved"}
                       onClick={() => {
                         void approvePlanDraft();
                       }}
                     >
-                      <CheckCircle2 size={14} />
-                      {activeSession.taskId && activeSession.jiraState === "AlreadyTracked"
+                      {approvingPlan ? (
+                        <Loader2 className="loading-icon" size={14} aria-hidden />
+                      ) : (
+                        <CheckCircle2 size={14} aria-hidden />
+                      )}
+                      {approvingPlan
+                        ? "Task 생성 중..."
+                        : activeSession.taskId && activeSession.jiraState === "AlreadyTracked"
                         ? "기존 Task 열기"
                         : "승인하고 Task 생성"}
                     </button>
@@ -849,9 +885,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function plannerResultWarning(result: PlannerConversationResult): string | null {
   if (result.timedOut) return "planner plan mode가 timeout 되어 local draft를 유지했습니다.";
   if (result.exitCode !== 0) {
-    return result.stderr.trim() || `planner plan mode가 exit code ${result.exitCode}로 종료되었습니다.`;
+    return plannerFailureMessage(result);
   }
   return null;
+}
+
+function plannerFailureMessage(result: PlannerConversationResult): string {
+  const rawMessage = result.stderr.trim() || result.responseText.trim();
+  const normalized = rawMessage.toLowerCase();
+
+  if (result.provider === "claude" && normalized.includes("not logged in")) {
+    return "Claude CLI는 설치되어 있지만 로그인 상태가 아니어서 planner를 실행하지 못했습니다. 터미널에서 claude를 열고 /login을 실행한 뒤 다시 확인하세요.";
+  }
+
+  if (result.provider === "claude" && normalized.includes("organization does not have access")) {
+    return "Claude CLI는 설치되어 있지만 현재 로그인된 조직에 Claude Code 접근 권한이 없어 planner를 실행하지 못했습니다. 설정에서 Codex를 planner로 선택하거나 Claude 계정/조직 권한을 확인하세요.";
+  }
+
+  return rawMessage || `planner plan mode가 exit code ${result.exitCode}로 종료되었습니다.`;
 }
 
 function plannerMessageFromResult(result: PlannerConversationResult, draft: PlannerDraft): string {

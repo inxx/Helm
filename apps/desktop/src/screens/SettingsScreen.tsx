@@ -1,5 +1,5 @@
-import { CheckCircle2, Download, FolderTree, Info, Layers, Plug, RefreshCw, Workflow, Wrench, XCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { CheckCircle2, Download, FolderTree, Info, Layers, Loader2, Plug, RefreshCw, Workflow, Wrench, XCircle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { roleLabel, runnerReadinessFor } from "../lib/runnerReadiness";
 import { checkForManualUpdate, type ManualUpdateInfo } from "../lib/updater";
@@ -59,8 +59,10 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const [templates, setTemplates] = useState<RunnerTemplateSummary[]>([]);
   const [runnerChecks, setRunnerChecks] = useState<RunnerCheckResult[]>([]);
   const [connectionChecks, setConnectionChecks] = useState<Record<string, AiConnectionCheckResult>>({});
+  const [connectionCheckBusyId, setConnectionCheckBusyId] = useState<string | null>(null);
   const [modelRefreshes, setModelRefreshes] = useState<Record<string, ModelRefreshState>>({});
-  const [autoModelRefreshDone, setAutoModelRefreshDone] = useState<Record<string, boolean>>({});
+  const autoModelRefreshDoneRef = useRef<Set<string>>(new Set());
+  const [connectionsPanelReady, setConnectionsPanelReady] = useState(false);
   const [aiConnections, setAiConnections] = useState<AiConnection[]>([]);
   const [roleAssignments, setRoleAssignments] = useState<RoleAssignment[]>([]);
   const [jiraConfig, setJiraConfig] = useState<JiraConfig>(emptyJiraConfig());
@@ -80,27 +82,58 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     void api.listRunnerTemplates(snapshot.project.id).then(setTemplates);
     setRunnerChecks([]);
     setConnectionChecks({});
+    setConnectionCheckBusyId(null);
     setModelRefreshes({});
-    setAutoModelRefreshDone({});
+    autoModelRefreshDoneRef.current.clear();
+    setConnectionsPanelReady(false);
     setMessage(null);
   }, [snapshot]);
 
   useEffect(() => {
-    if (!snapshot || activeCategory !== "connections") return;
+    if (activeCategory !== "connections") {
+      setConnectionsPanelReady(false);
+      return;
+    }
+
+    setConnectionsPanelReady(false);
+    let timeoutId: number | null = null;
+    const frameId = window.requestAnimationFrame(() => {
+      timeoutId = window.setTimeout(() => setConnectionsPanelReady(true), 0);
+    });
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
+  }, [activeCategory]);
+
+  useEffect(() => {
+    if (!snapshot || activeCategory !== "connections" || !connectionsPanelReady) return;
 
     const candidates = aiConnections.filter(
       (connection) =>
         canRefreshModels(connection.provider) &&
-        !autoModelRefreshDone[connection.id] &&
+        !autoModelRefreshDoneRef.current.has(connection.id) &&
         !modelRefreshes[connection.id]?.busy,
     );
     if (candidates.length === 0) return;
 
-    for (const connection of candidates) {
-      setAutoModelRefreshDone((current) => ({ ...current, [connection.id]: true }));
-      void refreshConnectionModels(connection, { silent: true });
-    }
-  }, [activeCategory, aiConnections, autoModelRefreshDone, modelRefreshes, snapshot]);
+    let cancelled = false;
+    const timerId = window.setTimeout(() => {
+      void (async () => {
+        for (const connection of candidates) {
+          if (cancelled) return;
+          autoModelRefreshDoneRef.current.add(connection.id);
+          await refreshConnectionModels(connection, { silent: true });
+          await delay(100);
+        }
+      })();
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
+  }, [activeCategory, aiConnections, connectionsPanelReady, snapshot?.project.id]);
 
   const enabledConnections = useMemo(
     () => aiConnections.filter((connection) => connection.enabled),
@@ -205,7 +238,8 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
 
   async function checkConnection(connection: AiConnection) {
     if (!snapshot) return;
-    setBusy(true);
+    if (connectionCheckBusyId) return;
+    setConnectionCheckBusyId(connection.id);
     setMessage(null);
     try {
       const result = await api.checkAiConnection(snapshot.project.id, connection);
@@ -243,7 +277,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     } catch (error) {
       setMessage({ tone: "error", text: errorMessage(error, "AI CLI 확인에 실패했습니다.") });
     } finally {
-      setBusy(false);
+      setConnectionCheckBusyId(null);
     }
   }
 
@@ -309,11 +343,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
       if (current.some((connection) => connection.id === candidate.id)) return current;
       return [...current, candidate];
     });
-    setAutoModelRefreshDone((current) => {
-      const next = { ...current };
-      delete next[candidate.id];
-      return next;
-    });
+    autoModelRefreshDoneRef.current.delete(candidate.id);
     setModelRefreshes((current) => {
       const next = { ...current };
       delete next[candidate.id];
@@ -330,11 +360,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
 
   function removeConnection(id: string) {
     setAiConnections((current) => current.filter((connection) => connection.id !== id));
-    setAutoModelRefreshDone((current) => {
-      const next = { ...current };
-      delete next[id];
-      return next;
-    });
+    autoModelRefreshDoneRef.current.delete(id);
     setModelRefreshes((current) => {
       const next = { ...current };
       delete next[id];
@@ -547,136 +573,162 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                     + Claude
                   </button>
                 </div>
-                <div className="connection-list">
-                  {aiConnections.length === 0 ? (
-                    <p className="settings-empty">
-                      등록된 AI CLI 연결이 없습니다. template을 적용하거나 CLI 연결을 추가하세요.
-                    </p>
-                  ) : (
-                    aiConnections.map((connection) => {
-                      const check = connectionChecks[connection.id];
-                      const modelRefresh = modelRefreshes[connection.id];
-                      return (
-                        <article className="connection-card" key={connection.id}>
-                          <div className="connection-card-header">
-                            <label className="toggle-switch">
-                              <input
-                                checked={connection.enabled}
-                                onChange={(event) =>
-                                  updateConnection(connection.id, { enabled: event.target.checked })
-                                }
-                                type="checkbox"
-                              />
-                              <span className="toggle-switch-track" aria-hidden />
-                              <span className="toggle-switch-label">{connection.label}</span>
-                            </label>
-                            <div className="connection-card-meta">
-                              <span className="provider-pill">{connection.provider}</span>
-                              {check ? (
-                                <span className={check.available ? "check-pass" : "check-fail"}>
-                                  {check.available ? "프롬프트 OK" : "확인 필요"}
-                                </span>
-                              ) : null}
-                              {modelRefresh?.busy ? <span className="check-info">모델 확인 중</span> : null}
+                {!connectionsPanelReady ? (
+                  <ConnectionPanelSkeleton />
+                ) : (
+                  <div className="connection-list">
+                    {aiConnections.length === 0 ? (
+                      <p className="settings-empty">
+                        등록된 AI CLI 연결이 없습니다. template을 적용하거나 CLI 연결을 추가하세요.
+                      </p>
+                    ) : (
+                      aiConnections.map((connection) => {
+                        const check = connectionChecks[connection.id];
+                        const modelRefresh = modelRefreshes[connection.id];
+                        const isChecking = connectionCheckBusyId === connection.id;
+                        const isModelRefreshing = Boolean(modelRefresh?.busy);
+                        const isConnectionBusy = isChecking || isModelRefreshing;
+                        const modelList = connection.availableModels ?? [];
+                        const showModelSkeleton = isModelRefreshing && modelList.length === 0;
+                        return (
+                          <article
+                            aria-busy={isConnectionBusy ? true : undefined}
+                            className={isConnectionBusy ? "connection-card is-loading" : "connection-card"}
+                            key={connection.id}
+                          >
+                            <div className="connection-card-header">
+                              <label className="toggle-switch">
+                                <input
+                                  checked={connection.enabled}
+                                  onChange={(event) =>
+                                    updateConnection(connection.id, { enabled: event.target.checked })
+                                  }
+                                  type="checkbox"
+                                />
+                                <span className="toggle-switch-track" aria-hidden />
+                                <span className="toggle-switch-label">{connection.label}</span>
+                              </label>
+                              <div className="connection-card-meta">
+                                <span className="provider-pill">{connection.provider}</span>
+                                {check ? (
+                                  <span className={check.available ? "check-pass" : "check-fail"}>
+                                    {check.available ? "프롬프트 OK" : "확인 필요"}
+                                  </span>
+                                ) : null}
+                                {modelRefresh?.busy ? <span className="check-info">모델 확인 중</span> : null}
+                                {isChecking ? <span className="check-info">프롬프트 확인 중</span> : null}
+                              </div>
                             </div>
-                          </div>
-                          <div className="connection-fields">
-                            <label>
-                              <span>이름</span>
-                              <input
-                                value={connection.label}
-                                onChange={(event) =>
-                                  updateConnection(connection.id, { label: event.target.value })
-                                }
-                              />
-                            </label>
-                            <label>
-                              <span>기본 모델</span>
-                              <input
-                                placeholder={defaultModelPlaceholder(connection.provider)}
-                                value={connection.defaultModel ?? ""}
-                                onChange={(event) =>
-                                  updateConnection(connection.id, {
-                                    defaultModel: event.target.value.trim() ? event.target.value.trim() : null,
-                                  })
-                                }
-                              />
-                            </label>
-                            <label>
-                              <span>모델 목록</span>
-                              <input
-                                placeholder="쉼표로 구분"
-                                value={(connection.availableModels ?? []).join(", ")}
-                                onChange={(event) =>
-                                  updateConnection(connection.id, {
-                                    availableModels: splitModelList(event.target.value),
-                                  })
-                                }
-                              />
-                            </label>
-                            <label>
-                              <span>Timeout (s)</span>
-                              <input
-                                min={1}
-                                type="number"
-                                value={connection.timeoutSeconds}
-                                onChange={(event) =>
-                                  updateConnection(connection.id, {
-                                    timeoutSeconds: Math.max(1, Number(event.target.value) || 1),
-                                  })
-                                }
-                              />
-                            </label>
-                          </div>
-                          <code className="command-preview">
-                            {connection.commandArgs.join(" ") || "command 없음"}
-                          </code>
-                          {connection.planningCommandArgs?.length ? (
+                            <div className="connection-fields">
+                              <label>
+                                <span>이름</span>
+                                <input
+                                  value={connection.label}
+                                  onChange={(event) =>
+                                    updateConnection(connection.id, { label: event.target.value })
+                                  }
+                                />
+                              </label>
+                              <label>
+                                <span>기본 모델</span>
+                                <input
+                                  placeholder={defaultModelPlaceholder(connection.provider)}
+                                  value={connection.defaultModel ?? ""}
+                                  onChange={(event) =>
+                                    updateConnection(connection.id, {
+                                      defaultModel: event.target.value.trim() ? event.target.value.trim() : null,
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label aria-busy={modelRefresh?.busy ? true : undefined}>
+                                <span>모델 목록</span>
+                                {showModelSkeleton ? (
+                                  <ModelListSkeleton />
+                                ) : (
+                                  <input
+                                    placeholder="쉼표로 구분"
+                                    value={modelList.join(", ")}
+                                    onChange={(event) =>
+                                      updateConnection(connection.id, {
+                                        availableModels: splitModelList(event.target.value),
+                                      })
+                                    }
+                                  />
+                                )}
+                                {modelRefresh?.busy && modelList.length > 0 ? (
+                                  <span className="model-list-inline-loading" role="status">
+                                    최신 모델 확인 중
+                                  </span>
+                                ) : null}
+                              </label>
+                              <label>
+                                <span>Timeout (s)</span>
+                                <input
+                                  min={1}
+                                  type="number"
+                                  value={connection.timeoutSeconds}
+                                  onChange={(event) =>
+                                    updateConnection(connection.id, {
+                                      timeoutSeconds: Math.max(1, Number(event.target.value) || 1),
+                                    })
+                                  }
+                                />
+                              </label>
+                            </div>
                             <code className="command-preview">
-                              plan: {connection.planningCommandArgs.join(" ")}
+                              {connection.commandArgs.join(" ") || "command 없음"}
                             </code>
-                          ) : null}
-                          {check?.message ? <p className="muted">{check.message}</p> : null}
-                          {check?.modelRefreshMessage ? <p className="muted">{check.modelRefreshMessage}</p> : null}
-                          {!check?.modelRefreshMessage && modelRefresh?.message ? (
-                            <p className={`model-refresh-message model-refresh-message-${modelRefresh.tone}`}>
-                              {modelRefresh.message}
-                            </p>
-                          ) : null}
-                          <div className="connection-card-actions">
-                            {canRefreshModels(connection.provider) ? (
+                            {connection.planningCommandArgs?.length ? (
+                              <code className="command-preview">
+                                plan: {connection.planningCommandArgs.join(" ")}
+                              </code>
+                            ) : null}
+                            {check?.message ? <p className="muted">{check.message}</p> : null}
+                            {check?.modelRefreshMessage ? <p className="muted">{check.modelRefreshMessage}</p> : null}
+                            {!check?.modelRefreshMessage && modelRefresh?.message ? (
+                              <p className={`model-refresh-message model-refresh-message-${modelRefresh.tone}`}>
+                                {modelRefresh.message}
+                              </p>
+                            ) : null}
+                            <div className="connection-card-actions">
+                              {canRefreshModels(connection.provider) ? (
+                                <button
+                                  aria-busy={isModelRefreshing ? true : undefined}
+                                  className={isModelRefreshing ? "secondary-button loading-button is-loading" : "secondary-button loading-button"}
+                                  disabled={isModelRefreshing || isChecking}
+                                  onClick={() => refreshConnectionModels(connection)}
+                                  type="button"
+                                >
+                                  <RefreshCw className={isModelRefreshing ? "loading-icon" : undefined} size={14} aria-hidden />
+                                  {isModelRefreshing ? "불러오는 중..." : "모델 불러오기"}
+                                </button>
+                              ) : null}
                               <button
-                                className="secondary-button"
-                                disabled={modelRefresh?.busy}
-                                onClick={() => refreshConnectionModels(connection)}
+                                aria-busy={isChecking ? true : undefined}
+                                className={isChecking ? "secondary-button loading-button is-loading" : "secondary-button loading-button"}
+                                disabled={busy || isChecking || isModelRefreshing}
+                                onClick={() => checkConnection(connection)}
                                 type="button"
                               >
-                                <RefreshCw size={14} aria-hidden />
-                                {modelRefresh?.busy ? "불러오는 중..." : "모델 불러오기"}
+                                {isChecking ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+                                {isChecking ? "확인 중..." : "연동 확인"}
                               </button>
-                            ) : null}
-                            <button
-                              className="secondary-button"
-                              disabled={busy}
-                              onClick={() => checkConnection(connection)}
-                              type="button"
-                            >
-                              연동 확인
-                            </button>
-                            <button
-                              className="secondary-button danger"
-                              disabled={busy}
-                              onClick={() => removeConnection(connection.id)}
-                              type="button"
-                            >
-                              삭제
-                            </button>
-                          </div>
-                        </article>
-                      );
-                    })
-                  )}
-                </div>
+                              <button
+                                className="secondary-button danger"
+                                disabled={busy || isChecking || isModelRefreshing}
+                                onClick={() => removeConnection(connection.id)}
+                                type="button"
+                              >
+                                삭제
+                              </button>
+                            </div>
+                          </article>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
               </section>
             ) : null}
 
@@ -907,6 +959,42 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   );
 }
 
+function ConnectionPanelSkeleton() {
+  return (
+    <div className="connection-list" aria-label="AI CLI 연결 불러오는 중">
+      {[0, 1].map((item) => (
+        <article className="connection-card connection-card-skeleton" key={item}>
+          <div className="connection-card-header">
+            <span className="settings-skeleton settings-skeleton-title" />
+            <span className="settings-skeleton settings-skeleton-pill" />
+          </div>
+          <div className="connection-fields">
+            <span className="settings-skeleton settings-skeleton-field" />
+            <span className="settings-skeleton settings-skeleton-field" />
+            <span className="settings-skeleton settings-skeleton-field" />
+            <span className="settings-skeleton settings-skeleton-field" />
+          </div>
+          <span className="settings-skeleton settings-skeleton-command" />
+          <div className="connection-card-actions">
+            <span className="settings-skeleton settings-skeleton-button" />
+            <span className="settings-skeleton settings-skeleton-button" />
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function ModelListSkeleton() {
+  return (
+    <div className="model-list-skeleton" role="status">
+      <span className="settings-skeleton" />
+      <span className="settings-skeleton" />
+      <span className="settings-skeleton" />
+    </div>
+  );
+}
+
 function emptyJiraConfig(): JiraConfig {
   return {
     enabled: false,
@@ -1047,6 +1135,10 @@ function modelForConnection(connectionId: string, connections: AiConnection[]): 
 
 function splitModelList(raw: string): string[] {
   return Array.from(new Set(raw.split(",").map((item) => item.trim()).filter(Boolean)));
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function mergeModelLists(provider: string, current: string[], incoming: string[]): string[] {
