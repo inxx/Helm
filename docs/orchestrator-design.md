@@ -462,6 +462,9 @@ DockerHermesObserver 기본 관찰 스펙:
 
 - `artifactDir`를 read-only 또는 append-only 관찰 대상으로 mount한다.
 - task worktree는 가능하면 mount하지 않는다. 필요하면 read-only 관찰 대상으로만 mount한다.
+- Obsidian 히스토리는 별도 presence 파일 대신 최근 작업 맥락 후보로만 사용한다.
+- Obsidian을 읽을 때는 `vault-index.md` -> 현재 프로젝트/앱 경로 -> 최근 문서 앞부분 순서로 범위를 좁힌다.
+- 24시간보다 오래된 Obsidian 기록은 현재 작업으로 단정하지 않고 최근 히스토리로만 취급한다.
 - provider credential directory와 Keychain secret은 mount하지 않는다.
 - observer failure는 agent run 실패로 즉시 간주하지 않고 `NeedsInspection` 또는 observer warning으로 기록한다.
 - 권장 Docker Desktop 리소스는 CPU 2-4 cores, memory 2-4GB, disk image 64GB 이상이다.
@@ -559,6 +562,17 @@ context-pack.json  재현과 검증을 위한 manifest
 코드 리뷰어: diff, 스타일, 위험 지점, 유지보수성 중심
 테스트 담당자: 변경 파일, test command, 실패 로그 중심
 ```
+
+Hermes 관찰용 Context Pack은 일반 구현자 Context Pack보다 해상도를 낮춘다. 목적은 사용자의 현재 작업을 상세히 복원하는 것이 아니라, 최근 Obsidian 히스토리와 run artifact를 바탕으로 "어떤 종류의 일을 하는 중인지"를 보조적으로 추정하는 것이다.
+
+Hermes 관찰용 Obsidian excerpt 규칙:
+
+- `vault-index.md`에서 프로젝트/앱 후보를 먼저 찾는다.
+- 후보 경로의 `sessions/`, `plans/`, `reviews/`, `decisions/`만 본다.
+- 각 문서는 frontmatter, 제목, 첫 요약 구간까지만 포함한다.
+- 24시간 이내 문서만 현재 작업 힌트로 취급한다.
+- 7일 이내 문서는 최근 히스토리로만 취급한다.
+- 코드 diff, 세부 파일 목록, 민감한 계정/토큰/로컬 경로는 포함하지 않는다.
 
 ## 계획과 문서 흐름
 
