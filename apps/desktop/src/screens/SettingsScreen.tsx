@@ -177,7 +177,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
             item.id === connection.id
               ? {
                   ...item,
-                  availableModels: mergeModelLists(item.availableModels ?? [], models),
+                  availableModels: mergeModelLists(item.provider, item.availableModels ?? [], models),
                 }
               : item,
           ),
@@ -216,7 +216,11 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
             item.id === connection.id
               ? {
                   ...item,
-                  availableModels: mergeModelLists(item.availableModels ?? [], result.availableModels ?? []),
+                  availableModels: mergeModelLists(
+                    item.provider,
+                    item.availableModels ?? [],
+                    result.availableModels ?? [],
+                  ),
                 }
               : item,
           ),
@@ -977,8 +981,10 @@ function normalizeAiConnections(value: unknown): AiConnection[] {
         planningTimeoutSeconds:
           typeof item.planningTimeoutSeconds === "number" ? item.planningTimeoutSeconds : undefined,
         enabled: typeof item.enabled === "boolean" ? item.enabled : true,
-        defaultModel: typeof item.defaultModel === "string" ? item.defaultModel : null,
-        availableModels: Array.isArray(item.availableModels) ? item.availableModels.filter(isString) : [],
+        defaultModel: typeof item.defaultModel === "string" ? normalizeModelName(provider, item.defaultModel) : null,
+        availableModels: Array.isArray(item.availableModels)
+          ? normalizeModelList(provider, item.availableModels.filter(isString))
+          : [],
         defaultEffort: typeof item.defaultEffort === "string" ? item.defaultEffort : null,
       };
     });
@@ -1043,8 +1049,47 @@ function splitModelList(raw: string): string[] {
   return Array.from(new Set(raw.split(",").map((item) => item.trim()).filter(Boolean)));
 }
 
-function mergeModelLists(current: string[], incoming: string[]): string[] {
-  return Array.from(new Set([...current, ...incoming].map((item) => item.trim()).filter(Boolean))).sort();
+function mergeModelLists(provider: string, current: string[], incoming: string[]): string[] {
+  return normalizeModelList(provider, [...current, ...incoming]);
+}
+
+function normalizeModelList(provider: string, models: string[]): string[] {
+  return Array.from(
+    new Set(
+      models
+        .map((item) => normalizeModelName(provider, item))
+        .filter((model) => isKnownProviderModel(provider, model)),
+    ),
+  ).sort();
+}
+
+function normalizeModelName(provider: string, model: string): string {
+  const trimmed = model.trim();
+  if (provider === "codex" || provider === "claude") {
+    return trimmed.toLowerCase();
+  }
+  return trimmed;
+}
+
+function isKnownProviderModel(provider: string, model: string): boolean {
+  if (!model) return false;
+  if (provider === "codex") {
+    return (
+      model.startsWith("gpt-") ||
+      model.startsWith("o1") ||
+      model.startsWith("o3") ||
+      model.startsWith("o4")
+    );
+  }
+  if (provider === "claude") {
+    return (
+      model === "sonnet" ||
+      model === "opus" ||
+      (model.startsWith("claude-") &&
+        model.split(/[-._]/).some((part) => part === "sonnet" || part === "opus" || part === "haiku"))
+    );
+  }
+  return true;
 }
 
 function canRefreshModels(provider: string): boolean {

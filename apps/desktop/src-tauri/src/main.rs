@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    mpsc, Arc, Mutex,
 };
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -451,7 +451,7 @@ fn check_ai_connection(
                     model_refresh_message: None,
                 });
             }
-            let model_refresh = refresh_available_models(&connection);
+            let model_refresh = refresh_available_models(&connection, &context.root_path);
             Ok(AiConnectionCheckResult {
                 connection_id,
                 available: true,
@@ -503,13 +503,13 @@ fn refresh_ai_connection_models(
     connection: Value,
     state: State<'_, AppState>,
 ) -> CommandResult<AiModelRefreshResult> {
-    let _context = project_context(&state, &project_id)?;
+    let context = project_context(&state, &project_id)?;
     let connection_id = connection
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
-    let refresh = refresh_available_models(&connection);
+    let refresh = refresh_available_models(&connection, &context.root_path);
 
     Ok(AiModelRefreshResult {
         connection_id,
@@ -1988,7 +1988,7 @@ struct ModelRefreshResult {
     message: Option<String>,
 }
 
-fn refresh_available_models(connection: &Value) -> ModelRefreshResult {
+fn refresh_available_models(connection: &Value, cwd: &Path) -> ModelRefreshResult {
     let Some(provider) = connection.get("provider").and_then(Value::as_str) else {
         return ModelRefreshResult {
             models: None,
@@ -1996,12 +1996,59 @@ fn refresh_available_models(connection: &Value) -> ModelRefreshResult {
         };
     };
 
-    match provider {
+    let api_refresh = match provider {
         "codex" => refresh_openai_models(),
         "claude" => refresh_anthropic_models(),
         _ => ModelRefreshResult {
             models: None,
             message: Some("지원하지 않는 provider라 모델 목록을 갱신하지 않았습니다.".to_string()),
+        },
+    };
+
+    if provider == "claude" {
+        if let Some(models) = api_refresh.models.as_ref() {
+            let mut models = models.clone();
+            models.extend(claude_cli_model_aliases());
+            models.sort();
+            models.dedup();
+            return ModelRefreshResult {
+                message: api_refresh.message,
+                models: Some(models),
+            };
+        }
+    }
+
+    if api_refresh
+        .models
+        .as_ref()
+        .is_some_and(|models| !models.is_empty())
+    {
+        return api_refresh;
+    }
+
+    let cli_refresh = refresh_cli_models(connection, provider, cwd);
+    match cli_refresh.models {
+        Some(models) if !models.is_empty() => ModelRefreshResult {
+            message: Some(format!(
+                "{} CLI /model fallback으로 모델 {}개를 갱신했습니다.",
+                api_refresh
+                    .message
+                    .unwrap_or_else(|| "API 모델 목록을 사용할 수 없습니다.".to_string()),
+                models.len()
+            )),
+            models: Some(models),
+        },
+        _ => ModelRefreshResult {
+            models: None,
+            message: Some(format!(
+                "{} CLI /model fallback도 실패했습니다. {}",
+                api_refresh
+                    .message
+                    .unwrap_or_else(|| "API 모델 목록을 사용할 수 없습니다.".to_string()),
+                cli_refresh
+                    .message
+                    .unwrap_or_else(|| "모델 후보를 찾지 못했습니다.".to_string())
+            )),
         },
     }
 }
@@ -2107,6 +2154,231 @@ fn fetch_json_with_curl(url: &str, headers: Vec<String>) -> Result<Value, String
     serde_json::from_slice(&output.stdout).map_err(|err| format!("응답 JSON 파싱 실패: {err}"))
 }
 
+fn refresh_cli_models(connection: &Value, provider: &str, cwd: &Path) -> ModelRefreshResult {
+    if provider == "codex" {
+        let debug_refresh = refresh_codex_debug_models(connection, cwd);
+        if debug_refresh
+            .models
+            .as_ref()
+            .is_some_and(|models| !models.is_empty())
+        {
+            return debug_refresh;
+        }
+    }
+
+    if provider == "claude" {
+        let embedded_refresh = refresh_claude_embedded_models(connection);
+        if embedded_refresh
+            .models
+            .as_ref()
+            .is_some_and(|models| !models.is_empty())
+        {
+            return embedded_refresh;
+        }
+    }
+
+    let Some(command) = cli_model_command(connection, provider, cwd) else {
+        return ModelRefreshResult {
+            models: None,
+            message: Some("CLI /model fallback을 지원하지 않는 provider입니다.".to_string()),
+        };
+    };
+
+    match run_pty_command_with_input(cwd, &command, "/model\n", Duration::from_secs(4)) {
+        Ok(output) => {
+            let text = strip_terminal_controls(&format!("{}\n{}", output.stdout, output.stderr));
+            let mut models = extract_cli_model_ids(provider, &text);
+            if provider == "claude" {
+                models.extend(claude_cli_model_aliases());
+                models.sort();
+                models.dedup();
+            }
+            if models.is_empty() {
+                ModelRefreshResult {
+                    models: None,
+                    message: Some(format!(
+                        "CLI /model 출력에서 모델 후보를 찾지 못했습니다. {}",
+                        compact_output_excerpt(&text)
+                    )),
+                }
+            } else {
+                ModelRefreshResult {
+                    message: Some(format!(
+                        "CLI /model 출력에서 모델 {}개를 찾았습니다.",
+                        models.len()
+                    )),
+                    models: Some(models),
+                }
+            }
+        }
+        Err(err) if provider == "claude" => ModelRefreshResult {
+            models: Some(claude_cli_model_aliases()),
+            message: Some(format!(
+                "Claude CLI /model 실행은 실패했지만 기본 alias를 사용합니다. {}",
+                err.message
+            )),
+        },
+        Err(err) => ModelRefreshResult {
+            models: None,
+            message: Some(format!("CLI /model 실행 실패: {}", err.message)),
+        },
+    }
+}
+
+fn refresh_claude_embedded_models(connection: &Value) -> ModelRefreshResult {
+    let binary = connection_cli_binary(connection).unwrap_or("claude");
+    let Some(path) = resolve_cli_binary_path(binary) else {
+        return ModelRefreshResult {
+            models: None,
+            message: Some(format!("Claude CLI binary를 찾지 못했습니다: {binary}")),
+        };
+    };
+
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let mut models = extract_model_ids_from_bytes("claude", &bytes);
+            models.extend(claude_cli_model_aliases());
+            models.sort();
+            models.dedup();
+            if models.is_empty() {
+                ModelRefreshResult {
+                    models: None,
+                    message: Some(format!(
+                        "Claude CLI binary에서 모델 후보를 찾지 못했습니다: {}",
+                        path.display()
+                    )),
+                }
+            } else {
+                ModelRefreshResult {
+                    message: Some(format!(
+                        "Claude CLI binary에서 모델 {}개를 갱신했습니다.",
+                        models.len()
+                    )),
+                    models: Some(models),
+                }
+            }
+        }
+        Err(err) => ModelRefreshResult {
+            models: None,
+            message: Some(format!(
+                "Claude CLI binary를 읽지 못했습니다: {} ({err})",
+                path.display()
+            )),
+        },
+    }
+}
+
+fn refresh_codex_debug_models(connection: &Value, cwd: &Path) -> ModelRefreshResult {
+    let binary = connection_cli_binary(connection).unwrap_or("codex");
+    let command = vec![
+        binary.to_string(),
+        "debug".to_string(),
+        "models".to_string(),
+    ];
+    match run_direct_command_with_timeout(cwd, &command, Duration::from_secs(10)) {
+        Ok(output) if output.exit_code == 0 && !output.timed_out => {
+            match serde_json::from_str::<Value>(&output.stdout) {
+                Ok(value) => {
+                    let models = codex_debug_model_ids(&value);
+                    if models.is_empty() {
+                        ModelRefreshResult {
+                            models: None,
+                            message: Some(
+                                "Codex debug models에서 list 모델을 찾지 못했습니다.".to_string(),
+                            ),
+                        }
+                    } else {
+                        ModelRefreshResult {
+                            message: Some(format!(
+                                "Codex debug models에서 모델 {}개를 갱신했습니다.",
+                                models.len()
+                            )),
+                            models: Some(models),
+                        }
+                    }
+                }
+                Err(err) => ModelRefreshResult {
+                    models: None,
+                    message: Some(format!("Codex debug models JSON 파싱 실패: {err}")),
+                },
+            }
+        }
+        Ok(output) => ModelRefreshResult {
+            models: None,
+            message: Some(format!(
+                "Codex debug models 실행 실패: {}",
+                command_output_message(&output)
+            )),
+        },
+        Err(err) => ModelRefreshResult {
+            models: None,
+            message: Some(format!("Codex debug models 실행 실패: {}", err.message)),
+        },
+    }
+}
+
+fn codex_debug_model_ids(value: &Value) -> Vec<String> {
+    let mut models = value
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("visibility").and_then(Value::as_str) == Some("list"))
+        .filter_map(|item| item.get("slug").and_then(Value::as_str))
+        .filter(|id| is_openai_agent_model(id))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    models.sort();
+    models.dedup();
+    models
+}
+
+fn cli_model_command(connection: &Value, provider: &str, cwd: &Path) -> Option<Vec<String>> {
+    let binary = connection_cli_binary(connection).unwrap_or(provider);
+    match provider {
+        "codex" => Some(vec![
+            binary.to_string(),
+            "--no-alt-screen".to_string(),
+            "--cd".to_string(),
+            cwd.to_string_lossy().to_string(),
+        ]),
+        "claude" => Some(vec![
+            binary.to_string(),
+            "--permission-mode".to_string(),
+            "plan".to_string(),
+        ]),
+        _ => None,
+    }
+}
+
+fn connection_cli_binary(connection: &Value) -> Option<&str> {
+    for key in ["healthCheckArgs", "planningCommandArgs", "commandArgs"] {
+        let Some(first) = connection
+            .get(key)
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        return Some(first);
+    }
+    None
+}
+
+fn resolve_cli_binary_path(binary: &str) -> Option<PathBuf> {
+    let binary_path = Path::new(binary);
+    if binary_path.is_absolute() || binary.contains('/') {
+        return binary_path.is_file().then(|| binary_path.to_path_buf());
+    }
+
+    let path_env = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_env)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
+}
+
 fn sorted_model_ids(value: &Value, keep: fn(&str) -> bool) -> Vec<String> {
     let mut models = value
         .get("data")
@@ -2120,6 +2392,114 @@ fn sorted_model_ids(value: &Value, keep: fn(&str) -> bool) -> Vec<String> {
     models.sort();
     models.dedup();
     models
+}
+
+fn extract_cli_model_ids(provider: &str, text: &str) -> Vec<String> {
+    let keep = match provider {
+        "codex" => is_openai_agent_model,
+        "claude" => is_anthropic_cli_model,
+        _ => return Vec::new(),
+    };
+    let mut models = Vec::new();
+    let mut token = String::new();
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            token.push(ch.to_ascii_lowercase());
+            continue;
+        }
+
+        push_model_candidate(&mut models, &token, keep);
+        token.clear();
+    }
+    push_model_candidate(&mut models, &token, keep);
+
+    models.sort();
+    models.dedup();
+    models
+}
+
+fn extract_model_ids_from_bytes(provider: &str, bytes: &[u8]) -> Vec<String> {
+    let keep = match provider {
+        "codex" => is_openai_agent_model,
+        "claude" => is_anthropic_cli_model,
+        _ => return Vec::new(),
+    };
+    let mut models = Vec::new();
+    let mut token = String::new();
+
+    for byte in bytes {
+        let ch = *byte as char;
+        if byte.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            token.push(ch.to_ascii_lowercase());
+            continue;
+        }
+
+        push_model_candidate(&mut models, &token, keep);
+        token.clear();
+    }
+    push_model_candidate(&mut models, &token, keep);
+
+    models.sort();
+    models.dedup();
+    models
+}
+
+fn push_model_candidate(models: &mut Vec<String>, token: &str, keep: fn(&str) -> bool) {
+    let token = token
+        .trim_matches(|ch: char| matches!(ch, '-' | '_' | '.'))
+        .to_string();
+    if token.is_empty() || token.len() > 80 {
+        return;
+    }
+    if keep(&token) {
+        models.push(token);
+    }
+}
+
+fn strip_terminal_controls(input: &str) -> String {
+    let mut output = String::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            while let Some(next) = chars.next() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '\x08' {
+            output.pop();
+            continue;
+        }
+        if ch == '\r' {
+            output.push('\n');
+            continue;
+        }
+        if ch.is_control() && ch != '\n' && ch != '\t' {
+            continue;
+        }
+        output.push(ch);
+    }
+
+    output
+}
+
+fn compact_output_excerpt(text: &str) -> String {
+    let excerpt = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(4)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if excerpt.is_empty() {
+        "출력이 비어 있습니다.".to_string()
+    } else {
+        excerpt.chars().take(240).collect()
+    }
 }
 
 fn is_openai_agent_model(id: &str) -> bool {
@@ -2143,6 +2523,18 @@ fn is_openai_agent_model(id: &str) -> bool {
 
 fn is_anthropic_agent_model(id: &str) -> bool {
     id.starts_with("claude-")
+}
+
+fn is_anthropic_cli_model(id: &str) -> bool {
+    matches!(id, "sonnet" | "opus")
+        || (id.starts_with("claude-")
+            && id
+                .split(['-', '.', '_'])
+                .any(|part| matches!(part, "sonnet" | "opus" | "haiku")))
+}
+
+fn claude_cli_model_aliases() -> Vec<String> {
+    vec!["sonnet".to_string(), "opus".to_string()]
 }
 
 fn string_array(args: &[Value], message: &str) -> CommandResult<Vec<String>> {
@@ -2201,6 +2593,138 @@ struct ShellOutput {
     stderr: String,
     exit_code: i32,
     timed_out: bool,
+}
+
+fn run_pty_command_with_input(
+    cwd: &Path,
+    command: &[String],
+    input: &str,
+    timeout: Duration,
+) -> CommandResult<ShellOutput> {
+    if command.is_empty() {
+        return Err(CommandError::validation("실행할 CLI command가 없습니다."));
+    }
+
+    let mut master_fd: libc::c_int = -1;
+    let mut winsize = libc::winsize {
+        ws_row: 40,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let child_pid = unsafe {
+        libc::forkpty(
+            &mut master_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut winsize,
+        )
+    };
+
+    if child_pid == -1 {
+        return Err(CommandError::io(
+            "PTY command를 시작하지 못했습니다.",
+            std::io::Error::last_os_error(),
+        ));
+    }
+
+    if child_pid == 0 {
+        let cwd = CString::new(cwd.to_string_lossy().as_bytes()).ok();
+        if let Some(cwd) = cwd.as_ref() {
+            unsafe {
+                libc::chdir(cwd.as_ptr());
+            }
+        }
+        set_child_env("TERM", "xterm-256color");
+        set_child_env("COLORTERM", "truecolor");
+
+        let cstrings = command
+            .iter()
+            .filter_map(|arg| CString::new(arg.as_str()).ok())
+            .collect::<Vec<_>>();
+        if cstrings.len() != command.len() || cstrings.is_empty() {
+            unsafe {
+                libc::_exit(127);
+            }
+        }
+        let mut argv = cstrings.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
+        argv.push(std::ptr::null());
+        unsafe {
+            libc::execvp(cstrings[0].as_ptr(), argv.as_ptr());
+            libc::_exit(127);
+        }
+    }
+
+    let reader = unsafe { fs::File::from_raw_fd(master_fd) };
+    let mut writer = reader
+        .try_clone()
+        .map_err(|err| CommandError::io("PTY 입력 스트림을 열지 못했습니다.", err))?;
+    let (sender, receiver) = mpsc::channel();
+    let read_thread = std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => output.extend_from_slice(&buffer[..size]),
+                Err(_) => break,
+            }
+        }
+        let _ = sender.send(String::from_utf8_lossy(&output).to_string());
+    });
+
+    std::thread::sleep(Duration::from_millis(700));
+    let _ = writer.write_all(input.as_bytes());
+    let _ = writer.flush();
+
+    let deadline = Instant::now() + timeout;
+    let mut status = 0;
+    let mut exit_code = -1;
+    let mut timed_out = false;
+    loop {
+        let wait = unsafe { libc::waitpid(child_pid, &mut status, libc::WNOHANG) };
+        if wait == child_pid {
+            exit_code = wait_status_code(status);
+            break;
+        }
+        if wait == -1 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            unsafe {
+                libc::kill(child_pid, libc::SIGHUP);
+            }
+            let wait = unsafe { libc::waitpid(child_pid, &mut status, 0) };
+            if wait == child_pid {
+                exit_code = wait_status_code(status);
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    drop(writer);
+    let _ = read_thread.join();
+    let output = receiver.try_recv().unwrap_or_else(|_| String::new());
+
+    Ok(ShellOutput {
+        stdout: truncate_output(output),
+        stderr: String::new(),
+        exit_code,
+        timed_out,
+    })
+}
+
+fn wait_status_code(status: libc::c_int) -> i32 {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        -1
+    }
 }
 
 fn discover_node_runtimes() -> Vec<NodeRuntimeSummary> {
