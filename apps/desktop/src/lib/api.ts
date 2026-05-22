@@ -3,6 +3,7 @@ import type {
   AgentRunSummary,
   AiConnection,
   AiConnectionCheckResult,
+  AiModelRefreshResult,
   ApprovalSummary,
   CreateTaskInput,
   EpicSummary,
@@ -71,6 +72,9 @@ export const api = {
   },
   checkAiConnection(projectId: string, connection: AiConnection) {
     return invoke<AiConnectionCheckResult>("check_ai_connection", { projectId, connection });
+  },
+  refreshAiConnectionModels(projectId: string, connection: AiConnection) {
+    return invoke<AiModelRefreshResult>("refresh_ai_connection_models", { projectId, connection });
   },
   updateTaskStatus(
     projectId: string,

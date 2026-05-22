@@ -50,6 +50,7 @@ const ROLE_DEFINITIONS: Array<{
 ];
 
 type MessageTone = "success" | "error" | "info";
+type ModelRefreshState = { busy: boolean; tone: MessageTone; message: string };
 
 export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsScreenProps) {
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>("templates");
@@ -58,6 +59,8 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const [templates, setTemplates] = useState<RunnerTemplateSummary[]>([]);
   const [runnerChecks, setRunnerChecks] = useState<RunnerCheckResult[]>([]);
   const [connectionChecks, setConnectionChecks] = useState<Record<string, AiConnectionCheckResult>>({});
+  const [modelRefreshes, setModelRefreshes] = useState<Record<string, ModelRefreshState>>({});
+  const [autoModelRefreshDone, setAutoModelRefreshDone] = useState<Record<string, boolean>>({});
   const [aiConnections, setAiConnections] = useState<AiConnection[]>([]);
   const [roleAssignments, setRoleAssignments] = useState<RoleAssignment[]>([]);
   const [jiraConfig, setJiraConfig] = useState<JiraConfig>(emptyJiraConfig());
@@ -77,8 +80,27 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     void api.listRunnerTemplates(snapshot.project.id).then(setTemplates);
     setRunnerChecks([]);
     setConnectionChecks({});
+    setModelRefreshes({});
+    setAutoModelRefreshDone({});
     setMessage(null);
   }, [snapshot]);
+
+  useEffect(() => {
+    if (!snapshot || activeCategory !== "connections") return;
+
+    const candidates = aiConnections.filter(
+      (connection) =>
+        canRefreshModels(connection.provider) &&
+        !autoModelRefreshDone[connection.id] &&
+        !modelRefreshes[connection.id]?.busy,
+    );
+    if (candidates.length === 0) return;
+
+    for (const connection of candidates) {
+      setAutoModelRefreshDone((current) => ({ ...current, [connection.id]: true }));
+      void refreshConnectionModels(connection, { silent: true });
+    }
+  }, [activeCategory, aiConnections, autoModelRefreshDone, modelRefreshes, snapshot]);
 
   const enabledConnections = useMemo(
     () => aiConnections.filter((connection) => connection.enabled),
@@ -140,6 +162,47 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     }
   }
 
+  async function refreshConnectionModels(connection: AiConnection, options: { silent?: boolean } = {}) {
+    if (!snapshot || !canRefreshModels(connection.provider)) return;
+    setModelRefreshes((current) => ({
+      ...current,
+      [connection.id]: { busy: true, tone: "info", message: "모델 목록 확인 중..." },
+    }));
+    try {
+      const result = await api.refreshAiConnectionModels(snapshot.project.id, connection);
+      const models = result.availableModels ?? [];
+      if (models.length) {
+        setAiConnections((current) =>
+          current.map((item) =>
+            item.id === connection.id
+              ? {
+                  ...item,
+                  availableModels: mergeModelLists(item.availableModels ?? [], models),
+                }
+              : item,
+          ),
+        );
+      }
+      const tone: MessageTone = models.length ? "success" : "info";
+      setModelRefreshes((current) => ({
+        ...current,
+        [connection.id]: { busy: false, tone, message: result.message },
+      }));
+      if (!options.silent) {
+        setMessage({ tone, text: result.message });
+      }
+    } catch (error) {
+      const text = errorMessage(error, "모델 목록을 불러오지 못했습니다.");
+      setModelRefreshes((current) => ({
+        ...current,
+        [connection.id]: { busy: false, tone: "error", message: text },
+      }));
+      if (!options.silent) {
+        setMessage({ tone: "error", text });
+      }
+    }
+  }
+
   async function checkConnection(connection: AiConnection) {
     if (!snapshot) return;
     setBusy(true);
@@ -158,6 +221,16 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               : item,
           ),
         );
+      }
+      if (result.modelRefreshMessage) {
+        setModelRefreshes((current) => ({
+          ...current,
+          [connection.id]: {
+            busy: false,
+            tone: result.availableModels?.length ? "success" : "info",
+            message: result.modelRefreshMessage ?? "",
+          },
+        }));
       }
       setMessage({
         tone: result.available ? "success" : "error",
@@ -227,10 +300,20 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   }
 
   function addConnection(provider: "codex" | "claude") {
+    const candidate = provider === "codex" ? codexConnection() : claudeConnection();
     setAiConnections((current) => {
-      const candidate = provider === "codex" ? codexConnection() : claudeConnection();
       if (current.some((connection) => connection.id === candidate.id)) return current;
       return [...current, candidate];
+    });
+    setAutoModelRefreshDone((current) => {
+      const next = { ...current };
+      delete next[candidate.id];
+      return next;
+    });
+    setModelRefreshes((current) => {
+      const next = { ...current };
+      delete next[candidate.id];
+      return next;
     });
     setMessage(null);
   }
@@ -243,6 +326,16 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
 
   function removeConnection(id: string) {
     setAiConnections((current) => current.filter((connection) => connection.id !== id));
+    setAutoModelRefreshDone((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    setModelRefreshes((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
     setRoleAssignments((current) =>
       normalizeRoleAssignments(current).map((assignment) =>
         withLegacyConnectionIds({
@@ -430,7 +523,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               <section className="settings-section">
                 <div className="settings-section-head">
                   <h3>AI CLI 연결</h3>
-                  <p className="muted">Codex, Claude 같은 로컬 CLI command를 연결 단위로 등록하고 smoke prompt 실행을 확인합니다.</p>
+                  <p className="muted">Codex, Claude 같은 로컬 CLI command를 연결 단위로 등록하고 실제 smoke prompt 응답까지 확인합니다.</p>
                 </div>
                 <div className="settings-actions">
                   <button
@@ -458,6 +551,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                   ) : (
                     aiConnections.map((connection) => {
                       const check = connectionChecks[connection.id];
+                      const modelRefresh = modelRefreshes[connection.id];
                       return (
                         <article className="connection-card" key={connection.id}>
                           <div className="connection-card-header">
@@ -476,9 +570,10 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                               <span className="provider-pill">{connection.provider}</span>
                               {check ? (
                                 <span className={check.available ? "check-pass" : "check-fail"}>
-                              {check.available ? "실행 가능" : "확인 필요"}
+                                  {check.available ? "프롬프트 OK" : "확인 필요"}
                                 </span>
                               ) : null}
+                              {modelRefresh?.busy ? <span className="check-info">모델 확인 중</span> : null}
                             </div>
                           </div>
                           <div className="connection-fields">
@@ -539,14 +634,30 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                           ) : null}
                           {check?.message ? <p className="muted">{check.message}</p> : null}
                           {check?.modelRefreshMessage ? <p className="muted">{check.modelRefreshMessage}</p> : null}
+                          {!check?.modelRefreshMessage && modelRefresh?.message ? (
+                            <p className={`model-refresh-message model-refresh-message-${modelRefresh.tone}`}>
+                              {modelRefresh.message}
+                            </p>
+                          ) : null}
                           <div className="connection-card-actions">
+                            {canRefreshModels(connection.provider) ? (
+                              <button
+                                className="secondary-button"
+                                disabled={modelRefresh?.busy}
+                                onClick={() => refreshConnectionModels(connection)}
+                                type="button"
+                              >
+                                <RefreshCw size={14} aria-hidden />
+                                {modelRefresh?.busy ? "불러오는 중..." : "모델 불러오기"}
+                              </button>
+                            ) : null}
                             <button
                               className="secondary-button"
                               disabled={busy}
                               onClick={() => checkConnection(connection)}
                               type="button"
                             >
-                              실행 확인
+                              연동 확인
                             </button>
                             <button
                               className="secondary-button danger"
@@ -934,6 +1045,10 @@ function splitModelList(raw: string): string[] {
 
 function mergeModelLists(current: string[], incoming: string[]): string[] {
   return Array.from(new Set([...current, ...incoming].map((item) => item.trim()).filter(Boolean))).sort();
+}
+
+function canRefreshModels(provider: string): boolean {
+  return provider === "codex" || provider === "claude";
 }
 
 function defaultModelPlaceholder(provider: string): string {

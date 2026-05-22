@@ -2943,7 +2943,8 @@ textarea {
 }
 
 .check-pass,
-.check-fail {
+.check-fail,
+.check-info {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2962,6 +2963,25 @@ textarea {
 .check-fail {
   background: var(--amber-weak);
   color: var(--amber);
+}
+
+.check-info {
+  background: var(--slate-weak);
+  color: var(--slate);
+}
+
+.model-refresh-message {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.model-refresh-message-success {
+  color: var(--green);
+}
+
+.model-refresh-message-error {
+  color: var(--red);
 }
 
 .settings-form label {

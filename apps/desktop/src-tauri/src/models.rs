@@ -106,6 +106,15 @@ pub struct AiConnectionCheckResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AiModelRefreshResult {
+    pub connection_id: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_models: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EpicSummary {
     pub id: String,
     pub project_id: String,

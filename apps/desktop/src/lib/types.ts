@@ -105,6 +105,12 @@ export interface AiConnectionCheckResult {
   modelRefreshMessage?: string;
 }
 
+export interface AiModelRefreshResult {
+  connectionId: string;
+  message: string;
+  availableModels?: string[];
+}
+
 export interface PlannerConversationInput {
   message: string;
   goalText: string;

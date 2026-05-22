@@ -3,9 +3,9 @@ mod git;
 mod models;
 
 use crate::models::{
-    AgentRunSummary, AiConnectionCheckResult, ApprovalSummary, CommandError, CommandResult,
-    CreateEpicInput, CreateTaskInput, EffectiveSettings, EpicSummary, GitBranchSummary,
-    GitCommitSummary, GitFileStatus, GitRepositoryState, NodeRuntimeSummary,
+    AgentRunSummary, AiConnectionCheckResult, AiModelRefreshResult, ApprovalSummary, CommandError,
+    CommandResult, CreateEpicInput, CreateTaskInput, EffectiveSettings, EpicSummary,
+    GitBranchSummary, GitCommitSummary, GitFileStatus, GitRepositoryState, NodeRuntimeSummary,
     PlannerConversationInput, PlannerConversationResult, ProjectContext, ProjectSettingsPatch,
     ProjectSnapshot, ProjectSummary, RunnerCheckResult, RunnerTemplateSummary, TaskSummary,
     TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const MAX_RECENT_PROJECTS: usize = 12;
+const AI_CLI_SMOKE_SENTINEL: &str = "HELM_CLI_OK";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -430,6 +431,26 @@ fn check_ai_connection(
 
     match check {
         Ok(output) if output.exit_code == 0 && !output.timed_out => {
+            if !smoke_output_contains_sentinel(&output) {
+                let message = command_output_message(&output);
+                return Ok(AiConnectionCheckResult {
+                    connection_id,
+                    available: false,
+                    command,
+                    message: if message.is_empty() {
+                        format!(
+                            "AI CLI smoke prompt는 종료됐지만 확인 문구({AI_CLI_SMOKE_SENTINEL})를 받지 못했습니다."
+                        )
+                    } else {
+                        format!(
+                            "AI CLI smoke prompt는 종료됐지만 확인 문구({AI_CLI_SMOKE_SENTINEL})를 받지 못했습니다. {}",
+                            ai_cli_failure_hint(connection.get("provider").and_then(Value::as_str), &message)
+                        )
+                    },
+                    available_models: None,
+                    model_refresh_message: None,
+                });
+            }
             let model_refresh = refresh_available_models(&connection);
             Ok(AiConnectionCheckResult {
                 connection_id,
@@ -442,12 +463,14 @@ fn check_ai_connection(
         }
         Ok(output) => {
             let message = command_output_message(&output);
+            let hint =
+                ai_cli_failure_hint(connection.get("provider").and_then(Value::as_str), &message);
             Ok(AiConnectionCheckResult {
                 connection_id,
                 available: false,
                 command,
                 message: if output.timed_out {
-                    format!("AI CLI smoke prompt가 timeout 되었습니다. {message}")
+                    format!("AI CLI smoke prompt가 timeout 되었습니다. {hint}")
                 } else if message.is_empty() {
                     format!(
                         "AI CLI smoke prompt가 exit code {}로 실패했습니다.",
@@ -455,7 +478,7 @@ fn check_ai_connection(
                     )
                 } else {
                     format!(
-                        "AI CLI smoke prompt가 exit code {}로 실패했습니다. {message}",
+                        "AI CLI smoke prompt가 exit code {}로 실패했습니다. {hint}",
                         output.exit_code
                     )
                 },
@@ -472,6 +495,29 @@ fn check_ai_connection(
             model_refresh_message: None,
         }),
     }
+}
+
+#[tauri::command]
+fn refresh_ai_connection_models(
+    project_id: String,
+    connection: Value,
+    state: State<'_, AppState>,
+) -> CommandResult<AiModelRefreshResult> {
+    let _context = project_context(&state, &project_id)?;
+    let connection_id = connection
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let refresh = refresh_available_models(&connection);
+
+    Ok(AiModelRefreshResult {
+        connection_id,
+        message: refresh
+            .message
+            .unwrap_or_else(|| "모델 목록 갱신 결과가 없습니다.".to_string()),
+        available_models: refresh.models,
+    })
 }
 
 #[tauri::command]
@@ -1914,6 +1960,29 @@ fn command_output_message(output: &ShellOutput) -> String {
     output.stdout.trim().to_string()
 }
 
+fn smoke_output_contains_sentinel(output: &ShellOutput) -> bool {
+    output.stdout.contains(AI_CLI_SMOKE_SENTINEL) || output.stderr.contains(AI_CLI_SMOKE_SENTINEL)
+}
+
+fn ai_cli_failure_hint(provider: Option<&str>, raw_message: &str) -> String {
+    let trimmed = raw_message.trim();
+    let normalized = trimmed.to_lowercase();
+
+    if provider == Some("claude") && normalized.contains("not logged in") {
+        return "Claude CLI는 설치되어 있지만 로그인 상태가 아닙니다. 터미널에서 claude를 열고 /login을 실행한 뒤 다시 확인하세요.".to_string();
+    }
+
+    if provider == Some("claude") && normalized.contains("organization does not have access") {
+        return "Claude CLI는 설치되어 있지만 현재 로그인된 조직에 Claude Code 접근 권한이 없습니다. 올바른 조직으로 다시 로그인하거나 관리자에게 권한을 요청해야 합니다.".to_string();
+    }
+
+    if trimmed.is_empty() {
+        "응답 출력이 없습니다.".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 struct ModelRefreshResult {
     models: Option<Vec<String>>,
     message: Option<String>,
@@ -2606,6 +2675,7 @@ fn main() {
             apply_runner_template,
             check_role_runner,
             check_ai_connection,
+            refresh_ai_connection_models,
             list_epics,
             create_epic,
             list_tasks,
