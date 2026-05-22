@@ -159,7 +159,10 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
           ),
         );
       }
-      setMessage({ tone: "info", text: result.modelRefreshMessage ?? "AI CLI 확인 완료" });
+      setMessage({
+        tone: result.available ? "success" : "error",
+        text: result.available ? "AI CLI smoke 실행 확인 완료" : result.message || "AI CLI 실행 확인 실패",
+      });
     } catch (error) {
       setMessage({ tone: "error", text: errorMessage(error, "AI CLI 확인에 실패했습니다.") });
     } finally {
@@ -427,7 +430,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               <section className="settings-section">
                 <div className="settings-section-head">
                   <h3>AI CLI 연결</h3>
-                  <p className="muted">Codex, Claude 같은 로컬 CLI command를 연결 단위로 등록하고 health check를 확인합니다.</p>
+                  <p className="muted">Codex, Claude 같은 로컬 CLI command를 연결 단위로 등록하고 smoke prompt 실행을 확인합니다.</p>
                 </div>
                 <div className="settings-actions">
                   <button
@@ -473,7 +476,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                               <span className="provider-pill">{connection.provider}</span>
                               {check ? (
                                 <span className={check.available ? "check-pass" : "check-fail"}>
-                                  {check.available ? "사용 가능" : "확인 필요"}
+                              {check.available ? "실행 가능" : "확인 필요"}
                                 </span>
                               ) : null}
                             </div>
@@ -543,7 +546,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                               onClick={() => checkConnection(connection)}
                               type="button"
                             >
-                              CLI 확인
+                              실행 확인
                             </button>
                             <button
                               className="secondary-button danger"
@@ -970,7 +973,7 @@ function codexConnection(): AiConnection {
       "{planPrompt}",
     ],
     planningMode: "prompt_guarded",
-    planningModel: "gpt-5.4-mini",
+    planningModel: null,
     healthCheckArgs: ["codex", "--version"],
     timeoutSeconds: 1800,
     planningTimeoutSeconds: 120,

@@ -266,23 +266,41 @@ fn run_planner_conversation(
     let context = project_context(&state, &project_id)?;
     let conn = db::open_existing_db(&context.db_path)?;
     let settings = db::effective_settings(&conn, &project_id)?;
-    let (connection_id, provider, command, timeout_seconds) =
-        resolve_planning_command(&settings, &context.root_path, &input)?;
-    let output = run_direct_command_with_timeout(
-        &context.root_path,
-        &command,
-        Duration::from_secs(timeout_seconds),
-    )?;
+    let commands = resolve_planning_commands(&settings, &context.root_path, &input)?;
+    let mut failures = Vec::new();
+    let mut last_output = None;
 
-    Ok(PlannerConversationResult {
-        connection_id,
-        provider,
-        command,
-        response_text: output.stdout,
-        stderr: output.stderr,
-        exit_code: output.exit_code,
-        timed_out: output.timed_out,
-    })
+    for command in commands {
+        match run_direct_command_with_timeout(
+            &context.root_path,
+            &command.command,
+            Duration::from_secs(command.timeout_seconds),
+        ) {
+            Ok(output) if output.exit_code == 0 && !output.timed_out => {
+                return Ok(planner_result_from_output(command, output));
+            }
+            Ok(output) => {
+                failures.push(format_planning_attempt_failure(&command, &output));
+                last_output = Some((command, output));
+            }
+            Err(error) => failures.push(format!(
+                "{} planning command 실행 실패: {}",
+                planning_command_label(&command),
+                command_error_summary(&error)
+            )),
+        }
+    }
+
+    if let Some((command, mut output)) = last_output {
+        output.stderr = append_planning_failure_details(output.stderr, &failures);
+        return Ok(planner_result_from_output(command, output));
+    }
+
+    Err(CommandError::with_details(
+        "IoFailed",
+        "planner command를 실행하지 못했습니다.",
+        failures.join("\n"),
+    ))
 }
 
 #[tauri::command]
@@ -388,58 +406,58 @@ fn check_ai_connection(
     connection: Value,
     state: State<'_, AppState>,
 ) -> CommandResult<AiConnectionCheckResult> {
-    let _ = project_context(&state, &project_id)?;
+    let context = project_context(&state, &project_id)?;
     let connection_id = connection
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
-    let command = connection_command_for_check(&connection)?;
+    let command = connection_command_for_check(&connection, &context.root_path)?;
     if command.is_empty() {
         return Ok(AiConnectionCheckResult {
             connection_id,
             available: false,
             command,
-            message: "AI CLI 연결에 command가 없습니다.".to_string(),
+            message: "AI CLI 연결에 실행 가능한 planning smoke command가 없습니다.".to_string(),
             available_models: None,
             model_refresh_message: None,
         });
     }
 
-    let check = if command
-        .iter()
-        .any(|part| part.contains("fixture-runner.mjs"))
-    {
-        Command::new(&command[0])
-            .args(&command[1..])
-            .arg("--health")
-            .output()
-    } else {
-        Command::new(&command[0]).args(&command[1..]).output()
-    };
+    let timeout = connection_check_timeout_seconds(&connection);
+    let check =
+        run_direct_command_with_timeout(&context.root_path, &command, Duration::from_secs(timeout));
 
     match check {
-        Ok(output) if output.status.success() => {
+        Ok(output) if output.exit_code == 0 && !output.timed_out => {
             let model_refresh = refresh_available_models(&connection);
             Ok(AiConnectionCheckResult {
                 connection_id,
                 available: true,
                 command,
-                message: "AI CLI command를 실행할 수 있습니다.".to_string(),
+                message: "AI CLI smoke prompt를 실행할 수 있습니다.".to_string(),
                 available_models: model_refresh.models,
                 model_refresh_message: model_refresh.message,
             })
         }
         Ok(output) => {
-            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let message = command_output_message(&output);
             Ok(AiConnectionCheckResult {
                 connection_id,
                 available: false,
                 command,
-                message: if message.is_empty() {
-                    String::from_utf8_lossy(&output.stdout).trim().to_string()
+                message: if output.timed_out {
+                    format!("AI CLI smoke prompt가 timeout 되었습니다. {message}")
+                } else if message.is_empty() {
+                    format!(
+                        "AI CLI smoke prompt가 exit code {}로 실패했습니다.",
+                        output.exit_code
+                    )
                 } else {
-                    message
+                    format!(
+                        "AI CLI smoke prompt가 exit code {}로 실패했습니다. {message}",
+                        output.exit_code
+                    )
                 },
                 available_models: None,
                 model_refresh_message: None,
@@ -449,7 +467,7 @@ fn check_ai_connection(
             connection_id,
             available: false,
             command,
-            message: err.to_string(),
+            message: command_error_summary(&err),
             available_models: None,
             model_refresh_message: None,
         }),
@@ -1099,6 +1117,13 @@ struct RunnerTemplate {
     assignments: fn() -> Value,
 }
 
+struct PlanningCommandSpec {
+    connection_id: String,
+    provider: Option<String>,
+    command: Vec<String>,
+    timeout_seconds: u64,
+}
+
 fn runner_templates() -> Vec<RunnerTemplate> {
     vec![
         RunnerTemplate {
@@ -1225,7 +1250,7 @@ fn codex_ai_connections() -> Value {
             "healthCheckArgs": ["codex", "--version"],
             "timeoutSeconds": 1800,
             "planningTimeoutSeconds": 120,
-            "planningModel": "gpt-5.4-mini",
+            "planningModel": null,
             "enabled": true,
             "defaultModel": "gpt-5.2",
             "availableModels": ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"]
@@ -1315,11 +1340,11 @@ fn role_ids() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-fn resolve_planning_command(
+fn resolve_planning_commands(
     settings: &EffectiveSettings,
     project_root: &Path,
     input: &PlannerConversationInput,
-) -> CommandResult<(String, Option<String>, Vec<String>, u64)> {
+) -> CommandResult<Vec<PlanningCommandSpec>> {
     let planner_assignment = settings
         .role_assignments
         .as_array()
@@ -1329,23 +1354,106 @@ fn resolve_planning_command(
                 .find(|item| item.get("roleId").and_then(Value::as_str) == Some("planner"))
         })
         .ok_or_else(|| CommandError::validation("planner 역할 배정을 찾을 수 없습니다."))?;
-    let selection = first_assignment_selection(planner_assignment)
-        .ok_or_else(|| CommandError::validation("planner에 배정된 AI CLI 연결이 없습니다."))?;
+
+    let mut commands = Vec::new();
+    let mut seen = HashSet::new();
+    let mut failures = Vec::new();
+
+    for selection in assignment_selections(planner_assignment) {
+        push_planning_command_candidate(
+            settings,
+            project_root,
+            input,
+            &selection,
+            &mut seen,
+            &mut commands,
+            &mut failures,
+        );
+    }
+
+    for connection in settings.ai_connections.as_array().into_iter().flatten() {
+        if connection.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let Some(connection_id) = connection.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let selection = json!({ "connectionId": connection_id });
+        push_planning_command_candidate(
+            settings,
+            project_root,
+            input,
+            &selection,
+            &mut seen,
+            &mut commands,
+            &mut failures,
+        );
+    }
+
+    if commands.is_empty() {
+        let details = failures.join("\n");
+        if details.is_empty() {
+            return Err(CommandError::validation(
+                "planner에 실행 가능한 AI CLI 연결이 없습니다.",
+            ));
+        }
+        return Err(CommandError::with_details(
+            "ValidationFailed",
+            "planner에 실행 가능한 AI CLI 연결이 없습니다.",
+            details,
+        ));
+    }
+
+    Ok(commands)
+}
+
+fn push_planning_command_candidate(
+    settings: &EffectiveSettings,
+    project_root: &Path,
+    input: &PlannerConversationInput,
+    selection: &Value,
+    seen: &mut HashSet<String>,
+    commands: &mut Vec<PlanningCommandSpec>,
+    failures: &mut Vec<String>,
+) {
+    let connection_id = selection
+        .get("connectionId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if connection_id.is_empty() || !seen.insert(connection_id.to_string()) {
+        return;
+    }
+
+    let Some(connection) = settings.ai_connections.as_array().and_then(|items| {
+        items
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(connection_id))
+    }) else {
+        failures.push(format!(
+            "{connection_id}: planner에 배정된 AI CLI 연결을 찾을 수 없습니다."
+        ));
+        return;
+    };
+
+    match resolve_planning_command_for_connection(project_root, input, selection, connection) {
+        Ok(command) => commands.push(command),
+        Err(error) => failures.push(format!(
+            "{connection_id}: {}",
+            command_error_summary(&error)
+        )),
+    }
+}
+
+fn resolve_planning_command_for_connection(
+    project_root: &Path,
+    input: &PlannerConversationInput,
+    selection: &Value,
+    connection: &Value,
+) -> CommandResult<PlanningCommandSpec> {
     let connection_id = selection
         .get("connectionId")
         .and_then(Value::as_str)
         .ok_or_else(|| CommandError::validation("planner 연결 id를 찾을 수 없습니다."))?;
-    let connection = settings
-        .ai_connections
-        .as_array()
-        .and_then(|items| {
-            items
-                .iter()
-                .find(|item| item.get("id").and_then(Value::as_str) == Some(connection_id))
-        })
-        .ok_or_else(|| {
-            CommandError::validation("planner에 배정된 AI CLI 연결을 찾을 수 없습니다.")
-        })?;
     if connection.get("enabled").and_then(Value::as_bool) == Some(false) {
         return Err(CommandError::validation(
             "planner에 배정된 AI CLI 연결이 비활성화되어 있습니다.",
@@ -1356,28 +1464,20 @@ fn resolve_planning_command(
         .get("provider")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let planning_model = connection
-        .get("planningModel")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty());
     let explicit_role_model = selection
         .get("model")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
-    let default_planning_model = if provider.as_deref() == Some("codex") {
-        Some("gpt-5.4-mini")
-    } else {
-        None
-    };
-    let model = planning_model
-        .or(explicit_role_model)
-        .or(default_planning_model)
-        .or_else(|| {
-            connection
-                .get("defaultModel")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-        });
+    let planning_model = connection
+        .get("planningModel")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let model = explicit_role_model.or(planning_model).or_else(|| {
+        connection
+            .get("defaultModel")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    });
     let effort = selection
         .get("effort")
         .and_then(Value::as_str)
@@ -1418,29 +1518,100 @@ fn resolve_planning_command(
         .clamp(1, 600);
 
     let command_args = inject_planning_provider_options(args, provider.as_deref(), model, effort);
+    let command = normalize_planning_cli_args(command_args, provider.as_deref());
 
-    Ok((
-        connection_id.to_string(),
-        provider.clone(),
-        normalize_planning_cli_args(command_args, provider.as_deref()),
+    Ok(PlanningCommandSpec {
+        connection_id: connection_id.to_string(),
+        provider,
+        command,
         timeout_seconds,
-    ))
+    })
 }
 
-fn first_assignment_selection(assignment: &Value) -> Option<Value> {
-    if let Some(selection) = assignment
+fn assignment_selections(assignment: &Value) -> Vec<Value> {
+    if let Some(selections) = assignment
         .get("selections")
         .and_then(Value::as_array)
-        .and_then(|items| items.first())
+        .filter(|items| !items.is_empty())
     {
-        return Some(selection.clone());
+        return selections.clone();
     }
+
     assignment
         .get("connectionIds")
         .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .and_then(Value::as_str)
-        .map(|connection_id| json!({ "connectionId": connection_id }))
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|connection_id| json!({ "connectionId": connection_id }))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn planner_result_from_output(
+    command: PlanningCommandSpec,
+    output: ShellOutput,
+) -> PlannerConversationResult {
+    PlannerConversationResult {
+        connection_id: command.connection_id,
+        provider: command.provider,
+        command: command.command,
+        response_text: output.stdout,
+        stderr: output.stderr,
+        exit_code: output.exit_code,
+        timed_out: output.timed_out,
+    }
+}
+
+fn format_planning_attempt_failure(command: &PlanningCommandSpec, output: &ShellOutput) -> String {
+    let reason = if output.timed_out {
+        "timeout".to_string()
+    } else {
+        format!("exit code {}", output.exit_code)
+    };
+    let stderr = output.stderr.trim();
+    let stdout = output.stdout.trim();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "출력 없음"
+    };
+    format!(
+        "{} planning command 실패 ({reason}): {detail}",
+        planning_command_label(command)
+    )
+}
+
+fn planning_command_label(command: &PlanningCommandSpec) -> String {
+    match command.provider.as_deref() {
+        Some(provider) => format!("{} ({provider})", command.connection_id),
+        None => command.connection_id.clone(),
+    }
+}
+
+fn append_planning_failure_details(stderr: String, failures: &[String]) -> String {
+    if failures.is_empty() {
+        return stderr;
+    }
+
+    let details = failures.join("\n");
+    if stderr.trim().is_empty() {
+        return details;
+    }
+    format!("{}\n\nfallback attempts:\n{}", stderr.trim_end(), details)
+}
+
+fn command_error_summary(error: &CommandError) -> String {
+    match &error.details {
+        Some(details) if !details.trim().is_empty() => {
+            format!("{}: {}", error.message, details)
+        }
+        _ => error.message.clone(),
+    }
 }
 
 fn planning_command_args(
@@ -1681,14 +1852,66 @@ fn role_command_for_check(role_presets: &Value, role_id: &str) -> CommandResult<
     Ok(Vec::new())
 }
 
-fn connection_command_for_check(connection: &Value) -> CommandResult<Vec<String>> {
-    if let Some(args) = connection.get("healthCheckArgs").and_then(Value::as_array) {
-        return string_array(args, "healthCheckArgs는 문자열 배열이어야 합니다.");
+fn connection_command_for_check(
+    connection: &Value,
+    project_root: &Path,
+) -> CommandResult<Vec<String>> {
+    let provider = connection.get("provider").and_then(Value::as_str);
+    let prompt = r#"Helm AI CLI smoke check.
+Reply with exactly: HELM_CLI_OK
+Do not modify files, run shell commands, create tasks, or use git."#;
+    let mut placeholders = HashMap::new();
+    placeholders.insert(
+        "projectRoot".to_string(),
+        project_root.to_string_lossy().to_string(),
+    );
+    placeholders.insert("planPrompt".to_string(), prompt.to_string());
+    placeholders.insert("message".to_string(), prompt.to_string());
+    placeholders.insert(
+        "goalText".to_string(),
+        "Helm AI CLI smoke check".to_string(),
+    );
+    placeholders.insert("currentDraftJson".to_string(), "null".to_string());
+
+    let args = planning_command_args(connection, provider, &placeholders)?;
+    if args.is_empty() {
+        return Ok(Vec::new());
     }
-    if let Some(args) = connection.get("commandArgs").and_then(Value::as_array) {
-        return string_array(args, "commandArgs는 문자열 배열이어야 합니다.");
+
+    let model = connection
+        .get("planningModel")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            connection
+                .get("defaultModel")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        });
+    let effort = connection
+        .get("defaultEffort")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let command_args = inject_planning_provider_options(args, provider, model, effort);
+
+    Ok(normalize_planning_cli_args(command_args, provider))
+}
+
+fn connection_check_timeout_seconds(connection: &Value) -> u64 {
+    connection
+        .get("planningTimeoutSeconds")
+        .and_then(Value::as_u64)
+        .or_else(|| connection.get("timeoutSeconds").and_then(Value::as_u64))
+        .unwrap_or(60)
+        .clamp(1, 120)
+}
+
+fn command_output_message(output: &ShellOutput) -> String {
+    let stderr = output.stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_string();
     }
-    Ok(Vec::new())
+    output.stdout.trim().to_string()
 }
 
 struct ModelRefreshResult {
