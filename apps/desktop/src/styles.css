@@ -1496,6 +1496,50 @@ textarea {
   font-size: 11px;
 }
 
+/* Timeline */
+.timeline-list {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.timeline-entry {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 8px 10px;
+}
+
+.timeline-entry > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.timeline-entry strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.timeline-entry span,
+.timeline-entry small {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.timeline-entry p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .artifact-viewer {
   max-height: 240px;
   overflow: auto;

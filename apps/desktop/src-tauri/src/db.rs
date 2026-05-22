@@ -1,13 +1,14 @@
 use crate::git;
 use crate::models::{
     AgentRunSummary, ApprovalSummary, AuditLogEntry, CommandError, CommandResult, CreateEpicInput,
-    CreateTaskInput, EffectiveSettings, EpicSummary, ProjectSettingsPatch, ProjectSummary,
-    TaskCounts, TaskExternalRefInput, TaskExternalRefSummary, TaskSummary, TaskWorktreeSummary,
+    CreateTaskInput, EffectiveSettings, EpicSummary, GitFileStatus, ProjectSettingsPatch,
+    ProjectSummary, TaskCounts, TaskExternalRefInput, TaskExternalRefSummary, TaskSummary,
+    TaskTimelineEntry, TaskWorktreeSummary,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,10 +19,11 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 3;
+const SUPPORTED_SCHEMA_VERSION: i64 = 4;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
+const PHASE4_MIGRATION: &str = include_str!("../migrations/0004_evidence_gate_timeline.sql");
 
 pub fn now() -> String {
     Utc::now().to_rfc3339()
@@ -72,6 +74,9 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
     }
     if current_version < 3 {
         apply_migration(conn, 3, "phase3a_worktrees", PHASE3A_MIGRATION)?;
+    }
+    if current_version < 4 {
+        apply_migration(conn, 4, "evidence_gate_timeline", PHASE4_MIGRATION)?;
     }
     Ok(())
 }
@@ -956,6 +961,8 @@ pub fn run_host_role(
     )?;
 
     let artifact_path = root.join(&run.artifact_dir);
+    let command_started_at = now();
+    let command_started_instant = Instant::now();
     let command_output = run_command_with_timeout(
         Command::new(&command_args[0])
             .args(&command_args[1..])
@@ -1028,6 +1035,11 @@ pub fn run_host_role(
         timeout_seconds,
         cancellation,
     )?;
+    let command_duration_ms = command_started_instant
+        .elapsed()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let command_finished_at = now();
 
     fs::write(artifact_path.join("stdout.log"), &command_output.stdout)
         .map_err(|err| CommandError::io("stdout 로그를 저장하지 못했습니다.", err))?;
@@ -1066,6 +1078,11 @@ pub fn run_host_role(
     let schema_ok = result_value
         .as_ref()
         .is_some_and(validate_structured_result);
+    let has_blocking_gate = result_value
+        .as_ref()
+        .is_some_and(structured_result_has_blocking_gate);
+    let diff_consistency =
+        diff_consistency_check(&run.role_id, result_value.as_ref(), &changed_files);
     let exit_code = command_output.exit_code;
     let final_status = if command_output.canceled {
         write_fallback_result(&artifact_path, exit_code)?;
@@ -1078,38 +1095,108 @@ pub fn run_host_role(
         "NeedsInspection"
     } else if exit_code != 0 {
         "Failed"
+    } else if has_blocking_gate || diff_consistency.is_some() {
+        "NeedsInspection"
     } else if result_status.as_deref() == Some("pass") {
         "Succeeded"
     } else {
         "NeedsInspection"
     };
     let finished_at = now();
-    conn.execute(
-        "UPDATE agent_runs
-         SET status = ?1, exit_code = ?2, result_status = ?3, finished_at = ?4, updated_at = ?4
-         WHERE id = ?5",
-        params![final_status, exit_code, result_status, finished_at, run_id],
-    )
-    .map_err(|err| CommandError::database("host run 결과를 저장하지 못했습니다.", err))?;
-    insert_audit(
-        conn,
-        project_id,
-        "AgentRun",
-        Some(run_id),
-        "agent_run.finished",
-        json!({
-            "runId": run_id,
-            "taskId": run.task_id,
-            "roleId": run.role_id,
-            "status": final_status,
-            "exitCode": exit_code,
-            "resultStatus": result_status,
-            "changedFiles": changed_files
-        }),
-    )?;
 
-    if final_status == "Succeeded" && result_status.as_deref() == Some("pass") {
-        apply_successful_role_result(conn, project_id, &task, &run.role_id, run_id)?;
+    let persistence_result = (|| -> CommandResult<()> {
+        let tx = conn
+            .transaction()
+            .map_err(|err| CommandError::database("host run 결과를 저장하지 못했습니다.", err))?;
+        let evidence_id = insert_command_evidence(
+            &tx,
+            CommandEvidenceInput {
+                project_id,
+                task_id: Some(&run.task_id),
+                run_id: Some(run_id),
+                command_args: &command_args,
+                cwd: &worktree.worktree_path,
+                exit_code,
+                timed_out: command_output.timed_out,
+                canceled: command_output.canceled,
+                stdout_path: Some("stdout.log"),
+                stderr_path: Some("stderr.log"),
+                changed_files_path: Some("changed-files.json"),
+                diff_path: Some("diff.patch"),
+                duration_ms: Some(command_duration_ms),
+                started_at: &command_started_at,
+                finished_at: Some(&command_finished_at),
+            },
+        )?;
+        tx.execute(
+            "UPDATE agent_runs
+             SET status = ?1, exit_code = ?2, result_status = ?3, finished_at = ?4, updated_at = ?4
+             WHERE id = ?5",
+            params![final_status, exit_code, result_status, finished_at, run_id],
+        )
+        .map_err(|err| CommandError::database("host run 결과를 저장하지 못했습니다.", err))?;
+        insert_audit(
+            &tx,
+            project_id,
+            "AgentRun",
+            Some(run_id),
+            "agent_run.finished",
+            json!({
+                "runId": run_id,
+                "taskId": run.task_id,
+                "roleId": run.role_id,
+                "status": final_status,
+                "exitCode": exit_code,
+                "resultStatus": result_status,
+                "changedFiles": changed_files,
+                "evidenceId": evidence_id
+            }),
+        )?;
+
+        if let Some(value) = result_value.as_ref() {
+            persist_gate_result_from_structured_result(
+                &tx,
+                project_id,
+                &run.task_id,
+                run_id,
+                &run.role_id,
+                value,
+                final_status,
+            )?;
+        }
+
+        if let Some(check) = diff_consistency.as_ref() {
+            let gate_result = diff_consistency_gate_result(check);
+            persist_gate_result_from_structured_result(
+                &tx,
+                project_id,
+                &run.task_id,
+                run_id,
+                &run.role_id,
+                &gate_result,
+                "NeedsInspection",
+            )?;
+        }
+
+        if final_status == "Succeeded" && result_status.as_deref() == Some("pass") {
+            apply_successful_role_result(&tx, project_id, &task, &run.role_id, run_id)?;
+        }
+
+        tx.commit()
+            .map_err(|err| CommandError::database("host run 결과를 저장하지 못했습니다.", err))?;
+        Ok(())
+    })();
+
+    if let Err(err) = persistence_result {
+        let _ = mark_host_run_persistence_failed(
+            conn,
+            project_id,
+            run_id,
+            &run.task_id,
+            &run.role_id,
+            &err,
+        );
+        return Err(err);
     }
 
     get_agent_run(conn, run_id)
@@ -1152,6 +1239,227 @@ pub fn list_agent_runs(
         .query_map(params![project_id, task_id], map_agent_run)
         .map_err(|err| CommandError::database("실행 기록을 읽지 못했습니다.", err))?;
     collect_rows(rows, "실행 기록을 읽지 못했습니다.")
+}
+
+pub fn list_task_timeline(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+) -> CommandResult<Vec<TaskTimelineEntry>> {
+    let task = get_task(conn, task_id)?;
+    if task.project_id != project_id {
+        return Err(CommandError::validation("대상 태스크를 찾을 수 없습니다."));
+    }
+
+    let mut entries = Vec::new();
+    let runs = list_agent_runs(conn, project_id, task_id)?;
+    for run in runs {
+        entries.push(TaskTimelineEntry {
+            id: run.id.clone(),
+            project_id: project_id.to_string(),
+            task_id: task_id.to_string(),
+            entry_type: "agent_run".to_string(),
+            title: format!("{} {}", run.role_id, run.status),
+            summary: run.result_status.clone(),
+            status: Some(run.status.clone()),
+            created_at: run.created_at.clone(),
+            metadata: json!(run),
+        });
+    }
+
+    let mut approval_stmt = conn
+        .prepare(
+            "SELECT id, project_id, entity_type, entity_id, approval_type, status,
+                    requested_reason, decision_reason, requested_at, decided_at, created_at, updated_at
+             FROM approvals
+             WHERE project_id = ?1
+               AND entity_type = 'Task'
+               AND entity_id = ?2
+             ORDER BY created_at DESC",
+        )
+        .map_err(|err| CommandError::database("태스크 타임라인을 읽지 못했습니다.", err))?;
+    let approvals = approval_stmt
+        .query_map(params![project_id, task_id], map_approval)
+        .map_err(|err| CommandError::database("태스크 타임라인을 읽지 못했습니다.", err))?;
+    for approval in collect_rows(approvals, "태스크 타임라인을 읽지 못했습니다.")? {
+        entries.push(TaskTimelineEntry {
+            id: approval.id.clone(),
+            project_id: project_id.to_string(),
+            task_id: task_id.to_string(),
+            entry_type: "approval".to_string(),
+            title: approval.approval_type.clone(),
+            summary: Some(approval.requested_reason.clone()),
+            status: Some(approval.status.clone()),
+            created_at: approval.created_at.clone(),
+            metadata: json!(approval),
+        });
+    }
+
+    let mut evidence_stmt = conn
+        .prepare(
+            "SELECT id, command_json, cwd, exit_code, timed_out, canceled, stdout_path, stderr_path,
+                    changed_files_path, diff_path, duration_ms, started_at, finished_at, created_at
+             FROM command_evidence
+             WHERE project_id = ?1 AND task_id = ?2
+             ORDER BY created_at DESC",
+        )
+        .map_err(|err| CommandError::database("태스크 타임라인을 읽지 못했습니다.", err))?;
+    let evidence_rows = evidence_stmt
+        .query_map(params![project_id, task_id], |row| {
+            let id: String = row.get(0)?;
+            let command_raw: String = row.get(1)?;
+            let cwd: String = row.get(2)?;
+            let exit_code: Option<i64> = row.get(3)?;
+            let timed_out: i64 = row.get(4)?;
+            let canceled: i64 = row.get(5)?;
+            let stdout_path: Option<String> = row.get(6)?;
+            let stderr_path: Option<String> = row.get(7)?;
+            let changed_files_path: Option<String> = row.get(8)?;
+            let diff_path: Option<String> = row.get(9)?;
+            let duration_ms: Option<i64> = row.get(10)?;
+            let started_at: String = row.get(11)?;
+            let finished_at: Option<String> = row.get(12)?;
+            let created_at: String = row.get(13)?;
+            let command_value: Value = serde_json::from_str(&command_raw).unwrap_or(Value::Null);
+            Ok(TaskTimelineEntry {
+                id,
+                project_id: project_id.to_string(),
+                task_id: task_id.to_string(),
+                entry_type: "command_evidence".to_string(),
+                title: "Command evidence".to_string(),
+                summary: exit_code.map(|code| format!("exit code {code}")),
+                status: Some(
+                    if timed_out == 1 {
+                        "TimedOut"
+                    } else if canceled == 1 {
+                        "Canceled"
+                    } else {
+                        "Finished"
+                    }
+                    .to_string(),
+                ),
+                created_at,
+                metadata: json!({
+                    "command": command_value,
+                    "cwd": cwd,
+                    "exitCode": exit_code,
+                    "timedOut": timed_out == 1,
+                    "canceled": canceled == 1,
+                    "stdoutPath": stdout_path,
+                    "stderrPath": stderr_path,
+                    "changedFilesPath": changed_files_path,
+                    "diffPath": diff_path,
+                    "durationMs": duration_ms,
+                    "startedAt": started_at,
+                    "finishedAt": finished_at
+                }),
+            })
+        })
+        .map_err(|err| CommandError::database("태스크 타임라인을 읽지 못했습니다.", err))?;
+    entries.extend(collect_rows(
+        evidence_rows,
+        "태스크 타임라인을 읽지 못했습니다.",
+    )?);
+
+    let mut gate_stmt = conn
+        .prepare(
+            "SELECT id, run_id, gate, status, blocking, summary, blockers_json,
+                    affected_files_json, suggested_next_json, created_at
+             FROM gate_results
+             WHERE project_id = ?1 AND task_id = ?2
+             ORDER BY created_at DESC",
+        )
+        .map_err(|err| CommandError::database("태스크 타임라인을 읽지 못했습니다.", err))?;
+    let gate_rows = gate_stmt
+        .query_map(params![project_id, task_id], |row| {
+            let id: String = row.get(0)?;
+            let run_id: Option<String> = row.get(1)?;
+            let gate: String = row.get(2)?;
+            let status: String = row.get(3)?;
+            let blocking: i64 = row.get(4)?;
+            let summary: String = row.get(5)?;
+            let blockers_raw: String = row.get(6)?;
+            let affected_files_raw: String = row.get(7)?;
+            let suggested_next_raw: Option<String> = row.get(8)?;
+            let created_at: String = row.get(9)?;
+            Ok(TaskTimelineEntry {
+                id,
+                project_id: project_id.to_string(),
+                task_id: task_id.to_string(),
+                entry_type: "gate_result".to_string(),
+                title: gate.clone(),
+                summary: Some(summary.clone()),
+                status: Some(status.clone()),
+                created_at,
+                metadata: json!({
+                    "runId": run_id,
+                    "gate": gate,
+                    "status": status,
+                    "blocking": blocking == 1,
+                    "summary": summary,
+                    "blockers": serde_json::from_str::<Value>(&blockers_raw).unwrap_or(Value::Null),
+                    "affectedFiles": serde_json::from_str::<Value>(&affected_files_raw).unwrap_or(Value::Null),
+                    "suggestedNext": suggested_next_raw
+                        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                }),
+            })
+        })
+        .map_err(|err| CommandError::database("태스크 타임라인을 읽지 못했습니다.", err))?;
+    entries.extend(collect_rows(
+        gate_rows,
+        "태스크 타임라인을 읽지 못했습니다.",
+    )?);
+
+    let mut repair_stmt = conn
+        .prepare(
+            "SELECT id, run_id, gate_result_id, status, severity, summary,
+                    required_action, affected_files_json, created_at, updated_at
+             FROM repair_requests
+             WHERE project_id = ?1 AND task_id = ?2
+             ORDER BY created_at DESC",
+        )
+        .map_err(|err| CommandError::database("태스크 타임라인을 읽지 못했습니다.", err))?;
+    let repair_rows = repair_stmt
+        .query_map(params![project_id, task_id], |row| {
+            let id: String = row.get(0)?;
+            let run_id: Option<String> = row.get(1)?;
+            let gate_result_id: Option<String> = row.get(2)?;
+            let status: String = row.get(3)?;
+            let severity: String = row.get(4)?;
+            let summary: String = row.get(5)?;
+            let required_action: String = row.get(6)?;
+            let affected_files_raw: String = row.get(7)?;
+            let created_at: String = row.get(8)?;
+            let updated_at: String = row.get(9)?;
+            Ok(TaskTimelineEntry {
+                id,
+                project_id: project_id.to_string(),
+                task_id: task_id.to_string(),
+                entry_type: "repair_request".to_string(),
+                title: format!("{} repair", severity),
+                summary: Some(summary.clone()),
+                status: Some(status.clone()),
+                created_at,
+                metadata: json!({
+                    "runId": run_id,
+                    "gateResultId": gate_result_id,
+                    "status": status,
+                    "severity": severity,
+                    "summary": summary,
+                    "requiredAction": required_action,
+                    "affectedFiles": serde_json::from_str::<Value>(&affected_files_raw).unwrap_or(Value::Null),
+                    "updatedAt": updated_at
+                }),
+            })
+        })
+        .map_err(|err| CommandError::database("태스크 타임라인을 읽지 못했습니다.", err))?;
+    entries.extend(collect_rows(
+        repair_rows,
+        "태스크 타임라인을 읽지 못했습니다.",
+    )?);
+
+    entries.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(entries)
 }
 
 pub fn get_agent_run(conn: &Connection, run_id: &str) -> CommandResult<AgentRunSummary> {
@@ -1202,6 +1510,44 @@ pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> Comman
     }
 
     Ok(count)
+}
+
+fn mark_host_run_persistence_failed(
+    conn: &Connection,
+    project_id: &str,
+    run_id: &str,
+    task_id: &str,
+    role_id: &str,
+    error: &CommandError,
+) -> CommandResult<()> {
+    let timestamp = now();
+    conn.execute(
+        "UPDATE agent_runs
+         SET status = 'NeedsInspection',
+             result_status = COALESCE(result_status, 'needs_changes'),
+             finished_at = COALESCE(finished_at, ?1),
+             updated_at = ?1
+         WHERE id = ?2 AND project_id = ?3",
+        params![timestamp, run_id, project_id],
+    )
+    .map_err(|err| CommandError::database("host run 실패 상태를 저장하지 못했습니다.", err))?;
+    insert_audit(
+        conn,
+        project_id,
+        "AgentRun",
+        Some(run_id),
+        "agent_run.persistence_failed",
+        json!({
+            "runId": run_id,
+            "taskId": task_id,
+            "roleId": role_id,
+            "error": {
+                "code": error.code.as_str(),
+                "message": error.message.as_str(),
+                "details": error.details.as_deref()
+            }
+        }),
+    )
 }
 
 pub fn read_run_artifact(
@@ -1583,6 +1929,256 @@ fn insert_audit(
     )
     .map_err(|err| CommandError::database("감사 로그를 저장하지 못했습니다.", err))?;
     Ok(())
+}
+
+struct CommandEvidenceInput<'a> {
+    project_id: &'a str,
+    task_id: Option<&'a str>,
+    run_id: Option<&'a str>,
+    command_args: &'a [String],
+    cwd: &'a str,
+    exit_code: i32,
+    timed_out: bool,
+    canceled: bool,
+    stdout_path: Option<&'a str>,
+    stderr_path: Option<&'a str>,
+    changed_files_path: Option<&'a str>,
+    diff_path: Option<&'a str>,
+    duration_ms: Option<i64>,
+    started_at: &'a str,
+    finished_at: Option<&'a str>,
+}
+
+fn insert_command_evidence(
+    conn: &Connection,
+    input: CommandEvidenceInput<'_>,
+) -> CommandResult<String> {
+    let id = new_id();
+    conn.execute(
+        "INSERT INTO command_evidence (
+           id, project_id, task_id, run_id, command_json, cwd, exit_code, timed_out, canceled,
+           stdout_path, stderr_path, changed_files_path, diff_path, duration_ms,
+           started_at, finished_at, created_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            id,
+            input.project_id,
+            input.task_id,
+            input.run_id,
+            serde_json::to_string(input.command_args).map_err(|err| {
+                CommandError::io("command evidence를 직렬화하지 못했습니다.", err)
+            })?,
+            input.cwd,
+            input.exit_code,
+            bool_to_i64(input.timed_out),
+            bool_to_i64(input.canceled),
+            input.stdout_path,
+            input.stderr_path,
+            input.changed_files_path,
+            input.diff_path,
+            input.duration_ms,
+            input.started_at,
+            input.finished_at,
+            now()
+        ],
+    )
+    .map_err(|err| CommandError::database("command evidence를 저장하지 못했습니다.", err))?;
+    Ok(id)
+}
+
+fn persist_gate_result_from_structured_result(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    run_id: &str,
+    role_id: &str,
+    result: &Value,
+    final_status: &str,
+) -> CommandResult<()> {
+    let explicit_gate = result.get("gateResult").and_then(Value::as_object);
+    let synthetic_gate = gate_for_role(role_id).filter(|_| {
+        final_status == "Succeeded" && result.get("status").and_then(Value::as_str) == Some("pass")
+    });
+    if explicit_gate.is_none() && synthetic_gate.is_none() {
+        return Ok(());
+    }
+
+    let fallback_gate = synthetic_gate.unwrap_or("rules");
+    let gate = explicit_gate
+        .and_then(|gate| gate.get("gate"))
+        .and_then(Value::as_str)
+        .filter(|value| valid_gate(value))
+        .unwrap_or(fallback_gate);
+    let status = explicit_gate
+        .and_then(|gate| gate.get("status"))
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "pass" | "warn" | "fail"))
+        .unwrap_or(if final_status == "Succeeded" {
+            "pass"
+        } else {
+            "needs_inspection"
+        });
+    let blocking = explicit_gate
+        .and_then(|gate| gate.get("blocking"))
+        .and_then(Value::as_bool)
+        .unwrap_or(status == "fail" || status == "needs_inspection");
+    let blockers = explicit_gate
+        .and_then(|gate| gate.get("blockers"))
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let affected_files = explicit_gate
+        .and_then(|gate| gate.get("affectedFiles"))
+        .filter(|value| value.is_array())
+        .cloned()
+        .or_else(|| {
+            result
+                .get("changedFiles")
+                .filter(|value| value.is_array())
+                .cloned()
+        })
+        .unwrap_or_else(|| json!([]));
+    let suggested_next = explicit_gate
+        .and_then(|gate| gate.get("suggestedNext"))
+        .filter(|value| value.is_object())
+        .cloned();
+    let summary = result
+        .get("summary")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("gate result가 기록되었습니다.");
+    let gate_result_id = new_id();
+    let timestamp = now();
+
+    conn.execute(
+        "INSERT INTO gate_results (
+           id, project_id, task_id, run_id, gate, status, blocking, summary,
+           blockers_json, affected_files_json, suggested_next_json, created_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            gate_result_id,
+            project_id,
+            task_id,
+            run_id,
+            gate,
+            status,
+            bool_to_i64(blocking),
+            summary,
+            blockers.to_string(),
+            affected_files.to_string(),
+            suggested_next.as_ref().map(Value::to_string),
+            timestamp
+        ],
+    )
+    .map_err(|err| CommandError::database("gate result를 저장하지 못했습니다.", err))?;
+
+    if blocking {
+        insert_repair_request_for_gate(
+            conn,
+            project_id,
+            task_id,
+            run_id,
+            &gate_result_id,
+            &blockers,
+            &affected_files,
+            suggested_next.as_ref(),
+            summary,
+        )?;
+    }
+
+    insert_audit(
+        conn,
+        project_id,
+        "Task",
+        Some(task_id),
+        "gate_result.recorded",
+        json!({
+            "runId": run_id,
+            "gateResultId": gate_result_id,
+            "gate": gate,
+            "status": status,
+            "blocking": blocking
+        }),
+    )?;
+    Ok(())
+}
+
+fn insert_repair_request_for_gate(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    run_id: &str,
+    gate_result_id: &str,
+    blockers: &Value,
+    affected_files: &Value,
+    suggested_next: Option<&Value>,
+    fallback_summary: &str,
+) -> CommandResult<()> {
+    let first_blocker = blockers.as_array().and_then(|items| items.first());
+    let severity = first_blocker
+        .and_then(|item| item.get("severity"))
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "error" | "warning"))
+        .unwrap_or("error");
+    let summary = first_blocker
+        .and_then(|item| item.get("summary"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback_summary);
+    let required_action = suggested_next
+        .and_then(|item| item.get("reason"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("blocking gate result를 해결한 뒤 해당 role을 재실행한다.");
+    let timestamp = now();
+
+    conn.execute(
+        "INSERT INTO repair_requests (
+           id, project_id, task_id, run_id, gate_result_id, status, severity, summary,
+           required_action, affected_files_json, created_at, updated_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, 'Open', ?6, ?7, ?8, ?9, ?10, ?10)",
+        params![
+            new_id(),
+            project_id,
+            task_id,
+            run_id,
+            gate_result_id,
+            severity,
+            summary,
+            required_action,
+            affected_files.to_string(),
+            timestamp
+        ],
+    )
+    .map_err(|err| CommandError::database("repair request를 저장하지 못했습니다.", err))?;
+    Ok(())
+}
+
+fn bool_to_i64(value: bool) -> i64 {
+    if value {
+        1
+    } else {
+        0
+    }
+}
+
+fn valid_gate(value: &str) -> bool {
+    matches!(
+        value,
+        "plan_verification" | "code_review" | "test" | "security" | "rules"
+    )
+}
+
+fn gate_for_role(role_id: &str) -> Option<&'static str> {
+    match role_id {
+        "plan_verifier" => Some("plan_verification"),
+        "code_reviewer" => Some("code_review"),
+        "tester" => Some("test"),
+        _ => None,
+    }
 }
 
 fn ensure_epic_exists(conn: &Connection, project_id: &str, epic_id: &str) -> CommandResult<()> {
@@ -2209,12 +2805,171 @@ fn apply_successful_role_result(
     Ok(())
 }
 
+struct RoleContextContract {
+    objective: &'static str,
+    focus: &'static [&'static str],
+    pass_conditions: &'static [&'static str],
+    blocking_conditions: &'static [&'static str],
+    forbidden: &'static [&'static str],
+    gate: Option<&'static str>,
+}
+
+impl RoleContextContract {
+    fn to_json(&self, role_id: &str) -> Value {
+        json!({
+            "roleId": role_id,
+            "objective": self.objective,
+            "focus": self.focus,
+            "passConditions": self.pass_conditions,
+            "blockingConditions": self.blocking_conditions,
+            "forbidden": self.forbidden,
+            "gate": self.gate
+        })
+    }
+}
+
+fn role_context_contract(role_id: &str) -> RoleContextContract {
+    match role_id {
+        "planner" => RoleContextContract {
+            objective: "사용자 목표와 현재 저장소 맥락을 바탕으로 승인 가능한 실행 계획을 만든다.",
+            focus: &[
+                "문제 정의, 범위, acceptance criteria, 위험, 검증 계획을 명확히 분리한다.",
+                "구현을 직접 변경하지 않고 계획 산출물만 작성한다.",
+                "불확실하거나 사용자 확인이 필요한 항목은 open question으로 남긴다.",
+            ],
+            pass_conditions: &[
+                "계획이 태스크의 목표와 직접 연결되어 있다.",
+                "구현자가 바로 실행할 수 있는 작업 단위와 검증 방법이 있다.",
+                "승인 전 자동 상태 전이를 요구하지 않는다.",
+            ],
+            blocking_conditions: &[
+                "요구사항이 상충하거나 핵심 정보가 부족하다.",
+                "저장소 구조를 확인하지 않고 큰 범위의 변경을 제안한다.",
+            ],
+            forbidden: &[
+                "사용자 승인 없이 파일을 변경하지 않는다.",
+                "현재 task scope 밖의 리팩토링을 계획에 끼워 넣지 않는다.",
+            ],
+            gate: None,
+        },
+        "coder" => RoleContextContract {
+            objective: "승인된 계획과 task scope 안에서 최소 변경으로 구현을 완료한다.",
+            focus: &[
+                "기존 코드 스타일과 모듈 경계를 따른다.",
+                "변경 파일과 의도, 남은 위험을 structured result에 정확히 기록한다.",
+                "새 query/filter/API 계약 변경이 있으면 관련 cache key와 타입을 함께 갱신한다.",
+            ],
+            pass_conditions: &[
+                "요구사항을 만족하는 코드 변경이 worktree에 남아 있다.",
+                "고아 import, 명백한 타입 오류, 스키마 불일치를 만들지 않는다.",
+                "검증하지 못한 항목은 risks 또는 nextActions에 남긴다.",
+            ],
+            blocking_conditions: &[
+                "승인된 계획과 다른 방향의 변경이 필요하다.",
+                "필수 파일이나 API 계약을 찾지 못했다.",
+                "테스트 또는 타입 오류를 스스로 해결하지 못했다.",
+            ],
+            forbidden: &[
+                "관련 없는 파일 정리나 스타일 변경을 하지 않는다.",
+                "사용자 변경으로 보이는 dirty file을 되돌리지 않는다.",
+            ],
+            gate: None,
+        },
+        "plan_verifier" => RoleContextContract {
+            objective: "승인된 계획과 실제 diff가 일치하는지 판정한다.",
+            focus: &[
+                "변경 파일, diff, task 설명, approval 상태를 비교한다.",
+                "계획 밖 변경, 누락된 acceptance criteria, 위험한 상태 전이를 찾는다.",
+                "차단 이슈는 gateResult.blocking=true로 남긴다.",
+            ],
+            pass_conditions: &[
+                "구현 diff가 승인된 계획 범위 안에 있다.",
+                "필수 acceptance criteria가 코드 또는 검증 계획으로 대응된다.",
+                "blocking issue가 없으면 gateResult.status=pass를 남긴다.",
+            ],
+            blocking_conditions: &[
+                "계획 밖 변경이 있거나 필수 변경이 누락되었다.",
+                "사용자 승인이 필요한 범위 변경이 있다.",
+            ],
+            forbidden: &[
+                "직접 코드를 수정하지 않는다.",
+                "검토하지 않은 항목을 pass로 처리하지 않는다.",
+            ],
+            gate: Some("plan_verification"),
+        },
+        "code_reviewer" => RoleContextContract {
+            objective: "diff의 결함, 유지보수 위험, 타입/상태 흐름 문제를 리뷰한다.",
+            focus: &[
+                "버그 가능성, 데이터 손실, stale cache, 권한/상태 전이 오류를 우선한다.",
+                "발견 사항은 재현 조건과 파일 단위 근거를 포함한다.",
+                "차단 이슈는 gateResult.blocking=true로 남긴다.",
+            ],
+            pass_conditions: &[
+                "사용자 요구사항 대비 명백한 결함이 없다.",
+                "새 위험이 있으면 non-blocking risk로 구분되어 있다.",
+                "blocking finding이 없으면 gateResult.status=pass를 남긴다.",
+            ],
+            blocking_conditions: &[
+                "런타임 오류, 타입 계약 위반, 잘못된 상태 전이가 예상된다.",
+                "테스트 없이 넘기기 어려운 공용 계약 변경이 있다.",
+            ],
+            forbidden: &[
+                "리뷰 중 직접 수정하지 않는다.",
+                "스타일 취향만으로 blocking을 만들지 않는다.",
+            ],
+            gate: Some("code_review"),
+        },
+        "tester" => RoleContextContract {
+            objective: "설정된 검증 명령과 산출물을 바탕으로 merge 전 품질을 판정한다.",
+            focus: &[
+                "타입체크, 단위 테스트, 빌드, 필요한 수동 검증 결과를 구분한다.",
+                "실패 로그의 원인과 재시도 가능한 명령을 남긴다.",
+                "차단 이슈는 gateResult.blocking=true로 남긴다.",
+            ],
+            pass_conditions: &[
+                "필수 검증 명령이 통과했거나 명확한 생략 사유가 있다.",
+                "변경 범위에 맞는 테스트 근거가 summary에 있다.",
+                "blocking failure가 없으면 gateResult.status=pass를 남긴다.",
+            ],
+            blocking_conditions: &[
+                "필수 테스트, 타입체크, 빌드가 실패했다.",
+                "실패를 검증하지 못했거나 재현 가능한 로그가 없다.",
+            ],
+            forbidden: &[
+                "검증 실패를 pass로 처리하지 않는다.",
+                "테스트 목적 외 구현 변경을 하지 않는다.",
+            ],
+            gate: Some("test"),
+        },
+        _ => RoleContextContract {
+            objective: "주어진 task scope 안에서 role 실행 결과를 만든다.",
+            focus: &["Context Pack에 포함된 task, worktree, diff 정보를 따른다."],
+            pass_conditions: &["structured-result.json schema v1을 만족한다."],
+            blocking_conditions: &["role을 안전하게 완료할 수 없다."],
+            forbidden: &["사용자 변경을 되돌리지 않는다."],
+            gate: Some("rules"),
+        },
+    }
+}
+
+fn markdown_list(items: &[&str]) -> String {
+    if items.is_empty() {
+        return "- 없음".to_string();
+    }
+    items
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn build_context_pack_markdown(
     root: &Path,
     task: &TaskSummary,
     worktree: &TaskWorktreeSummary,
     role_id: &str,
 ) -> CommandResult<String> {
+    let contract = role_context_contract(role_id);
     let changed_files = git::changed_files(root)?;
     let recent_commits = git::recent_commits(root, 5)?;
     let refs = task
@@ -2246,11 +3001,20 @@ fn build_context_pack_markdown(
          - branch: {}\n\
          - path: {}\n\
          - head: {}\n\n\
+         ## Role Contract\n\n\
+         - objective: {}\n\
+         - gate: {}\n\n\
+         ### Focus\n\n{}\n\n\
+         ### Pass Conditions\n\n{}\n\n\
+         ### Blocking Conditions\n\n{}\n\n\
+         ### Forbidden\n\n{}\n\n\
          ## External Refs\n\n{}\n\n\
          ## Changed Files\n\n{}\n\n\
          ## Recent Commits\n\n{}\n\n\
          ## Expected Output\n\n\
-         Agent는 `summary.md`와 schema v1을 만족하는 `structured-result.json`을 남겨야 한다.\n",
+         Agent는 `summary.md`와 schema v1을 만족하는 `structured-result.json`을 남겨야 한다.\n\
+         `status=pass`는 pass conditions를 만족할 때만 사용한다.\n\
+         차단 이슈가 있으면 `gateResult.status=fail`, `blocking=true`, `blockers`, `affectedFiles`, `suggestedNext`를 채운다.\n",
         task.id,
         task.title,
         task.status,
@@ -2263,6 +3027,12 @@ fn build_context_pack_markdown(
         worktree.branch_name,
         worktree.worktree_path,
         worktree.head_hash.as_deref().unwrap_or("-"),
+        contract.objective,
+        contract.gate.unwrap_or("none"),
+        markdown_list(contract.focus.as_ref()),
+        markdown_list(contract.pass_conditions.as_ref()),
+        markdown_list(contract.blocking_conditions.as_ref()),
+        markdown_list(contract.forbidden.as_ref()),
         if refs.is_empty() {
             "- 없음"
         } else {
@@ -2287,16 +3057,27 @@ fn build_context_manifest(
     worktree: &TaskWorktreeSummary,
     role_id: &str,
 ) -> CommandResult<Value> {
+    let contract = role_context_contract(role_id);
     Ok(json!({
         "schemaVersion": 1,
+        "generatedAt": now(),
         "projectRoot": root.to_string_lossy(),
         "task": task,
         "roleId": role_id,
+        "roleContract": contract.to_json(role_id),
         "worktree": worktree,
         "git": {
             "changedFiles": git::changed_files(root)?,
             "recentCommits": git::recent_commits(root, 5)?
         },
+        "sources": [
+            "task",
+            "worktree",
+            "externalRefs",
+            "git.changedFiles",
+            "git.recentCommits",
+            "roleContract"
+        ],
         "expectedArtifacts": [
             "summary.md",
             "structured-result.json",
@@ -2413,7 +3194,176 @@ fn validate_structured_result(value: &Value) -> bool {
         && value.get("changedFiles").is_some_and(Value::is_array)
         && value.get("risks").is_some_and(Value::is_array)
         && value.get("nextActions").is_some_and(Value::is_array)
-        && value.get("gateResult").is_some()
+        && value
+            .get("gateResult")
+            .is_some_and(validate_gate_result_value)
+}
+
+fn structured_result_has_blocking_gate(value: &Value) -> bool {
+    value
+        .get("gateResult")
+        .and_then(Value::as_object)
+        .is_some_and(|gate| {
+            let status = gate.get("status").and_then(Value::as_str);
+            gate.get("blocking")
+                .and_then(Value::as_bool)
+                .unwrap_or(matches!(status, Some("fail" | "needs_inspection")))
+        })
+}
+
+fn validate_gate_result_value(value: &Value) -> bool {
+    if value.is_null() {
+        return true;
+    }
+    let Some(gate) = value.as_object() else {
+        return false;
+    };
+
+    gate.get("gate")
+        .and_then(Value::as_str)
+        .is_some_and(valid_gate)
+        && matches!(
+            gate.get("status").and_then(Value::as_str),
+            Some("pass" | "warn" | "fail")
+        )
+        && gate.get("blocking").is_some_and(Value::is_boolean)
+        && gate
+            .get("blockers")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().all(validate_gate_blocker))
+        && gate
+            .get("affectedFiles")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().all(|item| item.as_str().is_some()))
+        && gate
+            .get("suggestedNext")
+            .and_then(Value::as_object)
+            .is_some_and(|suggested_next| {
+                matches!(
+                    suggested_next.get("action").and_then(Value::as_str),
+                    Some("fix" | "retry" | "request_changes" | "approve" | "manual_review")
+                ) && suggested_next
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| !reason.trim().is_empty())
+            })
+}
+
+fn validate_gate_blocker(value: &Value) -> bool {
+    let Some(blocker) = value.as_object() else {
+        return false;
+    };
+    blocker
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty())
+        && matches!(
+            blocker.get("severity").and_then(Value::as_str),
+            Some("error" | "warning")
+        )
+        && blocker
+            .get("summary")
+            .and_then(Value::as_str)
+            .is_some_and(|summary| !summary.trim().is_empty())
+        && blocker
+            .get("file")
+            .is_none_or(|file| file.as_str().is_some())
+}
+
+struct DiffConsistencyCheck {
+    actual_files: Vec<String>,
+    reported_files: Vec<String>,
+    missing_files: Vec<String>,
+    extra_files: Vec<String>,
+}
+
+fn diff_consistency_check(
+    role_id: &str,
+    result: Option<&Value>,
+    actual_changed_files: &[GitFileStatus],
+) -> Option<DiffConsistencyCheck> {
+    if role_id != "coder" {
+        return None;
+    }
+    let result = result?;
+    if result.get("status").and_then(Value::as_str) != Some("pass") {
+        return None;
+    }
+
+    let reported_files = result
+        .get("changedFiles")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let actual_files = actual_changed_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<BTreeSet<_>>();
+
+    if reported_files == actual_files {
+        return None;
+    }
+
+    let missing_files = actual_files
+        .difference(&reported_files)
+        .cloned()
+        .collect::<Vec<_>>();
+    let extra_files = reported_files
+        .difference(&actual_files)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Some(DiffConsistencyCheck {
+        actual_files: actual_files.into_iter().collect(),
+        reported_files: reported_files.into_iter().collect(),
+        missing_files,
+        extra_files,
+    })
+}
+
+fn diff_consistency_gate_result(check: &DiffConsistencyCheck) -> Value {
+    let affected_files = check
+        .actual_files
+        .iter()
+        .chain(check.reported_files.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    json!({
+        "schemaVersion": 1,
+        "status": "needs_changes",
+        "summary": "structured-result changedFiles가 실제 Git diff와 일치하지 않습니다.",
+        "changedFiles": affected_files.clone(),
+        "risks": [
+            "agent가 보고한 변경 파일과 실제 worktree 변경 파일이 달라 자동 전이를 중단했습니다."
+        ],
+        "nextActions": [
+            "changedFiles를 실제 diff와 맞춘 뒤 coder role을 재실행하거나 수동으로 검토합니다."
+        ],
+        "gateResult": {
+            "gate": "rules",
+            "status": "fail",
+            "blocking": true,
+            "blockers": [
+                {
+                    "id": "changed-files-mismatch",
+                    "severity": "error",
+                    "summary": "reported changedFiles와 actual Git diff가 다릅니다."
+                }
+            ],
+            "affectedFiles": affected_files,
+            "suggestedNext": {
+                "action": "fix",
+                "reason": format!(
+                    "missing={:?}, extra={:?}",
+                    check.missing_files, check.extra_files
+                )
+            }
+        }
+    })
 }
 
 fn validate_relative_artifact_path(path: &str) -> CommandResult<()> {
@@ -2550,6 +3500,25 @@ mod tests {
         .expect("create task")
     }
 
+    fn run_prepared_host_role(
+        conn: &mut Connection,
+        repo: &TestRepo,
+        project_id: &str,
+        task_id: &str,
+        role_id: &str,
+    ) -> AgentRunSummary {
+        let run =
+            prepare_role_context(conn, &repo.root, project_id, task_id, role_id).expect("context");
+        run_host_role(
+            conn,
+            &repo.root,
+            project_id,
+            &run.id,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("host run")
+    }
+
     #[test]
     fn migrations_are_idempotent() {
         let mut conn = Connection::open_in_memory().expect("in-memory db");
@@ -2562,7 +3531,7 @@ mod tests {
                 row.get(0)
             })
             .expect("version");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -2587,6 +3556,38 @@ mod tests {
             "gateResult": null
         });
         assert!(!validate_structured_result(&invalid));
+
+        let invalid_gate = json!({
+            "schemaVersion": 1,
+            "status": "pass",
+            "summary": "gate shape invalid",
+            "changedFiles": [],
+            "risks": [],
+            "nextActions": [],
+            "gateResult": {
+                "gate": "code_review",
+                "status": "pass",
+                "blocking": false,
+                "blockers": [{ "severity": "error", "summary": "missing id" }],
+                "affectedFiles": [],
+                "suggestedNext": { "action": "approve", "reason": "검증" }
+            }
+        });
+        assert!(!validate_structured_result(&invalid_gate));
+    }
+
+    #[test]
+    fn role_context_contracts_are_role_specific() {
+        let planner = role_context_contract("planner");
+        let verifier = role_context_contract("plan_verifier");
+        let reviewer = role_context_contract("code_reviewer");
+        let tester = role_context_contract("tester");
+
+        assert_eq!(planner.gate, None);
+        assert_eq!(verifier.gate, Some("plan_verification"));
+        assert_eq!(reviewer.gate, Some("code_review"));
+        assert_eq!(tester.gate, Some("test"));
+        assert_ne!(planner.objective, verifier.objective);
     }
 
     #[test]
@@ -2660,6 +3661,424 @@ mod tests {
         assert!(artifact_dir.join("context-pack.md").exists());
         assert!(artifact_dir.join("context-pack.json").exists());
         assert!(artifact_dir.join("structured-result.schema.json").exists());
+
+        let context_pack =
+            fs::read_to_string(artifact_dir.join("context-pack.md")).expect("context pack");
+        assert!(context_pack.contains("## Role Contract"));
+        assert!(
+            context_pack.contains("승인된 계획과 task scope 안에서 최소 변경으로 구현을 완료한다.")
+        );
+
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(artifact_dir.join("context-pack.json")).expect("manifest"),
+        )
+        .expect("manifest json");
+        assert_eq!(
+            manifest
+                .get("roleContract")
+                .and_then(|value| value.get("roleId"))
+                .and_then(Value::as_str),
+            Some("coder")
+        );
+        assert_eq!(
+            manifest
+                .get("roleContract")
+                .and_then(|value| value.get("gate")),
+            Some(&Value::Null)
+        );
+    }
+
+    #[test]
+    fn fixture_host_core_loop_reaches_merge_waiting() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("desktop app dir")
+            .join("scripts")
+            .join("fixture-runner.mjs");
+
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: Some(json!([
+                    {
+                        "roleId": "planner",
+                        "label": "설계자",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "pass"],
+                        "timeoutSeconds": 60
+                    },
+                    {
+                        "roleId": "coder",
+                        "label": "구현자",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "pass"],
+                        "timeoutSeconds": 60
+                    },
+                    {
+                        "roleId": "plan_verifier",
+                        "label": "계획 검토자",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "pass"],
+                        "timeoutSeconds": 60
+                    },
+                    {
+                        "roleId": "code_reviewer",
+                        "label": "코드 리뷰어",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "pass"],
+                        "timeoutSeconds": 60
+                    },
+                    {
+                        "roleId": "tester",
+                        "label": "테스트 담당자",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "pass"],
+                        "timeoutSeconds": 60
+                    }
+                ])),
+                ai_connections: None,
+                role_assignments: None,
+                worktree_root: None,
+                jira_config: None,
+                obsidian_vault_path: None,
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("settings");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let planner = run_prepared_host_role(&mut conn, &repo, &project.id, &task.id, "planner");
+        assert_eq!(planner.status, "Succeeded");
+        let approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("approvals")
+            .remove(0);
+        decide_approval(
+            &mut conn,
+            &project.id,
+            &approval.id,
+            "Approved",
+            "계획 승인",
+        )
+        .expect("approve");
+
+        let coder = run_prepared_host_role(&mut conn, &repo, &project.id, &task.id, "coder");
+        assert_eq!(
+            coder.status,
+            "Succeeded",
+            "coder result: {}; changed files: {}",
+            fs::read_to_string(
+                repo.root
+                    .join(&coder.artifact_dir)
+                    .join("structured-result.json")
+            )
+            .unwrap_or_default(),
+            fs::read_to_string(
+                repo.root
+                    .join(&coder.artifact_dir)
+                    .join("changed-files.json")
+            )
+            .unwrap_or_default()
+        );
+        let verifier =
+            run_prepared_host_role(&mut conn, &repo, &project.id, &task.id, "plan_verifier");
+        assert_eq!(verifier.status, "Succeeded");
+        let reviewer =
+            run_prepared_host_role(&mut conn, &repo, &project.id, &task.id, "code_reviewer");
+        assert_eq!(reviewer.status, "Succeeded");
+        let tester = run_prepared_host_role(&mut conn, &repo, &project.id, &task.id, "tester");
+        assert_eq!(tester.status, "Succeeded");
+
+        let updated_task = get_task(&conn, &task.id).expect("task");
+        assert_eq!(updated_task.status, "MergeWaiting");
+
+        let run_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_runs WHERE task_id = ?1",
+                params![task.id],
+                |row| row.get(0),
+            )
+            .expect("run count");
+        assert_eq!(run_count, 5);
+
+        let evidence_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM command_evidence WHERE task_id = ?1",
+                params![task.id],
+                |row| row.get(0),
+            )
+            .expect("evidence count");
+        assert_eq!(evidence_count, 5);
+
+        let gate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM gate_results WHERE task_id = ?1",
+                params![task.id],
+                |row| row.get(0),
+            )
+            .expect("gate count");
+        assert_eq!(gate_count, 3);
+    }
+
+    #[test]
+    fn host_run_records_command_evidence_gate_result_and_timeline() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("desktop app dir")
+            .join("scripts")
+            .join("fixture-runner.mjs");
+
+        update_task_status(
+            &mut conn,
+            &project.id,
+            &task.id,
+            "PlanVerification",
+            Some("테스트 상태 전환".to_string()),
+        )
+        .expect("status");
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: Some(json!([
+                    {
+                        "roleId": "plan_verifier",
+                        "label": "계획 검토자",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "pass"],
+                        "timeoutSeconds": 60
+                    }
+                ])),
+                ai_connections: None,
+                role_assignments: None,
+                worktree_root: None,
+                jira_config: None,
+                obsidian_vault_path: None,
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("settings");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let run = prepare_role_context(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &task.id,
+            "plan_verifier",
+        )
+        .expect("context");
+        let finished = run_host_role(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &run.id,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("host run");
+        assert_eq!(finished.status, "Succeeded");
+
+        let evidence_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM command_evidence WHERE run_id = ?1",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("evidence count");
+        assert_eq!(evidence_count, 1);
+
+        let gate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM gate_results WHERE run_id = ?1 AND gate = 'plan_verification'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("gate count");
+        assert_eq!(gate_count, 1);
+
+        let timeline = list_task_timeline(&conn, &project.id, &task.id).expect("timeline");
+        assert!(timeline
+            .iter()
+            .any(|entry| entry.entry_type == "command_evidence"));
+        assert!(timeline
+            .iter()
+            .any(|entry| entry.entry_type == "gate_result"));
+    }
+
+    #[test]
+    fn host_run_blocking_gate_creates_repair_request_without_advancing() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("desktop app dir")
+            .join("scripts")
+            .join("fixture-runner.mjs");
+
+        update_task_status(
+            &mut conn,
+            &project.id,
+            &task.id,
+            "PlanVerification",
+            Some("테스트 상태 전환".to_string()),
+        )
+        .expect("status");
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: Some(json!([
+                    {
+                        "roleId": "plan_verifier",
+                        "label": "계획 검토자",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "gate_fail"],
+                        "timeoutSeconds": 60
+                    }
+                ])),
+                ai_connections: None,
+                role_assignments: None,
+                worktree_root: None,
+                jira_config: None,
+                obsidian_vault_path: None,
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("settings");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let run = prepare_role_context(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &task.id,
+            "plan_verifier",
+        )
+        .expect("context");
+        let finished = run_host_role(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &run.id,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("host run");
+        assert_eq!(finished.status, "NeedsInspection");
+        assert_eq!(finished.result_status.as_deref(), Some("pass"));
+
+        let updated_task = get_task(&conn, &task.id).expect("task");
+        assert_eq!(updated_task.status, "PlanVerification");
+
+        let gate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM gate_results
+                 WHERE run_id = ?1 AND gate = 'plan_verification' AND status = 'fail' AND blocking = 1",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("gate count");
+        assert_eq!(gate_count, 1);
+
+        let repair_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM repair_requests WHERE run_id = ?1 AND status = 'Open'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("repair count");
+        assert_eq!(repair_count, 1);
+
+        let timeline = list_task_timeline(&conn, &project.id, &task.id).expect("timeline");
+        assert!(timeline
+            .iter()
+            .any(|entry| entry.entry_type == "repair_request"));
+    }
+
+    #[test]
+    fn coder_host_run_blocks_when_reported_changed_files_do_not_match_diff() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("desktop app dir")
+            .join("scripts")
+            .join("fixture-runner.mjs");
+
+        run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "planner").expect("planner");
+        let approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("approvals")
+            .remove(0);
+        decide_approval(&mut conn, &project.id, &approval.id, "Approved", "승인").expect("approve");
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: Some(json!([
+                    {
+                        "roleId": "coder",
+                        "label": "구현자",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "changed_files_mismatch"],
+                        "timeoutSeconds": 60
+                    }
+                ])),
+                ai_connections: None,
+                role_assignments: None,
+                worktree_root: None,
+                jira_config: None,
+                obsidian_vault_path: None,
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("settings");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "coder")
+            .expect("context");
+        let finished = run_host_role(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &run.id,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("host run");
+        assert_eq!(finished.status, "NeedsInspection");
+        assert_eq!(finished.result_status.as_deref(), Some("pass"));
+
+        let updated_task = get_task(&conn, &task.id).expect("task");
+        assert_eq!(updated_task.status, "Ready");
+
+        let rules_gate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM gate_results
+                 WHERE run_id = ?1 AND gate = 'rules' AND status = 'fail' AND blocking = 1",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("gate count");
+        assert_eq!(rules_gate_count, 1);
+
+        let repair_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM repair_requests WHERE run_id = ?1 AND status = 'Open'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("repair count");
+        assert_eq!(repair_count, 1);
     }
 
     #[test]
@@ -2687,6 +4106,7 @@ mod tests {
                 }
             ]),
             worktree_root: None,
+            jira_config: None,
             obsidian_vault_path: None,
             token_budget: None,
             artifact_retention_days: Some(30),

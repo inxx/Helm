@@ -8,7 +8,7 @@ use crate::models::{
     GitCommitSummary, GitFileStatus, GitRepositoryState, NodeRuntimeSummary,
     PlannerConversationInput, PlannerConversationResult, ProjectContext, ProjectSettingsPatch,
     ProjectSnapshot, ProjectSummary, RunnerCheckResult, RunnerTemplateSummary, TaskSummary,
-    TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
+    TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -576,6 +576,19 @@ fn get_changed_files(
 }
 
 #[tauri::command]
+fn get_task_worktree_changed_files(
+    project_id: String,
+    task_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<GitFileStatus>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    let worktree = db::get_task_worktree(&conn, &project_id, &task_id)?
+        .ok_or_else(|| CommandError::validation("태스크 worktree가 아직 준비되지 않았습니다."))?;
+    git::changed_files(Path::new(&worktree.worktree_path))
+}
+
+#[tauri::command]
 fn switch_git_branch(
     project_id: String,
     branch_name: String,
@@ -911,6 +924,17 @@ fn list_agent_runs(
     let context = project_context(&state, &project_id)?;
     let conn = db::open_existing_db(&context.db_path)?;
     db::list_agent_runs(&conn, &project_id, &task_id)
+}
+
+#[tauri::command]
+fn list_task_timeline(
+    project_id: String,
+    task_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<TaskTimelineEntry>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::list_task_timeline(&conn, &project_id, &task_id)
 }
 
 #[tauri::command]
@@ -1319,7 +1343,9 @@ fn resolve_planning_command(
                 .iter()
                 .find(|item| item.get("id").and_then(Value::as_str) == Some(connection_id))
         })
-        .ok_or_else(|| CommandError::validation("planner에 배정된 AI CLI 연결을 찾을 수 없습니다."))?;
+        .ok_or_else(|| {
+            CommandError::validation("planner에 배정된 AI CLI 연결을 찾을 수 없습니다.")
+        })?;
     if connection.get("enabled").and_then(Value::as_bool) == Some(false) {
         return Err(CommandError::validation(
             "planner에 배정된 AI CLI 연결이 비활성화되어 있습니다.",
@@ -1583,10 +1609,12 @@ fn normalize_planning_cli_args(args: Vec<String>, provider: Option<&str>) -> Vec
     while index < args.len() {
         if args[index] == "--ask-for-approval" {
             index += 1;
-            if args
-                .get(index)
-                .is_some_and(|value| matches!(value.as_str(), "never" | "on-request" | "on-failure" | "untrusted"))
-            {
+            if args.get(index).is_some_and(|value| {
+                matches!(
+                    value.as_str(),
+                    "never" | "on-request" | "on-failure" | "untrusted"
+                )
+            }) {
                 index += 1;
             }
             continue;
@@ -2367,6 +2395,7 @@ fn main() {
             get_local_branches,
             get_recent_commits,
             get_changed_files,
+            get_task_worktree_changed_files,
             switch_git_branch,
             list_node_runtimes,
             list_terminal_directories,
@@ -2382,6 +2411,7 @@ fn main() {
             retry_host_role,
             cancel_host_role,
             list_agent_runs,
+            list_task_timeline,
             get_agent_run,
             read_run_artifact,
             list_approvals,

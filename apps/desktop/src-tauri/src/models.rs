@@ -162,6 +162,20 @@ pub struct TaskWorktreeSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskTimelineEntry {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: String,
+    pub entry_type: String,
+    pub title: String,
+    pub summary: Option<String>,
+    pub status: Option<String>,
+    pub created_at: String,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuditLogEntry {
     pub id: String,
     pub project_id: String,

@@ -177,6 +177,18 @@ export interface TaskWorktreeSummary {
   updatedAt: string;
 }
 
+export interface TaskTimelineEntry {
+  id: string;
+  projectId: string;
+  taskId: string;
+  entryType: "agent_run" | "approval" | "command_evidence" | "gate_result" | "repair_request" | string;
+  title: string;
+  summary: string | null;
+  status: string | null;
+  createdAt: string;
+  metadata: unknown;
+}
+
 export interface AuditLogEntry {
   id: string;
   projectId: string;

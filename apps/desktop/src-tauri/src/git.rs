@@ -165,7 +165,10 @@ pub fn add_worktree(
 }
 
 pub fn changed_files(root: &Path) -> CommandResult<Vec<GitFileStatus>> {
-    let output = git_output(root, &["status", "--porcelain=v1", "-z"])?;
+    let output = git_output(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
     let parts: Vec<&str> = output.split('\0').filter(|part| !part.is_empty()).collect();
     let mut files = Vec::new();
     let mut index = 0;

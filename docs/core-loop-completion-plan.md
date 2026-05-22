@@ -1,7 +1,7 @@
 # Helm Core Loop Completion Plan
 
 작성일: 2026-05-19
-업데이트: 2026-05-21, Envoy/Hermes Desktop 레퍼런스 검토 반영 및 P0-02/P0-03 1차 구현 반영
+업데이트: 2026-05-22, Hive/MagesticAI 블로커 참고 원칙, P0-04 evidence/gate timeline/repair, role별 Context Pack contract, coder diff consistency gate, retry UX, fixture core loop 테스트, task worktree 변경 파일 UI, gateResult 검증 강화 반영
 
 ## 목적
 
@@ -11,12 +11,20 @@
 
 ## 구현 진행 현황
 
-2026-05-21 기준:
+2026-05-22 기준:
 
 - 완료: P0-02 Runner onboarding 1차 구현. Settings의 Runner Templates 화면에서 역할별 runner 준비 상태, 활성 AI CLI 연결 수, template 적용 필요 여부를 확인할 수 있다.
 - 완료: P0-03 Task Detail 제품 경로 1차 구현. 다음 액션은 runner 설정, worktree 준비, Context Pack 생성, host 실행, merge 준비 확인 순서로 노출된다.
+- 완료: P0-04 Evidence/Gate timeline 1차 구현. Host run 완료 시 command evidence, gate result, repair request를 구조화해 저장하고 Task Detail에서 결정 타임라인으로 확인할 수 있다.
+- 완료: Blocking gate 보강. `gateResult.blocking=true` 또는 fail/needs_inspection gate는 role 성공 전이를 막고 `NeedsInspection` 상태와 repair request를 남긴다.
+- 완료: Role별 Context Pack contract 1차 구현. planner/coder/plan_verifier/code_reviewer/tester의 목표, pass 조건, blocking 조건, 금지사항, gate를 context-pack 본문과 manifest에 포함한다.
+- 완료: Coder diff consistency gate 1차 구현. coder가 `status=pass`를 보고해도 structured result의 `changedFiles`와 실제 Git diff가 다르면 `rules` gate fail과 repair request를 남기고 상태 전이를 막는다.
+- 완료: Retry UX 1차 구현. 최신 active role run이 `Failed`, `TimedOut`, `NeedsInspection`, `Canceled`이면 Task Detail의 다음 액션에서 타임라인 확인과 retry 준비로 이어진다.
+- 완료: Fixture core loop 회귀 테스트. fixture host runner만으로 planner, approval, coder, plan verifier, code reviewer, tester를 거쳐 `MergeWaiting`까지 도달하는 경로를 검증한다.
+- 완료: Task worktree 변경 파일 UI. Task Detail의 Git 탭에서 프로젝트 루트가 아니라 해당 task worktree의 변경 파일을 파일 단위로 확인할 수 있다.
+- 완료: structured-result 검증 강화. `gateResult` object가 schema의 핵심 필수 필드와 enum을 만족하지 않으면 `NeedsInspection`으로 처리된다.
 - 유지: 개발용 context/stub role 버튼은 제품 primary path에서 제외하고 실행 탭의 접힌 개발 도구 안에만 둔다.
-- 검증: `npm run typecheck`, `npm run build` 통과.
+- 검증: `cargo test`, `npm run typecheck`, `npm run build`, 루트 `npm run check` 통과.
 
 ## 핵심 목표
 
@@ -58,10 +66,10 @@ Task 생성
 - 새 프로젝트의 기본 설정만으로 실제 runner 실행까지 이어지지 않는다. fixture/Codex/Claude template은 있지만 기본 role preset은 실행 command가 비어 있어 사용자가 먼저 template을 이해하고 적용해야 한다.
 - Task Detail이 상태 기반 primary action을 일부 제공하지만, 모든 Context Pack/Stub role 버튼이 함께 노출되어 사용자가 현재 가능한 작업과 디버그용 작업을 구분해야 한다.
 - Stub role과 Host role이 병렬로 노출된다. 데모/검증용 stub과 실제 host runner의 제품 의미가 UI에서 분리되지 않아 완성 제품처럼 느껴지지 않는다.
-- Context Pack은 공통 형식만 제공한다. planner/coder/verifier/reviewer/tester별 입력 계약, 성공 조건, 금지 사항, 기대 artifact가 충분히 분리되지 않았다.
+- Context Pack은 role별 contract를 포함한다. 아직 승인된 계획/이전 run/test 로그를 자동 요약해 role별로 선별하는 단계는 남아 있다.
 - reviewer/tester chain은 상태 이름은 있지만 검증 계약이 약하다. 리뷰 finding, 테스트 결과, gate 판정이 별도 DB 모델로 남지 않는다.
-- 실제 Git diff와 structured result를 비교해 판정하는 gate가 없다. agent가 pass를 보고하면 실제 변경 파일과 보고 파일이 어긋나도 자동 전이가 가능하다.
-- 실패/차단 흐름이 얇다. `needs_changes`, review fail, test fail, schema mismatch, command fail 이후 사용자가 무엇을 수정하고 어떤 role을 retry해야 하는지 task detail에서 안내하지 못한다.
+- coder pass 경로는 실제 Git diff와 structured result의 `changedFiles`를 비교한다. 아직 reviewer/tester의 실제 command result와 gate 판정을 더 강하게 연결해야 한다.
+- 실패/차단 흐름은 retry 준비까지 연결된다. 아직 Blocked 전이, repair request 상세 화면, handoff record는 남아 있다.
 - MergeWaiting 이후가 비어 있다. merge readiness, base/head 비교, diff 요약, blocker, merge command preview, merge approval이 없다.
 - Git 화면은 project-level read-only viewer에 머문다. task worktree branch/path/diff와 Git 화면이 연결되지 않는다.
 - Terminal은 xterm 기반 분할 PTY까지 가능하다. 아직 workflow preset, task workflow와 연결된 test/check 실행, 결과 저장, audit 연결, launch diagnostics는 약하다.
@@ -129,6 +137,17 @@ Task 생성
 - 원격 host를 Helm의 기본 운영 모델로 바꾸는 것
 - Hermes Desktop의 updater나 release trust 설명을 Helm에 맞지 않게 과장하는 것
 
+### 구현 중 블로커 대응 원칙
+
+구현 중 특정 영역에서 막히면, 먼저 Helm의 source of truth와 현재 상태 머신을 확인한 뒤 유사 프로젝트가 같은 문제를 어떻게 해결했는지 파일 단위로 확인한다. 확인 결과는 코드 복사가 아니라 Helm 구조에 맞춘 해결책으로 재설계한다.
+
+참고 기준:
+
+- Hive는 PTY lifecycle, CLI agent bootstrap, session resume, local runtime guard, workspace/task protocol, dispatch/report ledger, terminal streaming 문제에서 우선 참고한다.
+- MagesticAI는 spec/task lifecycle, worktree isolation, planner/coder/QA 흐름, test discovery, security scan, QA signoff, merge readiness, multi-provider 설정 문제에서 우선 참고한다.
+- 라이선스가 다른 저장소의 코드는 복사하지 않는다. 필요한 경우 문제 정의, 데이터 계약, failure mode, UX 흐름, 테스트 전략만 차용한다.
+- 참고 후에는 "어떤 문제로 막혔는지", "어느 프로젝트의 어떤 방식을 확인했는지", "Helm에는 왜 다르게 적용했는지"를 구현 PR 또는 작업 노트에 남긴다.
+
 ## 기능 갭 인벤토리
 
 | 영역 | 현재 상태 | 미비점 | 우선순위 |
@@ -137,15 +156,15 @@ Task 생성
 | Runner onboarding | template command와 health check 있음 | 새 프로젝트 기본값만으로 실행 불가 | P0 |
 | Task Detail | next action 기본 안내 있음 | 제품 액션과 디버그 버튼이 섞임 | P0 |
 | Role 실행 | stub run, host run 모두 가능 | stub/host 의미 분리와 실행 모드 선택 부족 | P0 |
-| Context Pack | 공통 context 생성 | role별 contract와 acceptance criteria 부족 | P0 |
-| Gate 판정 | schema/exit code/pass 기반 | diff consistency, review/test gate 없음 | P0 |
+| Context Pack | role별 목표/pass/blocking/금지/gate contract 생성 | 승인 계획, 이전 run, 테스트 로그 선별 포함 필요 | P0 |
+| Gate 판정 | schema/exit code/pass, explicit gate result, coder diff consistency 기반 | reviewer/tester 실제 command gate 강화 필요 | P0 |
 | 실패 처리 | retry/cancel 일부 있음 | 실패 이유별 next action과 Blocked 전이 약함 | P0 |
 | Merge readiness | 상태값만 있음 | readiness command/UI/approval/preview 없음 | P1 |
-| Git 연계 | project git viewer 있음 | task worktree diff와 연결 부족 | P1 |
+| Git 연계 | project git viewer와 task worktree 변경 파일 표시 있음 | diff preview, merge readiness command, merge approval 필요 | P1 |
 | Terminal | xterm 기반 분할 PTY | workflow preset, tester/check artifact, audit 연결, launch diagnostics 없음 | P1 |
-| Audit/Timeline | audit row 저장 | 태스크 타임라인 UI 없음 | P1 |
-| 자동 검증 | 단위 테스트 일부 | fixture core loop 테스트 없음 | P0 |
-| Evidence/Decision | run artifact와 approval 일부 있음 | command evidence, decision basis, handoff record가 구조화되지 않음 | P0 |
+| Audit/Timeline | run, approval, command evidence, gate, repair request 타임라인 표시 | decision basis/handoff record 확장 필요 | P1 |
+| 자동 검증 | fixture core loop와 gate failure 회귀 테스트 있음 | UI/e2e smoke와 merge readiness 테스트 필요 | P0 |
+| Evidence/Decision | run artifact, approval, command evidence, gate/repair 일부 구조화 | decision basis, handoff record 확장 필요 | P0 |
 | 안전한 문서/설정 편집 | artifact viewer 중심 | plan/config/context 편집 시 stale conflict/atomic write 계약 없음 | P0 |
 | Workflow preset | runner template만 있음 | 반복 작업 프리셋과 실행 diagnostics 없음 | P1 |
 | Session/Run 탐색 | task detail run list | pin/search/filter가 없음 | P1 |

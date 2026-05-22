@@ -5,16 +5,19 @@ import { runnerReadinessFor, roleLabel, type RoleId } from "../lib/runnerReadine
 import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
 import type {
   AgentRunSummary,
+  GitFileStatus,
   ProjectSnapshot,
   TaskStatus,
   TaskSummary,
+  TaskTimelineEntry,
   TaskWorktreeSummary,
 } from "../lib/types";
 
-type DetailTab = "overview" | "runs" | "git" | "artifacts";
+type DetailTab = "overview" | "timeline" | "runs" | "git" | "artifacts";
 
 const DETAIL_TABS: Array<{ id: DetailTab; label: string }> = [
   { id: "overview", label: "개요" },
+  { id: "timeline", label: "타임라인" },
   { id: "runs", label: "실행" },
   { id: "git", label: "Git" },
   { id: "artifacts", label: "산출물" },
@@ -35,7 +38,9 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
   const [status, setStatus] = useState<TaskStatus>("Planned");
   const [busy, setBusy] = useState(false);
   const [runs, setRuns] = useState<AgentRunSummary[]>([]);
+  const [timeline, setTimeline] = useState<TaskTimelineEntry[]>([]);
   const [worktree, setWorktree] = useState<TaskWorktreeSummary | null>(null);
+  const [worktreeFiles, setWorktreeFiles] = useState<GitFileStatus[]>([]);
   const [artifact, setArtifact] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const pendingPlanApproval = task
@@ -60,11 +65,17 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
   useEffect(() => {
     if (!task) {
       setRuns([]);
+      setTimeline([]);
       setWorktree(null);
+      setWorktreeFiles([]);
       return;
     }
     void api.listAgentRuns(snapshot.project.id, task.id).then(setRuns);
-    void api.getTaskWorktree(snapshot.project.id, task.id).then(setWorktree);
+    void api.listTaskTimeline(snapshot.project.id, task.id).then(setTimeline);
+    void api.getTaskWorktree(snapshot.project.id, task.id).then((nextWorktree) => {
+      setWorktree(nextWorktree);
+      void refreshWorktreeFiles(nextWorktree);
+    });
   }, [snapshot.project.id, task?.id]);
 
   if (!task) {
@@ -114,6 +125,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
       const run = await api.runStubRole(snapshot.project.id, task.id, roleId);
       const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
       setRuns(nextRuns);
+      setTimeline(await api.listTaskTimeline(snapshot.project.id, task.id));
       await onRefresh();
       setActiveTab("artifacts");
       showToast({
@@ -139,6 +151,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
       await api.prepareRoleContext(snapshot.project.id, task.id, roleId);
       const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
       setRuns(nextRuns);
+      setTimeline(await api.listTaskTimeline(snapshot.project.id, task.id));
       await onRefresh();
       setActiveTab("runs");
       showToast({
@@ -163,6 +176,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
     try {
       const nextWorktree = await api.ensureTaskWorktree(snapshot.project.id, task.id);
       setWorktree(nextWorktree);
+      await refreshWorktreeFiles(nextWorktree);
       await onRefresh();
       showToast({
         tone: "success",
@@ -194,6 +208,18 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
     }
   }
 
+  async function refreshWorktreeFiles(nextWorktree: TaskWorktreeSummary | null = worktree) {
+    if (!task || !nextWorktree) {
+      setWorktreeFiles([]);
+      return;
+    }
+    try {
+      setWorktreeFiles(await api.getTaskWorktreeChangedFiles(snapshot.project.id, task.id));
+    } catch {
+      setWorktreeFiles([]);
+    }
+  }
+
   async function runHost(runId: string) {
     if (!task) return;
     setBusy(true);
@@ -201,15 +227,20 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
       current.map((run) => (run.id === runId ? { ...run, status: "Running" } : run)),
     );
     try {
-      await api.runHostRole(snapshot.project.id, runId);
+      const completedRun = await api.runHostRole(snapshot.project.id, runId);
       const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
       setRuns(nextRuns);
+      setTimeline(await api.listTaskTimeline(snapshot.project.id, task.id));
+      await refreshWorktreeFiles();
       await onRefresh();
-      setActiveTab("artifacts");
+      setActiveTab(completedRun.status === "Succeeded" ? "artifacts" : "timeline");
       showToast({
-        tone: "success",
-        title: "Host 실행 완료",
-        description: "실행 결과와 태스크 상태를 갱신했습니다.",
+        tone: completedRun.status === "Succeeded" ? "success" : "info",
+        title: completedRun.status === "Succeeded" ? "Host 실행 완료" : "Host 실행 점검 필요",
+        description:
+          completedRun.status === "Succeeded"
+            ? "실행 결과와 태스크 상태를 갱신했습니다."
+            : `${completedRun.status} 상태입니다. 타임라인에서 gate와 repair 근거를 확인하세요.`,
       });
     } catch (error) {
       showToast({
@@ -229,6 +260,8 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
       await api.retryHostRole(snapshot.project.id, runId);
       const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
       setRuns(nextRuns);
+      setTimeline(await api.listTaskTimeline(snapshot.project.id, task.id));
+      await refreshWorktreeFiles();
       await onRefresh();
       setActiveTab("runs");
       showToast({
@@ -255,6 +288,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
       setRuns((current) =>
         current.map((run) => (run.id === runId ? { ...run, status: "Canceled" } : run)),
       );
+      setTimeline(await api.listTaskTimeline(snapshot.project.id, task.id));
       showToast({
         tone: "success",
         title: "실행 취소 완료",
@@ -275,6 +309,9 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
   const activeRunnerReadiness = activeRoleId ? runnerReadinessFor(snapshot.settings, activeRoleId) : null;
   const activeQueuedRun = activeRoleId
     ? runs.find((run) => run.roleId === activeRoleId && run.status === "Queued") ?? null
+    : null;
+  const activeRetryableRun = activeRoleId
+    ? runs.find((run) => run.roleId === activeRoleId && isRetryableRunStatus(run.status)) ?? null
     : null;
 
   return (
@@ -316,9 +353,11 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
           worktree={worktree}
           runnerReadiness={activeRunnerReadiness}
           queuedRun={activeQueuedRun}
+          retryableRun={activeRetryableRun}
           onPrepareWorktree={prepareWorktree}
           onPrepareContext={prepareContext}
           onRunHost={runHost}
+          onRetryHost={retryHost}
           onGoSettings={onGoSettings}
           onGoGit={onGoGit}
         />
@@ -371,6 +410,27 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
               <span>worktree</span>
               <strong>{worktree ? "ready" : "none"}</strong>
             </div>
+          </section>
+        </div>
+      ) : null}
+
+      {activeTab === "timeline" ? (
+        <div className="task-console-tab-panel">
+          <section className="detail-section">
+            <h3>결정 타임라인</h3>
+            {timeline.length === 0 ? <p className="muted">아직 기록된 실행 근거가 없습니다.</p> : null}
+            <ol className="timeline-list">
+              {timeline.map((entry) => (
+                <li key={`${entry.entryType}-${entry.id}`} className="timeline-entry">
+                  <div>
+                    <strong>{timelineTitle(entry)}</strong>
+                    <span>{formatTimelineDate(entry.createdAt)}</span>
+                  </div>
+                  {entry.summary ? <p>{entry.summary}</p> : null}
+                  <small>{entry.entryType}{entry.status ? ` · ${entry.status}` : ""}</small>
+                </li>
+              ))}
+            </ol>
           </section>
         </div>
       ) : null}
@@ -433,7 +493,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
                           cancel
                         </button>
                       ) : null}
-                      {latestRun && ["Failed", "TimedOut", "NeedsInspection", "Canceled"].includes(latestRun.status) ? (
+                      {latestRun && isRetryableRunStatus(latestRun.status) ? (
                         <button disabled={busy} onClick={() => retryHost(latestRun.id)} type="button">
                           retry
                         </button>
@@ -490,6 +550,22 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
               worktree 준비
             </button>
           </section>
+
+          <section className="detail-section">
+            <h3>Worktree 변경 파일</h3>
+            {!worktree ? <p className="muted">worktree 준비 후 변경 파일을 확인할 수 있습니다.</p> : null}
+            {worktree && worktreeFiles.length === 0 ? <p className="muted">변경 파일 없음</p> : null}
+            {worktreeFiles.length > 0 ? (
+              <ul className="plain-list">
+                {worktreeFiles.map((file) => (
+                  <li key={`${file.status}-${file.path}`}>
+                    <strong>{file.status}</strong>
+                    <span>{file.path}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </section>
         </div>
       ) : null}
 
@@ -539,9 +615,11 @@ interface NextActionProps {
   worktree: TaskWorktreeSummary | null;
   runnerReadiness: ReturnType<typeof runnerReadinessFor> | null;
   queuedRun: AgentRunSummary | null;
+  retryableRun: AgentRunSummary | null;
   onPrepareWorktree: () => Promise<void>;
   onPrepareContext: (roleId: string) => Promise<void>;
   onRunHost: (runId: string) => Promise<void>;
+  onRetryHost: (runId: string) => Promise<void>;
   onGoSettings: () => void;
   onGoGit: () => void;
 }
@@ -553,9 +631,11 @@ function NextAction({
   worktree,
   runnerReadiness,
   queuedRun,
+  retryableRun,
   onPrepareWorktree,
   onPrepareContext,
   onRunHost,
+  onRetryHost,
   onGoSettings,
   onGoGit,
 }: NextActionProps) {
@@ -615,6 +695,20 @@ function NextAction({
         </div>
         <button className="primary-button" disabled={busy} onClick={() => void onPrepareWorktree()} type="button">
           worktree 준비
+        </button>
+      </div>
+    );
+  }
+
+  if (retryableRun) {
+    return (
+      <div className="next-action-card waiting">
+        <div>
+          <strong>{roleLabel(retryableRun.roleId)} 점검 필요</strong>
+          <p>최근 실행이 {retryableRun.status} 상태입니다. 타임라인의 gate와 repair 근거를 확인한 뒤 재시도합니다.</p>
+        </div>
+        <button className="primary-button" disabled={busy} onClick={() => void onRetryHost(retryableRun.id)} type="button">
+          retry 준비
         </button>
       </div>
     );
@@ -710,6 +804,10 @@ function roleForTaskStatus(status: TaskStatus): RoleId | null {
   return null;
 }
 
+function isRetryableRunStatus(status: AgentRunSummary["status"]): boolean {
+  return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
+}
+
 function messageFromError(error: unknown, fallback: string): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "object" && error !== null && "message" in error) {
@@ -717,4 +815,24 @@ function messageFromError(error: unknown, fallback: string): string {
   }
   if (typeof error === "string") return error;
   return fallback;
+}
+
+function timelineTitle(entry: TaskTimelineEntry): string {
+  if (entry.entryType === "agent_run") return `Role run · ${entry.title}`;
+  if (entry.entryType === "approval") return `Approval · ${entry.title}`;
+  if (entry.entryType === "command_evidence") return "Command evidence";
+  if (entry.entryType === "gate_result") return `Gate · ${entry.title}`;
+  if (entry.entryType === "repair_request") return `Repair · ${entry.title}`;
+  return entry.title;
+}
+
+function formatTimelineDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }

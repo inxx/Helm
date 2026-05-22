@@ -19,6 +19,7 @@ import type {
   RunnerTemplateSummary,
   TaskStatus,
   TaskSummary,
+  TaskTimelineEntry,
   TaskWorktreeSummary,
   TerminalCommandResult,
   TerminalDirectoryEntry,
@@ -107,6 +108,9 @@ export const api = {
   listAgentRuns(projectId: string, taskId: string) {
     return invoke<AgentRunSummary[]>("list_agent_runs", { projectId, taskId });
   },
+  listTaskTimeline(projectId: string, taskId: string) {
+    return invoke<TaskTimelineEntry[]>("list_task_timeline", { projectId, taskId });
+  },
   readRunArtifact(projectId: string, runId: string, artifactName: string) {
     return invoke<string>("read_run_artifact", { projectId, runId, artifactName });
   },
@@ -130,6 +134,9 @@ export const api = {
   },
   getChangedFiles(projectId: string) {
     return invoke<GitFileStatus[]>("get_changed_files", { projectId });
+  },
+  getTaskWorktreeChangedFiles(projectId: string, taskId: string) {
+    return invoke<GitFileStatus[]>("get_task_worktree_changed_files", { projectId, taskId });
   },
   switchGitBranch(projectId: string, branchName: string) {
     return invoke<ProjectSnapshot>("switch_git_branch", { projectId, branchName });

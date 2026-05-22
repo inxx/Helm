@@ -55,7 +55,7 @@ if (mode === "schema_invalid") {
 }
 
 const changedFiles = [];
-if (roleId === "coder" && mode === "pass") {
+if (roleId === "coder" && (mode === "pass" || mode === "changed_files_mismatch")) {
   const outputDir = path.join(worktreePath, "helm-fixture-output");
   fs.mkdirSync(outputDir, { recursive: true });
   const filePath = path.join(outputDir, `${taskId}.txt`);
@@ -65,6 +65,29 @@ if (roleId === "coder" && mode === "pass") {
 
 const status = mode === "fail" ? "fail" : mode === "needs_changes" ? "needs_changes" : "pass";
 const summary = `Fixture ${roleId} completed with ${status}.`;
+const reportedChangedFiles = mode === "changed_files_mismatch" ? [] : changedFiles;
+const gateResult =
+  mode === "gate_fail"
+    ? {
+        gate: roleId === "plan_verifier" ? "plan_verification" : "rules",
+        status: "fail",
+        blocking: true,
+        summary: "Fixture blocking gate failed.",
+        blockers: [
+          {
+            id: "fixture-gate-failure",
+            severity: "error",
+            summary: "Fixture gate requires repair.",
+            file: "README.md",
+          },
+        ],
+        affectedFiles: ["README.md"],
+        suggestedNext: {
+          action: "fix",
+          reason: "Repair fixture gate failure and rerun verification.",
+        },
+      }
+    : null;
 
 fs.writeFileSync(
   summaryPath,
@@ -77,10 +100,10 @@ fs.writeFileSync(
       schemaVersion: 1,
       status,
       summary,
-      changedFiles,
+      changedFiles: reportedChangedFiles,
       risks: status === "pass" ? [] : ["Fixture runner forced a non-pass result."],
       nextActions: nextActionsFor(roleId, status),
-      gateResult: null,
+      gateResult,
     },
     null,
     2,
