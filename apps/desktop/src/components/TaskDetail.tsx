@@ -1,12 +1,13 @@
 import { Loader2 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useToast } from "./ToastProvider";
 import { api } from "../lib/api";
 import { runnerReadinessFor, roleLabel, type RoleId } from "../lib/runnerReadiness";
 import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
 import type {
   AgentRunSummary,
+  ApprovalSummary,
   GitFileStatus,
   ProjectSnapshot,
   RunEventSummary,
@@ -47,6 +48,8 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
   const [worktreeFiles, setWorktreeFiles] = useState<GitFileStatus[]>([]);
   const [artifact, setArtifact] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
+  const [detailsLoaded, setDetailsLoaded] = useState(false);
+  const autoStartKeyRef = useRef<string | null>(null);
   const pendingPlanApproval = task
     ? snapshot.approvals.find(
         (approval) =>
@@ -54,7 +57,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
           approval.entityId === task.id &&
           approval.approvalType === "PlanApproval" &&
           approval.status === "Pending",
-      )
+      ) ?? null
     : null;
   const busy = Boolean(busyAction);
 
@@ -66,29 +69,45 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
     setActiveTab("overview");
     setArtifact(null);
     setRunEvents({});
+    setDetailsLoaded(false);
+    autoStartKeyRef.current = null;
   }, [task?.id]);
 
   useEffect(() => {
+    let disposed = false;
     if (!task) {
       setRuns([]);
       setTimeline([]);
       setWorktree(null);
       setWorktreeFiles([]);
+      setDetailsLoaded(true);
       return;
     }
-    void api.listAgentRuns(snapshot.project.id, task.id).then(async (nextRuns) => {
-      setRuns(nextRuns);
-      const recentRuns = nextRuns.slice(0, 3);
-      const entries = await Promise.all(
-        recentRuns.map(async (run) => [run.id, await api.listRunEvents(snapshot.project.id, run.id)] as const),
-      );
-      setRunEvents(Object.fromEntries(entries));
-    });
-    void api.listTaskTimeline(snapshot.project.id, task.id).then(setTimeline);
-    void api.getTaskWorktree(snapshot.project.id, task.id).then((nextWorktree) => {
-      setWorktree(nextWorktree);
-      void refreshWorktreeFiles(nextWorktree);
-    });
+    setDetailsLoaded(false);
+    void (async () => {
+      try {
+        const [nextRuns, nextTimeline, nextWorktree] = await Promise.all([
+          api.listAgentRuns(snapshot.project.id, task.id),
+          api.listTaskTimeline(snapshot.project.id, task.id),
+          api.getTaskWorktree(snapshot.project.id, task.id),
+        ]);
+        if (disposed) return;
+        setRuns(nextRuns);
+        setTimeline(nextTimeline);
+        setWorktree(nextWorktree);
+        await refreshWorktreeFiles(nextWorktree);
+        const recentRuns = nextRuns.slice(0, 3);
+        const entries = await Promise.all(
+          recentRuns.map(async (run) => [run.id, await api.listRunEvents(snapshot.project.id, run.id)] as const),
+        );
+        if (!disposed) setRunEvents(Object.fromEntries(entries));
+      } finally {
+        if (!disposed) setDetailsLoaded(true);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
   }, [snapshot.project.id, task?.id]);
 
   useEffect(() => {
@@ -143,6 +162,22 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
     };
   }, [onRefresh, snapshot.project.id, task?.id]);
 
+  useEffect(() => {
+    if (!task || !detailsLoaded || pendingPlanApproval) return;
+    const roleId = roleForTaskStatus(task.status);
+    if (!roleId) return;
+    const readiness = runnerReadinessFor(snapshot.settings, roleId);
+    if (!readiness.ready) return;
+    if (runs.some((run) => run.status === "Queued" || run.status === "Running")) return;
+    if (runs.some((run) => run.roleId === roleId && !isRetryableRunStatus(run.status))) return;
+
+    const key = `${task.id}:${task.status}:${roleId}`;
+    if (autoStartKeyRef.current === key) return;
+    autoStartKeyRef.current = key;
+
+    void autoStartNextRole(roleId, key);
+  }, [detailsLoaded, pendingPlanApproval, runs, snapshot.settings, task?.id, task?.status]);
+
   if (!task) {
     return (
       <aside className="detail-panel empty-detail">
@@ -150,6 +185,36 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
         <p>보드에서 태스크를 선택하면 상세 정보가 표시됩니다.</p>
       </aside>
     );
+  }
+
+  async function autoStartNextRole(roleId: RoleId, key: string) {
+    if (!task) return;
+    setActiveTab("runs");
+    try {
+      const run = await api.startNextRoleRun(snapshot.project.id, task.id);
+      setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
+      const nextWorktree = await api.getTaskWorktree(snapshot.project.id, task.id);
+      setWorktree(nextWorktree);
+      await refreshWorktreeFiles(nextWorktree);
+      const events = await api.listRunEvents(snapshot.project.id, run.id);
+      setRunEvents((current) => ({ ...current, [run.id]: events }));
+      showToast({
+        tone: "success",
+        title: `${roleLabel(roleId)} 자동 실행 시작`,
+        description: "Context Pack을 만들고 worker queue에 올렸습니다.",
+      });
+      await onRefresh();
+    } catch (error) {
+      const message = messageFromError(error, "");
+      if (!message.includes("이미 준비 중") && !message.includes("실행 중")) {
+        showToast({
+          tone: "error",
+          title: `${roleLabel(roleId)} 자동 실행 실패`,
+          description: message || "다음 role 실행을 자동으로 시작하지 못했습니다.",
+        });
+      }
+      autoStartKeyRef.current = key;
+    }
   }
 
   async function updateStatus() {
@@ -386,14 +451,66 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
     }
   }
 
+  async function approvePendingPlan(approval: ApprovalSummary) {
+    if (!task) return;
+    setBusyAction({ key: `approval:${approval.id}`, label: "계획 승인 중" });
+    try {
+      await api.approveApproval(snapshot.project.id, approval.id, "Task 상세에서 계획 승인");
+      await onRefresh();
+      setActiveTab("runs");
+      showToast({
+        tone: "success",
+        title: "계획 승인 완료",
+        description: "Coder 자동 실행을 시작합니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "계획 승인 실패",
+        description: messageFromError(error, "계획 승인을 처리하지 못했습니다."),
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function requestPlanRevision(approval: ApprovalSummary) {
+    if (!task) return;
+    const reason = window.prompt("수정 요청 내용을 적어주세요.", "계획 범위와 승인 조건을 다시 다듬어주세요.");
+    if (reason === null) return;
+    setBusyAction({ key: `approval:${approval.id}`, label: "수정 요청 저장 중" });
+    try {
+      await api.rejectApproval(snapshot.project.id, approval.id, reason.trim() || "계획 수정 요청");
+      await onRefresh();
+      setActiveTab("timeline");
+      showToast({
+        tone: "info",
+        title: "계획 수정 요청 저장",
+        description: "Task가 Blocked로 이동했습니다. 계획을 수정한 뒤 다시 실행할 수 있습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "수정 요청 실패",
+        description: messageFromError(error, "계획 수정 요청을 저장하지 못했습니다."),
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   const activeRoleId = roleForTaskStatus(task.status);
   const activeRunnerReadiness = activeRoleId ? runnerReadinessFor(snapshot.settings, activeRoleId) : null;
   const activeQueuedRun = activeRoleId
     ? runs.find((run) => run.roleId === activeRoleId && run.status === "Queued") ?? null
     : null;
+  const activeRunningRun = activeRoleId
+    ? runs.find((run) => run.roleId === activeRoleId && run.status === "Running") ?? null
+    : null;
   const activeRetryableRun = activeRoleId
     ? runs.find((run) => run.roleId === activeRoleId && isRetryableRunStatus(run.status)) ?? null
     : null;
+  const visibleRun = runs.find((run) => run.status === "Running" || run.status === "Queued") ?? runs[0] ?? null;
 
   return (
     <aside className="detail-panel task-console">
@@ -436,21 +553,76 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
         <h3>다음 액션</h3>
         <NextAction
           busy={busy}
-          pendingPlanApproval={Boolean(pendingPlanApproval)}
+          pendingPlanApproval={pendingPlanApproval}
           task={task}
           worktree={worktree}
           runnerReadiness={activeRunnerReadiness}
           queuedRun={activeQueuedRun}
+          runningRun={activeRunningRun}
           retryableRun={activeRetryableRun}
           busyAction={busyAction}
+          onApprovePlan={approvePendingPlan}
+          onRequestPlanRevision={requestPlanRevision}
           onPrepareWorktree={prepareWorktree}
           onPrepareContext={prepareContext}
           onRunHost={runHost}
+          onCancelHost={cancelHost}
           onRetryHost={retryHost}
           onGoSettings={onGoSettings}
           onGoGit={onGoGit}
         />
       </section>
+
+      {visibleRun ? (
+        <section className="detail-section run-focus-panel">
+          <div className="run-focus-header">
+            <div>
+              <h3>현재 실행</h3>
+              <p>
+                {roleLabel(visibleRun.roleId)} · {visibleRun.status}
+                {visibleRun.resultStatus ? ` · ${visibleRun.resultStatus}` : ""}
+              </p>
+            </div>
+            {visibleRun.status === "Running" ? (
+              <button
+                className="secondary-button"
+                disabled={busy}
+                onClick={() => void cancelHost(visibleRun.id)}
+                type="button"
+              >
+                실행 중지
+              </button>
+            ) : null}
+          </div>
+          <div className="run-document-grid">
+            <RunDocumentCard
+              description="runner가 읽는 md 계획/컨텍스트"
+              label="참고"
+              name="context-pack.md"
+              onOpen={() => showArtifact(visibleRun.id, "context-pack.md")}
+            />
+            <RunDocumentCard
+              description="runner가 작성하는 실행 요약"
+              label="생성"
+              name="summary.md"
+              onOpen={() => showArtifact(visibleRun.id, "summary.md")}
+            />
+            <RunDocumentCard
+              description="gate/상태 판정 JSON"
+              label="생성"
+              name="structured-result.json"
+              onOpen={() => showArtifact(visibleRun.id, "structured-result.json")}
+            />
+            <RunDocumentCard
+              description="실시간 stdout/stderr/status 기록"
+              label="진행"
+              name="events"
+              onOpen={() => showRunEvents(visibleRun.id)}
+            />
+          </div>
+          <RunEventPreview events={runEvents[visibleRun.id] ?? []} />
+        </section>
+      ) : null}
 
       <nav className="task-console-tabs" role="tablist" aria-label="태스크 콘솔">
         {DETAIL_TABS.map((tab) => (
@@ -789,16 +961,20 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
 
 interface NextActionProps {
   busy: boolean;
-  pendingPlanApproval: boolean;
+  pendingPlanApproval: ApprovalSummary | null;
   task: TaskSummary;
   worktree: TaskWorktreeSummary | null;
   runnerReadiness: ReturnType<typeof runnerReadinessFor> | null;
   queuedRun: AgentRunSummary | null;
+  runningRun: AgentRunSummary | null;
   retryableRun: AgentRunSummary | null;
   busyAction: { key: string; label: string } | null;
+  onApprovePlan: (approval: ApprovalSummary) => Promise<void>;
+  onRequestPlanRevision: (approval: ApprovalSummary) => Promise<void>;
   onPrepareWorktree: () => Promise<void>;
   onPrepareContext: (roleId: string) => Promise<void>;
   onRunHost: (runId: string) => Promise<void>;
+  onCancelHost: (runId: string) => Promise<void>;
   onRetryHost: (runId: string) => Promise<void>;
   onGoSettings: () => void;
   onGoGit: () => void;
@@ -811,20 +987,42 @@ function NextAction({
   worktree,
   runnerReadiness,
   queuedRun,
+  runningRun,
   retryableRun,
   busyAction,
+  onApprovePlan,
+  onRequestPlanRevision,
   onPrepareWorktree,
   onPrepareContext,
   onRunHost,
+  onCancelHost,
   onRetryHost,
   onGoSettings,
   onGoGit,
 }: NextActionProps) {
   if (pendingPlanApproval) {
+    const approvalBusy = busyAction?.key === `approval:${pendingPlanApproval.id}`;
     return (
       <div className="next-action-card waiting">
-        <strong>계획 승인 대기</strong>
-        <p>승인이 완료되면 구현자 역할 자동 실행을 시도합니다.</p>
+        <div>
+          <strong>계획 승인 대기</strong>
+          <p>승인하면 coder가 자동 실행되고, 수정 요청을 보내면 Task가 Blocked로 돌아갑니다.</p>
+        </div>
+        <div className="artifact-actions">
+          <button
+            aria-busy={approvalBusy ? true : undefined}
+            className={approvalBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+            disabled={busy}
+            onClick={() => void onApprovePlan(pendingPlanApproval)}
+            type="button"
+          >
+            {approvalBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+            승인하고 계속
+          </button>
+          <button disabled={busy} onClick={() => void onRequestPlanRevision(pendingPlanApproval)} type="button">
+            계획 수정 요청
+          </button>
+        </div>
       </div>
     );
   }
@@ -899,6 +1097,28 @@ function NextAction({
         </div>
         <button className="primary-button" disabled={busy} onClick={() => void onRetryHost(retryableRun.id)} type="button">
           retry 준비
+        </button>
+      </div>
+    );
+  }
+
+  if (runningRun) {
+    const cancelBusy = busyAction?.key === `cancel:${runningRun.id}`;
+    return (
+      <div className="next-action-card">
+        <div>
+          <strong>{roleLabel(runningRun.roleId)} 실행 중</strong>
+          <p>실행 탭에서 stdout, events, context-pack.md, summary.md를 볼 수 있습니다.</p>
+        </div>
+        <button
+          aria-busy={cancelBusy ? true : undefined}
+          className={cancelBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+          disabled={busy}
+          onClick={() => void onCancelHost(runningRun.id)}
+          type="button"
+        >
+          {cancelBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+          {cancelBusy ? "중지 중..." : "실행 중지"}
         </button>
       </div>
     );
@@ -1008,6 +1228,26 @@ function roleForTaskStatus(status: TaskStatus): RoleId | null {
 
 function isRetryableRunStatus(status: AgentRunSummary["status"]): boolean {
   return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
+}
+
+function RunDocumentCard({
+  description,
+  label,
+  name,
+  onOpen,
+}: {
+  description: string;
+  label: string;
+  name: string;
+  onOpen: () => void;
+}) {
+  return (
+    <button className="run-document-card" onClick={onOpen} type="button">
+      <span>{label}</span>
+      <strong>{name}</strong>
+      <small>{description}</small>
+    </button>
+  );
 }
 
 function RunEventPreview({ events }: { events: RunEventSummary[] }) {

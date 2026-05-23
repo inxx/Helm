@@ -51,6 +51,14 @@ interface PlannerDraftTask {
   testPlan: string[];
 }
 
+interface PlannerDraftParseResult {
+  draft: PlannerDraft;
+  note: string | null;
+}
+
+const PLANNER_UI_TIMEOUT_MS = 12_000;
+const PLANNER_REFINE_DELAY_MS = 2_000;
+
 export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask }: PlanningScreenProps) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [goal, setGoal] = useState("");
@@ -60,6 +68,9 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   const [plannerOperation, setPlannerOperation] = useState<"planner" | "approve" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
+  const sessionsRef = useRef<PlanningSessionStub[]>([]);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const plannerRefinementTimerRef = useRef<number | null>(null);
 
   const sortedSessions = useMemo(() => sessions, [sessions]);
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
@@ -72,6 +83,16 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     if (!latestMessageScrollKey) return;
     threadEndRef.current?.scrollIntoView({ block: "end" });
   }, [activeSessionId, latestMessageScrollKey]);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  useEffect(() => () => cancelPlannerRefinement(), []);
 
   if (!snapshot) {
     return (
@@ -93,11 +114,10 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   const draftJiraState = activeSession?.jiraState ?? jiraStateForInput(projectSnapshot, jiraRef);
   const jiraChecks = jiraPlanningChecks(projectSnapshot, draftJiraRef, draftJiraState);
   const draft = activeSession?.draft ?? (goal.trim() ? buildPlannerDraft(goal, null) : null);
-  const plannerPending = Boolean(activeSession?.messages.some((message) => message.pending));
-  const plannerRunning = plannerOperation === "planner" || plannerPending;
   const approvingPlan = plannerOperation === "approve";
 
   function startNewPlan() {
+    cancelPlannerRefinement();
     setActiveSessionId(null);
     setGoal("");
     setPlannerRequest("");
@@ -105,10 +125,34 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     setError(null);
   }
 
-  async function startPlannerSession() {
+  function schedulePlannerRefinement(task: () => void) {
+    cancelPlannerRefinement();
+    plannerRefinementTimerRef.current = window.setTimeout(() => {
+      plannerRefinementTimerRef.current = null;
+      window.requestAnimationFrame(() => {
+        window.setTimeout(task, 0);
+      });
+    }, PLANNER_REFINE_DELAY_MS);
+  }
+
+  function cancelPlannerRefinement() {
+    if (plannerRefinementTimerRef.current === null) return;
+    window.clearTimeout(plannerRefinementTimerRef.current);
+    plannerRefinementTimerRef.current = null;
+  }
+
+  function shouldRunPlannerRefinement(sessionId: string, messageId: string) {
+    if (document.visibilityState === "hidden") return false;
+    if (activeSessionIdRef.current !== sessionId) return false;
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (!session || session.status === "Approved") return false;
+    return session.messages.some((message) => message.id === messageId);
+  }
+
+  function startPlannerSession() {
     const trimmed = goal.trim();
     const trimmedJiraRef = jiraRef.trim();
-    if (!trimmed || plannerRunning || approvingPlan) return;
+    if (!trimmed || approvingPlan) return;
 
     const existingTask = trimmedJiraRef ? findTaskByJiraRef(projectSnapshot, trimmedJiraRef) : null;
     const jiraState = existingTask ? "AlreadyTracked" : trimmedJiraRef ? "Linked" : "Missing";
@@ -134,8 +178,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
           id: pendingMessageId,
           role: "planner",
           content: quickPlannerDraftMessage(false),
-          createdLabel: "AI 정교화 중",
-          pending: true,
+          createdLabel: "방금 전",
         },
       ],
       draft: fallbackDraft,
@@ -148,10 +191,23 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     setGoal("");
     setPlannerRequest("");
     setError(null);
-    setPlannerOperation("planner");
+    schedulePlannerRefinement(() => {
+      void refineInitialPlannerSession(sessionId, pendingMessageId, trimmed, jiraState, fallbackDraft);
+    });
+  }
+
+  async function refineInitialPlannerSession(
+    sessionId: string,
+    pendingMessageId: string,
+    goalText: string,
+    jiraState: PlanningSessionStub["jiraState"],
+    fallbackDraft: PlannerDraft,
+  ) {
     try {
+      if (!shouldRunPlannerRefinement(sessionId, pendingMessageId)) return;
       await waitForNextPaint();
-      const plannerResult = await runPlannerPlanMode(trimmed, trimmed, null, fallbackDraft);
+      if (!shouldRunPlannerRefinement(sessionId, pendingMessageId)) return;
+      const plannerResult = await runPlannerPlanMode(goalText, goalText, null, fallbackDraft);
       const draft = plannerResult.draft;
       const responseMessage = plannerResult.message ?? plannerOpeningMessage(draft, jiraState);
       setSessions((current) =>
@@ -181,16 +237,34 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         ),
       );
       setError(plannerResult.warning ?? null);
-    } finally {
-      setPlannerOperation(null);
+    } catch (err) {
+      setSessions((current) =>
+        current.map((item) =>
+          item.id === sessionId
+            ? {
+                ...item,
+                messages: item.messages.map((message) =>
+                  message.id === pendingMessageId
+                    ? {
+                        ...message,
+                        content: "AI planner 응답이 늦어 로컬 초안을 유지했습니다. 계속 승인하거나 메시지를 보낼 수 있습니다.",
+                        createdLabel: "방금 전",
+                        pending: false,
+                      }
+                    : message,
+                ),
+              }
+            : item,
+        ),
+      );
+      setError(errorMessage(err));
     }
   }
 
-  async function reviseActiveDraft() {
+  function reviseActiveDraft() {
     const trimmed = plannerRequest.trim();
-    if (!activeSession || !trimmed || plannerRunning || approvingPlan) return;
+    if (!activeSession || !trimmed || approvingPlan) return;
 
-    setPlannerOperation("planner");
     const submittedAt = Date.now();
     const pendingMessageId = `${activeSession.id}-planner-pending-${submittedAt}`;
     const fallbackDraft = buildPlannerDraft(
@@ -220,8 +294,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                   id: pendingMessageId,
                   role: "planner",
                   content: quickPlannerDraftMessage(true),
-                  createdLabel: "AI 정교화 중",
-                  pending: true,
+                  createdLabel: "방금 전",
                 },
               ],
             }
@@ -230,12 +303,36 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     );
     setPlannerRequest("");
     setError(null);
-    try {
-      await waitForNextPaint();
-      const plannerResult = await runPlannerPlanMode(
+    schedulePlannerRefinement(() => {
+      void refineActivePlannerSession(
+        activeSession.id,
+        pendingMessageId,
         trimmed,
         activeSession.goalText,
         activeSession.draft,
+        fallbackDraft,
+        nextRevision,
+      );
+    });
+  }
+
+  async function refineActivePlannerSession(
+    sessionId: string,
+    pendingMessageId: string,
+    message: string,
+    goalText: string,
+    currentDraft: PlannerDraft,
+    fallbackDraft: PlannerDraft,
+    nextRevision: number,
+  ) {
+    try {
+      if (!shouldRunPlannerRefinement(sessionId, pendingMessageId)) return;
+      await waitForNextPaint();
+      if (!shouldRunPlannerRefinement(sessionId, pendingMessageId)) return;
+      const plannerResult = await runPlannerPlanMode(
+        message,
+        goalText,
+        currentDraft,
         fallbackDraft,
       );
       const revisedDraft = plannerResult.draft;
@@ -243,7 +340,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
 
       setSessions((current) =>
         current.map((item) =>
-          item.id === activeSession.id
+          item.id === sessionId
             ? {
                 ...item,
                 title: item.status === "Approved" ? item.title : revisedDraft.title,
@@ -269,8 +366,27 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         ),
       );
       setError(plannerResult.warning ?? null);
-    } finally {
-      setPlannerOperation(null);
+    } catch (err) {
+      setSessions((current) =>
+        current.map((item) =>
+          item.id === sessionId
+            ? {
+                ...item,
+                messages: item.messages.map((message) =>
+                  message.id === pendingMessageId
+                    ? {
+                        ...message,
+                        content: "AI planner 응답이 늦어 로컬 수정안을 유지했습니다. 계속 승인하거나 메시지를 보낼 수 있습니다.",
+                        createdLabel: "방금 전",
+                        pending: false,
+                      }
+                    : message,
+                ),
+              }
+            : item,
+        ),
+      );
+      setError(errorMessage(err));
     }
   }
 
@@ -281,24 +397,26 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     fallbackDraft: PlannerDraft,
   ): Promise<{ draft: PlannerDraft; message: string | null; warning: string | null }> {
     try {
-      const result = await api.runPlannerConversation(projectSnapshot.project.id, {
-        message,
-        goalText,
-        currentDraftJson: currentDraft,
-      });
-      const parsedDraft = parsePlannerDraft(result.responseText);
+      const result = await withPlannerUiTimeout(
+        api.runPlannerConversation(projectSnapshot.project.id, {
+          message,
+          goalText,
+          currentDraftJson: currentDraft,
+        }),
+      );
+      const parsedDraft = parsePlannerDraft(result.responseText, fallbackDraft);
       const warning = plannerResultWarning(result);
       if (parsedDraft) {
         return {
-          draft: parsedDraft,
-          message: plannerMessageFromResult(result, parsedDraft),
+          draft: parsedDraft.draft,
+          message: plannerMessageFromResult(result, parsedDraft.draft, parsedDraft.note),
           warning,
         };
       }
       return {
         draft: fallbackDraft,
-        message: result.responseText.trim() || null,
-        warning: warning ?? "planner 응답을 Plan Document JSON으로 해석하지 못해 local draft를 유지했습니다.",
+        message: plannerFallbackMessage(result, fallbackDraft),
+        warning,
       };
     } catch (err) {
       return {
@@ -311,6 +429,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
 
   async function approvePlanDraft() {
     if (!activeSession || approvingPlan) return;
+    cancelPlannerRefinement();
     if (activeSession.status === "Approved" && activeSession.taskId) {
       onOpenTask(activeSession.taskId);
       return;
@@ -411,7 +530,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         </aside>
 
         <div className="planning-workspace">
-          <section className="planning-canvas" aria-busy={plannerRunning ? true : undefined}>
+          <section className="planning-canvas">
             <header className="section-header">
               <div>
                 <h2>{activeSession?.title ?? "새 계획"}</h2>
@@ -431,18 +550,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                         <strong>{message.role === "planner" ? `Planner · v${activeSession.revision}` : "User"}</strong>
                         <span>{message.createdLabel}</span>
                       </div>
-                      {message.pending ? (
-                        <p className="planning-typing" role="status" aria-live="polite">
-                          <span className="planning-typing-label">{message.content}</span>
-                          <span className="planning-typing-dots" aria-hidden="true">
-                            <span>.</span>
-                            <span>.</span>
-                            <span>.</span>
-                          </span>
-                        </p>
-                      ) : (
-                        <p>{message.content}</p>
-                      )}
+                      <p>{message.content}</p>
                     </article>
                   ))}
                   <div ref={threadEndRef} />
@@ -462,9 +570,9 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
               onSubmit={(event) => {
                 event.preventDefault();
                 if (activeSession) {
-                  void reviseActiveDraft();
+                  reviseActiveDraft();
                 } else {
-                  void startPlannerSession();
+                  startPlannerSession();
                 }
               }}
             >
@@ -482,9 +590,9 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                   if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
                   event.preventDefault();
                   if (activeSession) {
-                    void reviseActiveDraft();
+                    reviseActiveDraft();
                   } else {
-                    void startPlannerSession();
+                    startPlannerSession();
                   }
                 }}
                 rows={2}
@@ -506,16 +614,11 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 </span>
                 <button
                   type="submit"
-                  aria-busy={plannerRunning ? true : undefined}
-                  className={plannerRunning ? "primary-button loading-button is-loading" : "primary-button loading-button"}
-                  disabled={plannerRunning || approvingPlan || (activeSession ? !plannerRequest.trim() : !goal.trim())}
+                  className="primary-button loading-button"
+                  disabled={approvingPlan || (activeSession ? !plannerRequest.trim() : !goal.trim())}
                 >
-                  {plannerRunning ? (
-                    <Loader2 className="loading-icon" size={14} aria-hidden />
-                  ) : (
-                    <Sparkles size={14} aria-hidden />
-                  )}
-                  {plannerRunning ? "응답 대기" : activeSession ? "planner에게 보내기" : "대화 시작"}
+                  <Sparkles size={14} aria-hidden />
+                  {activeSession ? "planner에게 보내기" : "대화 시작"}
                 </button>
               </div>
               {error ? <p className="planning-form-error">{error}</p> : null}
@@ -527,11 +630,9 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
               <h3>Plan Document</h3>
               <span className="status-pill">
                 {activeSession
-                  ? plannerRunning
-                    ? "AI 정교화 중"
-                    : activeSession.status === "Approved"
-                      ? "태스크 생성됨"
-                      : jiraStateLabel(activeSession.jiraState)
+                  ? activeSession.status === "Approved"
+                    ? "태스크 생성됨"
+                    : jiraStateLabel(activeSession.jiraState)
                   : goal.trim()
                     ? "작성 중"
                     : "아직 초안 없음"}
@@ -722,10 +823,10 @@ function buildPlannerDraft(goal: string, linkedTaskTitle: string | null): Planne
   };
 }
 
-function parsePlannerDraft(raw: string): PlannerDraft | null {
+function parsePlannerDraft(raw: string, fallbackDraft: PlannerDraft): PlannerDraftParseResult | null {
   for (const jsonText of extractJsonCandidates(raw)) {
     try {
-      const draft = normalizePlannerDraft(JSON.parse(jsonText));
+      const draft = normalizePlannerDraft(JSON.parse(jsonText), fallbackDraft);
       if (draft) return draft;
     } catch {
       continue;
@@ -734,23 +835,33 @@ function parsePlannerDraft(raw: string): PlannerDraft | null {
   return null;
 }
 
-function normalizePlannerDraft(value: unknown): PlannerDraft | null {
+function normalizePlannerDraft(value: unknown, fallbackDraft: PlannerDraft): PlannerDraftParseResult | null {
   const parsed = plannerDraftCandidate(value);
   if (!parsed) return null;
 
   const title = stringField(parsed, ["title"]);
   const summary = stringField(parsed, ["summary"]);
-  const tasks = plannerTasks(parsed);
-  if (!title || !summary || tasks.length === 0) return null;
+  const parsedTasks = plannerTasks(parsed);
+  if (!title || !summary) return null;
+
+  const tasks = parsedTasks.length > 0 ? parsedTasks : fallbackDraft.tasks;
+  const note =
+    parsedTasks.length > 0
+      ? null
+      : "planner가 Task 후보를 비워 보내서 로컬 Task breakdown을 유지했습니다.";
 
   const risks = stringArrayField(parsed, ["risks"]);
+  const scope = scopeList(parsed.scope);
   return {
-    title,
-    summary,
-    scope: scopeList(parsed.scope),
-    tasks,
-    openQuestions: stringArrayField(parsed, ["openQuestions", "open_questions"]),
-    risks: risks.length > 0 ? risks : Array.from(new Set(tasks.flatMap((task) => task.risks))),
+    draft: {
+      title,
+      summary,
+      scope: scope.length > 0 ? scope : fallbackDraft.scope,
+      tasks,
+      openQuestions: stringArrayField(parsed, ["openQuestions", "open_questions"]),
+      risks: risks.length > 0 ? risks : Array.from(new Set(tasks.flatMap((task) => task.risks))),
+    },
+    note,
   };
 }
 
@@ -907,20 +1018,44 @@ function plannerFailureMessage(result: PlannerConversationResult): string {
   return rawMessage || `planner plan mode가 exit code ${result.exitCode}로 종료되었습니다.`;
 }
 
-function plannerMessageFromResult(result: PlannerConversationResult, draft: PlannerDraft): string {
+function plannerMessageFromResult(
+  result: PlannerConversationResult,
+  draft: PlannerDraft,
+  note: string | null = null,
+): string {
   const mode = result.provider === "claude" ? "native plan mode" : result.provider === "codex" ? "read-only plan mode" : "planning mode";
   const elapsed = formatElapsed(result.elapsedMs);
   return [
     `${result.connectionId} ${mode} 응답을${elapsed ? ` ${elapsed} 후` : ""} Plan Document draft로 반영했습니다.`,
+    note,
     `${draft.tasks.length}개의 Task 후보와 ${draft.tasks.reduce((total, task) => total + task.subtasks.length, 0)}개의 Subtask 후보가 있습니다.`,
     draft.openQuestions.length > 0 ? `남은 질문: ${draft.openQuestions.join(" ")}` : "현재 blocking question은 없습니다.",
-  ].join(" ");
+  ].filter(Boolean).join(" ");
+}
+
+function plannerFallbackMessage(result: PlannerConversationResult, fallbackDraft: PlannerDraft): string {
+  const mode = result.provider === "claude" ? "native plan mode" : result.provider === "codex" ? "read-only plan mode" : "planning mode";
+  const elapsed = formatElapsed(result.elapsedMs);
+  const prefix = `${result.connectionId} ${mode} 응답을${elapsed ? ` ${elapsed} 후` : ""} 받았지만 Plan Document schema와 맞지 않아 로컬 초안을 유지했습니다.`;
+  const taskSummary = `${fallbackDraft.tasks.length}개의 로컬 Task 후보는 계속 사용할 수 있습니다.`;
+  const trimmed = result.responseText.trim();
+
+  if (!trimmed || looksLikeJsonResponse(trimmed)) {
+    return `${prefix} ${taskSummary}`;
+  }
+
+  return `${prefix} planner 메시지: ${trimmed}`;
+}
+
+function looksLikeJsonResponse(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.startsWith("{") || trimmed.startsWith("[") || extractJsonCandidates(trimmed).length > 0;
 }
 
 function quickPlannerDraftMessage(revision: boolean): string {
   return revision
-    ? "빠른 로컬 갱신안을 먼저 채팅과 Plan Document에 반영했습니다. AI planner가 더 다듬는 중입니다."
-    : "빠른 로컬 초안을 먼저 채팅과 Plan Document에 반영했습니다. AI planner가 더 다듬는 중입니다.";
+    ? "빠른 로컬 갱신안을 채팅과 Plan Document에 반영했습니다. 지금 버전으로 바로 승인하거나 다시 수정할 수 있습니다."
+    : "빠른 로컬 초안을 채팅과 Plan Document에 반영했습니다. 지금 버전으로 바로 승인하거나 다시 수정할 수 있습니다.";
 }
 
 function formatElapsed(elapsedMs: number | undefined): string | null {
@@ -1079,6 +1214,28 @@ function findTaskByJiraRef(snapshot: ProjectSnapshot, value: string) {
 
 function refTypeForJiraRef(value: string): NonNullable<CreateTaskInput["externalRefs"]>[number]["refType"] {
   return value.includes("browse/") || value.startsWith("http") ? "Url" : "JiraTask";
+}
+
+function withPlannerUiTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timeoutId: number | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(
+        new Error(
+          "AI planner 응답이 오래 걸려 로컬 초안을 유지했습니다. 응답이 도착하지 않아도 계속 진행할 수 있습니다.",
+        ),
+      );
+    }, PLANNER_UI_TIMEOUT_MS);
+  });
+
+  return Promise.race([
+    promise.finally(() => {
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
+    }),
+    timeoutPromise,
+  ]);
 }
 
 function normalizeJiraRef(value: string): string {

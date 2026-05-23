@@ -44,6 +44,7 @@ export interface EffectiveSettings {
   rolePresets: unknown;
   aiConnections: AiConnection[];
   roleAssignments: RoleAssignment[];
+  conductorConfig: ConductorConfig | null;
   worktreeRoot: string | null;
   jiraConfig: JiraConfig | null;
   obsidianVaultPath: string | null;
@@ -81,6 +82,13 @@ export interface RoleAssignment {
   /** Legacy shape retained for older persisted project settings. */
   connectionIds: string[];
   aggregationPolicy?: "all_pass" | "any_pass" | "manual_decision" | null;
+}
+
+export interface ConductorConfig {
+  enabled: boolean;
+  connectionId: string | null;
+  model?: string | null;
+  mode: "observe" | "gate" | string;
 }
 
 export interface RunnerTemplateSummary {
@@ -317,6 +325,7 @@ export interface ProjectSettingsPatch {
   rolePresets?: unknown;
   aiConnections?: AiConnection[];
   roleAssignments?: RoleAssignment[];
+  conductorConfig?: ConductorConfig | null;
   worktreeRoot?: string | null;
   jiraConfig?: JiraConfig | null;
   obsidianVaultPath?: string | null;

@@ -76,10 +76,17 @@ struct LaunchState {
 struct AppState {
     projects: Mutex<HashMap<String, ProjectContext>>,
     running_runs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    queue_workers: Mutex<HashMap<String, Arc<AtomicBool>>>,
     terminal_sessions: Mutex<HashMap<String, PtySession>>,
+    role_pty_sessions: Mutex<HashMap<String, RolePtySession>>,
 }
 
 struct PtySession {
+    child_pid: libc::pid_t,
+    writer: Arc<Mutex<fs::File>>,
+}
+
+struct RolePtySession {
     child_pid: libc::pid_t,
     writer: Arc<Mutex<fs::File>>,
 }
@@ -98,6 +105,35 @@ struct TerminalPtyExit {
     exit_code: i32,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RolePtyOutput {
+    session_id: String,
+    project_id: String,
+    task_id: String,
+    role_id: String,
+    data: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RolePtyReady {
+    session_id: String,
+    project_id: String,
+    task_id: String,
+    role_id: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RolePtyExit {
+    session_id: String,
+    project_id: String,
+    task_id: String,
+    role_id: String,
+    exit_code: i32,
+}
+
 #[tauri::command]
 fn open_project(
     path: String,
@@ -111,6 +147,7 @@ fn open_project(
         reconcile_stale_runs.unwrap_or(false),
     )?;
     remember_project(&app, &snapshot.project)?;
+    ensure_project_queue_worker(&app, &state, &snapshot.project.id)?;
     Ok(snapshot)
 }
 
@@ -145,6 +182,7 @@ fn open_project_by_id(
         reconcile_stale_runs.unwrap_or(false),
     )?;
     remember_project(&app, &snapshot.project)?;
+    ensure_project_queue_worker(&app, &state, &snapshot.project.id)?;
     Ok(snapshot)
 }
 
@@ -182,6 +220,8 @@ fn forget_project(
         .lock()
         .map_err(|_| CommandError::new("IoFailed", "프로젝트 상태를 갱신하지 못했습니다."))?
         .remove(&project_id);
+    stop_project_queue_worker(&state, &project_id);
+    stop_project_role_pty_sessions(&state, &project_id);
 
     Ok(LaunchState {
         recent_projects: stored.recent_projects,
@@ -209,6 +249,7 @@ fn get_launch_state(state: State<'_, AppState>, app: AppHandle) -> CommandResult
         match open_project_from_path(Path::new(&root_path), &state, true) {
             Ok(next) => {
                 remember_project(&app, &next.project)?;
+                ensure_project_queue_worker(&app, &state, &next.project.id)?;
                 stored = load_stored_launch_state(&app)?;
                 snapshot = Some(next);
             }
@@ -260,12 +301,24 @@ fn update_project_settings(
 }
 
 #[tauri::command]
-fn run_planner_conversation(
+async fn run_planner_conversation(
     project_id: String,
     input: PlannerConversationInput,
     state: State<'_, AppState>,
 ) -> CommandResult<PlannerConversationResult> {
     let context = project_context(&state, &project_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        run_planner_conversation_blocking(project_id, input, context)
+    })
+    .await
+    .map_err(|err| CommandError::io("planner 작업 thread가 중단되었습니다.", err))?
+}
+
+fn run_planner_conversation_blocking(
+    project_id: String,
+    input: PlannerConversationInput,
+    context: ProjectContext,
+) -> CommandResult<PlannerConversationResult> {
     let conn = db::open_existing_db(&context.db_path)?;
     let settings = db::effective_settings(&conn, &project_id)?;
     let commands = resolve_planning_commands(&settings, &context.root_path, &input)?;
@@ -340,6 +393,7 @@ fn apply_runner_template(
             role_presets: Some((template.presets)()),
             ai_connections: Some((template.connections)()),
             role_assignments: Some((template.assignments)()),
+            conductor_config: None,
             worktree_root: None,
             jira_config: None,
             obsidian_vault_path: None,
@@ -921,13 +975,7 @@ fn start_next_role_run(
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
     let run = db::prepare_next_role_context(&mut conn, &context.root_path, &project_id, &task_id)?;
-    spawn_background_host_run(
-        app,
-        context,
-        project_id,
-        run.task_id.clone(),
-        run.id.clone(),
-    );
+    ensure_project_queue_worker(&app, &state, &project_id)?;
     Ok(run)
 }
 
@@ -941,15 +989,8 @@ fn run_host_role(
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
     let cancellation = Arc::new(AtomicBool::new(false));
-    {
-        let mut running_runs = state
-            .running_runs
-            .lock()
-            .map_err(|_| CommandError::new("IoFailed", "실행 상태를 갱신하지 못했습니다."))?;
-        if running_runs.contains_key(&run_id) {
-            return Err(CommandError::validation("이미 실행 중인 host run입니다."));
-        }
-        running_runs.insert(run_id.clone(), cancellation.clone());
+    if !register_running_run(&state, &run_id, cancellation.clone())? {
+        return Err(CommandError::validation("이미 실행 중인 host run입니다."));
     }
     let mut event_sink = |event: &RunEventSummary| emit_run_event(&app, event);
     let result = db::run_host_role(
@@ -960,14 +1001,81 @@ fn run_host_role(
         cancellation,
         Some(&mut event_sink),
     );
-    if let Ok(mut running_runs) = state.running_runs.lock() {
-        running_runs.remove(&run_id);
+    if let Ok(run) = &result {
+        queue_next_role_after_success(&app, &mut conn, &context, &project_id, run);
     }
+    unregister_running_run(&app, &run_id);
     result
 }
 
 fn emit_run_event(app: &AppHandle, event: &RunEventSummary) {
     let _ = app.emit("agent-run://event", event);
+}
+
+fn register_running_run(
+    state: &State<'_, AppState>,
+    run_id: &str,
+    cancellation: Arc<AtomicBool>,
+) -> CommandResult<bool> {
+    let mut running_runs = state
+        .running_runs
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "실행 상태를 갱신하지 못했습니다."))?;
+    if running_runs.contains_key(run_id) {
+        return Ok(false);
+    }
+    running_runs.insert(run_id.to_string(), cancellation);
+    Ok(true)
+}
+
+fn unregister_running_run(app: &AppHandle, run_id: &str) {
+    let state = app.state::<AppState>();
+    if let Ok(mut running_runs) = state.running_runs.lock() {
+        running_runs.remove(run_id);
+    };
+}
+
+fn queue_next_role_after_success(
+    app: &AppHandle,
+    conn: &mut rusqlite::Connection,
+    context: &ProjectContext,
+    project_id: &str,
+    run: &AgentRunSummary,
+) {
+    if run.status != "Succeeded" || run.role_id == "planner" {
+        return;
+    }
+
+    match db::prepare_next_role_context(conn, &context.root_path, project_id, &run.task_id) {
+        Ok(next_run) => {
+            let state = app.state::<AppState>();
+            let _ = ensure_project_queue_worker(app, &state, project_id);
+            let _ = app.emit(
+                "agent-run://updated",
+                json!({
+                    "projectId": project_id,
+                    "taskId": next_run.task_id,
+                    "runId": next_run.id,
+                    "status": "Queued",
+                    "source": "auto-continuation"
+                }),
+            );
+        }
+        Err(error) => {
+            if error.code != "ValidationFailed" {
+                let _ = app.emit(
+                    "agent-run://updated",
+                    json!({
+                        "projectId": project_id,
+                        "taskId": run.task_id,
+                        "runId": run.id,
+                        "status": "AutoContinuationFailed",
+                        "error": command_error_summary(&error)
+                    }),
+                );
+            }
+        }
+    }
 }
 
 fn spawn_background_host_run(
@@ -977,19 +1085,66 @@ fn spawn_background_host_run(
     task_id: String,
     run_id: String,
 ) {
-    std::thread::spawn(move || {
-        let cancellation = Arc::new(AtomicBool::new(false));
-        let state = app.state::<AppState>();
-        let mut inserted_running_flag = false;
-        if let Ok(mut running_runs) = state.running_runs.lock() {
-            if running_runs.contains_key(&run_id) {
-                return;
-            }
-            running_runs.insert(run_id.clone(), cancellation.clone());
-            inserted_running_flag = true;
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let state = app.state::<AppState>();
+    match register_running_run(&state, &run_id, cancellation.clone()) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            let _ = app.emit(
+                "agent-run://updated",
+                json!({
+                    "projectId": project_id,
+                    "taskId": task_id,
+                    "runId": run_id,
+                    "status": "AutoStartFailed",
+                    "error": command_error_summary(&error)
+                }),
+            );
+            return;
         }
+    }
 
+    std::thread::spawn(move || {
         let result = db::open_existing_db(&context.db_path).and_then(|mut conn| {
+            if let Ok(run) = db::get_agent_run(&conn, &run_id) {
+                if let Ok(Some(worktree)) = db::get_task_worktree(&conn, &project_id, &run.task_id)
+                {
+                    let state = app.state::<AppState>();
+                    if let Ok(session_id) = ensure_role_pty_session(
+                        &app,
+                        &state,
+                        &project_id,
+                        &run.task_id,
+                        &run.role_id,
+                        Path::new(&worktree.worktree_path),
+                    ) {
+                        write_role_pty_input(
+                            &state,
+                            &session_id,
+                            &format!(
+                                "printf '\\n[Helm worker claimed] run={run_id} role={}\\n'\n",
+                                run.role_id
+                            ),
+                        );
+                        if let Ok(event) = db::append_system_run_event(
+                            &conn,
+                            &project_id,
+                            &run.task_id,
+                            &run_id,
+                            "Role PTY session ready",
+                            json!({
+                                "sessionId": session_id,
+                                "roleId": run.role_id,
+                                "worktreePath": worktree.worktree_path
+                            }),
+                        ) {
+                            emit_run_event(&app, &event);
+                        }
+                    }
+                }
+            }
+
             let mut event_sink = |event: &RunEventSummary| emit_run_event(&app, event);
             let result = db::run_host_role(
                 &mut conn,
@@ -1000,22 +1155,23 @@ fn spawn_background_host_run(
                 Some(&mut event_sink),
             );
             if let Err(error) = &result {
-                let _ = db::mark_host_run_launch_error(
-                    &mut conn,
-                    &context.root_path,
-                    &project_id,
-                    &run_id,
-                    &command_error_summary(error),
-                );
+                if error.code != "RunAlreadyClaimed" {
+                    let _ = db::mark_host_run_launch_error(
+                        &mut conn,
+                        &context.root_path,
+                        &project_id,
+                        &run_id,
+                        &command_error_summary(error),
+                    );
+                }
+            }
+            if let Ok(run) = &result {
+                queue_next_role_after_success(&app, &mut conn, &context, &project_id, run);
             }
             result
         });
 
-        if inserted_running_flag {
-            if let Ok(mut running_runs) = state.running_runs.lock() {
-                running_runs.remove(&run_id);
-            }
-        }
+        unregister_running_run(&app, &run_id);
 
         let payload = match result {
             Ok(run) => json!({
@@ -1028,12 +1184,417 @@ fn spawn_background_host_run(
                 "projectId": project_id,
                 "taskId": task_id,
                 "runId": run_id,
-                "status": "NeedsInspection",
+                "status": if error.code == "RunAlreadyClaimed" { "AlreadyClaimed" } else { "NeedsInspection" },
                 "error": command_error_summary(&error)
             }),
         };
         let _ = app.emit("agent-run://updated", payload);
     });
+}
+
+fn ensure_project_queue_worker(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    project_id: &str,
+) -> CommandResult<()> {
+    let context = project_context(state, project_id)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut workers = state
+            .queue_workers
+            .lock()
+            .map_err(|_| CommandError::new("IoFailed", "worker 상태를 갱신하지 못했습니다."))?;
+        if workers.contains_key(project_id) {
+            return Ok(());
+        }
+        workers.insert(project_id.to_string(), stop.clone());
+    }
+
+    let app = app.clone();
+    let project_id = project_id.to_string();
+    std::thread::spawn(move || run_project_queue_worker(app, context, project_id, stop));
+    Ok(())
+}
+
+fn stop_project_queue_worker(state: &State<'_, AppState>, project_id: &str) {
+    if let Ok(mut workers) = state.queue_workers.lock() {
+        if let Some(stop) = workers.remove(project_id) {
+            stop.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+fn run_project_queue_worker(
+    app: AppHandle,
+    context: ProjectContext,
+    project_id: String,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::SeqCst) {
+        let queued = db::open_existing_db(&context.db_path)
+            .and_then(|conn| db::next_queued_agent_run(&conn, &project_id));
+        match queued {
+            Ok(Some(run)) => {
+                if conductor_allows_queued_run(&app, &context, &project_id, &run) {
+                    spawn_background_host_run(
+                        app.clone(),
+                        context.clone(),
+                        project_id.clone(),
+                        run.task_id.clone(),
+                        run.id.clone(),
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Ok(None) => {
+                std::thread::sleep(Duration::from_millis(800));
+            }
+            Err(error) => {
+                let _ = app.emit(
+                    "agent-run://updated",
+                    json!({
+                        "projectId": project_id,
+                        "status": "WorkerPollFailed",
+                        "error": command_error_summary(&error)
+                    }),
+                );
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        }
+    }
+}
+
+fn conductor_allows_queued_run(
+    app: &AppHandle,
+    context: &ProjectContext,
+    project_id: &str,
+    run: &AgentRunSummary,
+) -> bool {
+    match conductor_allows_queued_run_result(app, context, project_id, run) {
+        Ok(allowed) => allowed,
+        Err(error) => {
+            let _ = app.emit(
+                "agent-run://updated",
+                json!({
+                    "projectId": project_id,
+                    "taskId": run.task_id,
+                    "runId": run.id,
+                    "status": "ConductorFailedOpen",
+                    "error": command_error_summary(&error)
+                }),
+            );
+            true
+        }
+    }
+}
+
+fn conductor_allows_queued_run_result(
+    app: &AppHandle,
+    context: &ProjectContext,
+    project_id: &str,
+    run: &AgentRunSummary,
+) -> CommandResult<bool> {
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    let settings = db::effective_settings(&conn, project_id)?;
+    let Some(config) = active_conductor_config(&settings) else {
+        return Ok(true);
+    };
+    let Some(connection_id) = conductor_connection_id(config) else {
+        return Ok(true);
+    };
+    let Some(connection) = find_ai_connection(&settings, connection_id) else {
+        append_and_emit_system_run_event(
+            app,
+            &conn,
+            project_id,
+            &run.task_id,
+            &run.id,
+            "Conductor connection missing",
+            json!({ "connectionId": connection_id }),
+        );
+        return Ok(true);
+    };
+    let connection_label = connection
+        .get("label")
+        .and_then(Value::as_str)
+        .unwrap_or(connection_id);
+    let mode = conductor_mode(config);
+
+    append_and_emit_system_run_event(
+        app,
+        &conn,
+        project_id,
+        &run.task_id,
+        &run.id,
+        "Conductor selected",
+        json!({
+            "connectionId": connection_id,
+            "label": connection_label,
+            "mode": mode,
+            "roleId": run.role_id
+        }),
+    );
+
+    if mode != "gate" {
+        return Ok(true);
+    }
+
+    let task = db::get_task(&conn, &run.task_id)?;
+    match run_conductor_gate(config, connection, context, run, &task) {
+        Ok(decision) => {
+            let hold = conductor_decision_is_hold(&decision);
+            append_and_emit_system_run_event(
+                app,
+                &conn,
+                project_id,
+                &run.task_id,
+                &run.id,
+                "Conductor decision",
+                decision.clone(),
+            );
+            if hold {
+                db::mark_host_run_launch_error(
+                    &mut conn,
+                    &context.root_path,
+                    project_id,
+                    &run.id,
+                    &format!("Conductor held run: {}", conductor_reason(&decision)),
+                )?;
+                let _ = app.emit(
+                    "agent-run://updated",
+                    json!({
+                        "projectId": project_id,
+                        "taskId": run.task_id,
+                        "runId": run.id,
+                        "status": "ConductorHeld",
+                        "decision": decision
+                    }),
+                );
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        Err(error) => {
+            append_and_emit_system_run_event(
+                app,
+                &conn,
+                project_id,
+                &run.task_id,
+                &run.id,
+                "Conductor decision failed",
+                json!({ "error": command_error_summary(&error) }),
+            );
+            db::mark_host_run_launch_error(
+                &mut conn,
+                &context.root_path,
+                project_id,
+                &run.id,
+                &format!("Conductor gate failed: {}", command_error_summary(&error)),
+            )?;
+            let _ = app.emit(
+                "agent-run://updated",
+                json!({
+                    "projectId": project_id,
+                    "taskId": run.task_id,
+                    "runId": run.id,
+                    "status": "ConductorGateFailed",
+                    "error": command_error_summary(&error)
+                }),
+            );
+            Ok(false)
+        }
+    }
+}
+
+fn append_and_emit_system_run_event(
+    app: &AppHandle,
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    task_id: &str,
+    run_id: &str,
+    message: &str,
+    payload: Value,
+) {
+    if let Ok(event) =
+        db::append_system_run_event(conn, project_id, task_id, run_id, message, payload)
+    {
+        emit_run_event(app, &event);
+    }
+}
+
+fn active_conductor_config(settings: &EffectiveSettings) -> Option<&Value> {
+    let config = settings.conductor_config.as_ref()?;
+    if config.get("enabled").and_then(Value::as_bool) == Some(true) {
+        Some(config)
+    } else {
+        None
+    }
+}
+
+fn conductor_connection_id(config: &Value) -> Option<&str> {
+    config
+        .get("connectionId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn conductor_mode(config: &Value) -> &str {
+    match config.get("mode").and_then(Value::as_str) {
+        Some("gate") => "gate",
+        _ => "observe",
+    }
+}
+
+fn find_ai_connection<'a>(
+    settings: &'a EffectiveSettings,
+    connection_id: &str,
+) -> Option<&'a Value> {
+    settings.ai_connections.as_array().and_then(|items| {
+        items
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(connection_id))
+    })
+}
+
+fn run_conductor_gate(
+    config: &Value,
+    connection: &Value,
+    context: &ProjectContext,
+    run: &AgentRunSummary,
+    task: &TaskSummary,
+) -> CommandResult<Value> {
+    let provider = connection.get("provider").and_then(Value::as_str);
+    let prompt = build_conductor_prompt(context, run, task);
+    let mut placeholders = HashMap::new();
+    placeholders.insert(
+        "projectRoot".to_string(),
+        context.root_path.to_string_lossy().to_string(),
+    );
+    placeholders.insert("planPrompt".to_string(), prompt.clone());
+    placeholders.insert("message".to_string(), prompt.clone());
+    placeholders.insert("goalText".to_string(), task.title.clone());
+    placeholders.insert("currentDraftJson".to_string(), "null".to_string());
+
+    let args = planning_command_args(connection, provider, &placeholders)?;
+    if args.is_empty() {
+        return Err(CommandError::validation(
+            "지휘자 AI 연결에 planningCommandArgs가 없습니다.",
+        ));
+    }
+    let model = config
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            connection
+                .get("defaultModel")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        });
+    let effort = connection
+        .get("defaultEffort")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let command = normalize_planning_cli_args(
+        inject_planning_provider_options(args, provider, model, effort),
+        provider,
+    );
+    let timeout = connection_check_timeout_seconds(connection).min(90);
+    let output = run_direct_command_with_timeout(
+        &context.root_path,
+        &command,
+        Duration::from_secs(timeout),
+    )?;
+    if output.timed_out || output.exit_code != 0 {
+        return Err(CommandError::new(
+            "ValidationFailed",
+            &format!(
+                "지휘자 AI가 exit code {}로 실패했습니다. {}",
+                output.exit_code,
+                command_output_message(&output)
+            ),
+        ));
+    }
+    parse_conductor_decision(&format!("{}\n{}", output.stdout, output.stderr))
+}
+
+fn build_conductor_prompt(
+    context: &ProjectContext,
+    run: &AgentRunSummary,
+    task: &TaskSummary,
+) -> String {
+    format!(
+        r#"너는 Helm의 백그라운드 지휘자 AI다.
+아래 queued run을 지금 실행해도 되는지 판단한다.
+파일 수정, 명령 실행, git 작업은 하지 말고 JSON만 반환한다.
+
+반환 JSON:
+{{"decision":"run"|"hold","reason":"string","nextAction":"string"}}
+
+판단 기준:
+- 사용자 승인 대기나 계획 수정이 필요하면 hold.
+- 실행해도 되면 run.
+- 확신이 없으면 run 대신 hold.
+
+Project:
+- root: {root}
+
+Task:
+- id: {task_id}
+- title: {title}
+- status: {status}
+
+Queued run:
+- id: {run_id}
+- role: {role_id}
+"#,
+        root = context.root_path.to_string_lossy(),
+        task_id = task.id,
+        title = task.title,
+        status = task.status,
+        run_id = run.id,
+        role_id = run.role_id,
+    )
+}
+
+fn parse_conductor_decision(text: &str) -> CommandResult<Value> {
+    let trimmed = text.trim();
+    let candidate = if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        &trimmed[start..=end]
+    } else {
+        trimmed
+    };
+    let value: Value = serde_json::from_str(candidate).map_err(|err| {
+        CommandError::with_details(
+            "ValidationFailed",
+            "지휘자 AI 응답 JSON을 해석하지 못했습니다.",
+            err,
+        )
+    })?;
+    let decision = value
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if matches!(decision, "run" | "hold") {
+        Ok(value)
+    } else {
+        Err(CommandError::validation(
+            "지휘자 AI decision은 run 또는 hold여야 합니다.",
+        ))
+    }
+}
+
+fn conductor_decision_is_hold(decision: &Value) -> bool {
+    decision.get("decision").and_then(Value::as_str) == Some("hold")
+}
+
+fn conductor_reason(decision: &Value) -> String {
+    decision
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("reason 없음")
+        .to_string()
 }
 
 #[tauri::command]
@@ -1203,13 +1764,8 @@ fn spawn_next_role_run_after_approval(
                         "status": run.status
                     }),
                 );
-                spawn_background_host_run(
-                    app,
-                    context,
-                    project_id,
-                    run.task_id.clone(),
-                    run.id.clone(),
-                );
+                let state = app.state::<AppState>();
+                let _ = ensure_project_queue_worker(&app, &state, &project_id);
             }
             Err(error) => {
                 let _ = app.emit(
@@ -1896,6 +2452,7 @@ fn build_planner_prompt(project_root: &Path, input: &PlannerConversationInput) -
 - 사용자의 목표를 대화로 더 명확하게 만들고, 승인 가능한 Plan Document draft를 갱신한다.
 - 정보가 부족해도 질문만 따로 쓰지 말고 아래 JSON 형태만 반환한다.
 - 질문은 openQuestions 배열에 넣고, tasks에는 현재 확정 가능한 최소 실행 후보를 넣는다.
+- tasks 배열은 절대 비우지 않는다. 범위가 모호하면 "범위 확정" 같은 작은 확인 Task를 1개 이상 넣는다.
 - Markdown fence, 설명 문장, 머리말 없이 JSON만 반환한다.
 
 JSON schema:
@@ -3233,6 +3790,236 @@ fn stop_terminal_session(state: &State<'_, AppState>, terminal_id: &str) {
             libc::kill(session.child_pid, libc::SIGHUP);
         }
     }
+}
+
+fn role_pty_session_id(project_id: &str, task_id: &str, role_id: &str) -> String {
+    format!("{project_id}:{task_id}:{role_id}")
+}
+
+fn ensure_role_pty_session(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    project_id: &str,
+    task_id: &str,
+    role_id: &str,
+    cwd: &Path,
+) -> CommandResult<String> {
+    let session_id = role_pty_session_id(project_id, task_id, role_id);
+    {
+        let sessions = state
+            .role_pty_sessions
+            .lock()
+            .map_err(|_| CommandError::new("IoFailed", "role PTY 상태를 읽지 못했습니다."))?;
+        if sessions.contains_key(&session_id) {
+            return Ok(session_id);
+        }
+    }
+
+    let session =
+        spawn_role_pty_shell(&session_id, project_id, task_id, role_id, cwd, app.clone())?;
+    write_role_pty_line(
+        &session,
+        &format!("printf '\\n[Helm role session ready] {role_id}\\n'\n"),
+    );
+
+    {
+        let mut sessions = state
+            .role_pty_sessions
+            .lock()
+            .map_err(|_| CommandError::new("IoFailed", "role PTY 상태를 갱신하지 못했습니다."))?;
+        if sessions.contains_key(&session_id) {
+            stop_role_pty_session(session);
+            return Ok(session_id);
+        }
+        sessions.insert(session_id.clone(), session);
+    }
+
+    let _ = app.emit(
+        "agent-role-pty://ready",
+        RolePtyReady {
+            session_id: session_id.clone(),
+            project_id: project_id.to_string(),
+            task_id: task_id.to_string(),
+            role_id: role_id.to_string(),
+        },
+    );
+    Ok(session_id)
+}
+
+fn write_role_pty_input(state: &State<'_, AppState>, session_id: &str, input: &str) {
+    if let Ok(sessions) = state.role_pty_sessions.lock() {
+        if let Some(session) = sessions.get(session_id) {
+            write_role_pty_line(session, input);
+        }
+    }
+}
+
+fn write_role_pty_line(session: &RolePtySession, input: &str) {
+    if let Ok(mut writer) = session.writer.lock() {
+        let _ = writer.write_all(input.as_bytes());
+        let _ = writer.flush();
+    }
+}
+
+fn stop_project_role_pty_sessions(state: &State<'_, AppState>, project_id: &str) {
+    let prefix = format!("{project_id}:");
+    let sessions = state
+        .role_pty_sessions
+        .lock()
+        .ok()
+        .map(|mut sessions| {
+            let keys = sessions
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| sessions.remove(&key))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    for session in sessions {
+        stop_role_pty_session(session);
+    }
+}
+
+fn stop_role_pty_session(session: RolePtySession) {
+    unsafe {
+        libc::kill(session.child_pid, libc::SIGHUP);
+    }
+}
+
+fn spawn_role_pty_shell(
+    session_id: &str,
+    project_id: &str,
+    task_id: &str,
+    role_id: &str,
+    cwd: &Path,
+    app: AppHandle,
+) -> CommandResult<RolePtySession> {
+    let mut master_fd: libc::c_int = -1;
+    let mut winsize = libc::winsize {
+        ws_row: 30,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    let child_pid = unsafe {
+        libc::forkpty(
+            &mut master_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut winsize,
+        )
+    };
+
+    if child_pid == -1 {
+        return Err(CommandError::io(
+            "role PTY 세션을 시작하지 못했습니다.",
+            std::io::Error::last_os_error(),
+        ));
+    }
+
+    if child_pid == 0 {
+        let cwd = CString::new(cwd.to_string_lossy().as_bytes()).ok();
+        if let Some(cwd) = cwd.as_ref() {
+            unsafe {
+                libc::chdir(cwd.as_ptr());
+            }
+        }
+
+        set_child_env("TERM", "xterm-256color");
+        set_child_env("COLORTERM", "truecolor");
+        set_child_env("HELM_ROLE_ID", role_id);
+        set_child_env("HELM_TASK_ID", task_id);
+        set_child_env("HELM_PROJECT_ID", project_id);
+
+        let shell = CString::new("/bin/zsh").unwrap();
+        let login_arg = CString::new("-l").unwrap();
+        let args = [shell.as_ptr(), login_arg.as_ptr(), std::ptr::null()];
+        unsafe {
+            libc::execv(shell.as_ptr(), args.as_ptr());
+            libc::_exit(127);
+        }
+    }
+
+    let reader = unsafe { fs::File::from_raw_fd(master_fd) };
+    let writer = Arc::new(Mutex::new(reader.try_clone().map_err(|err| {
+        CommandError::io("role PTY 입력 스트림을 열지 못했습니다.", err)
+    })?));
+    let session_id_for_thread = session_id.to_string();
+    let project_id_for_thread = project_id.to_string();
+    let task_id_for_thread = task_id.to_string();
+    let role_id_for_thread = role_id.to_string();
+
+    std::thread::spawn(move || {
+        read_role_pty_output(
+            reader,
+            child_pid,
+            session_id_for_thread,
+            project_id_for_thread,
+            task_id_for_thread,
+            role_id_for_thread,
+            app,
+        );
+    });
+
+    Ok(RolePtySession { child_pid, writer })
+}
+
+fn read_role_pty_output(
+    mut reader: fs::File,
+    child_pid: libc::pid_t,
+    session_id: String,
+    project_id: String,
+    task_id: String,
+    role_id: String,
+    app: AppHandle,
+) {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(size) => {
+                let data = String::from_utf8_lossy(&buffer[..size]).to_string();
+                let _ = app.emit(
+                    "agent-role-pty://output",
+                    RolePtyOutput {
+                        session_id: session_id.clone(),
+                        project_id: project_id.clone(),
+                        task_id: task_id.clone(),
+                        role_id: role_id.clone(),
+                        data,
+                    },
+                );
+            }
+            Err(_) => break,
+        }
+    }
+
+    let mut status = 0;
+    unsafe {
+        libc::waitpid(child_pid, &mut status, 0);
+    }
+    let exit_code = if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        -1
+    };
+    let _ = app.emit(
+        "agent-role-pty://exit",
+        RolePtyExit {
+            session_id,
+            project_id,
+            task_id,
+            role_id,
+            exit_code,
+        },
+    );
 }
 
 fn run_direct_command_with_timeout(

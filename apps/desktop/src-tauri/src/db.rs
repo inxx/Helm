@@ -234,6 +234,7 @@ pub fn effective_settings(conn: &Connection, project_id: &str) -> CommandResult<
         role_assignments: settings
             .remove("roleAssignments")
             .unwrap_or_else(default_role_assignments),
+        conductor_config: settings.remove("conductorConfig"),
         worktree_root: settings
             .remove("worktreeRoot")
             .and_then(|value| value.as_str().map(str::to_string)),
@@ -267,6 +268,9 @@ pub fn update_settings(
     }
     if let Some(value) = patch.role_assignments {
         values.push(("roleAssignments", value));
+    }
+    if let Some(value) = patch.conductor_config {
+        values.push(("conductorConfig", value.unwrap_or(Value::Null)));
     }
     if let Some(value) = patch.worktree_root {
         values.push(("worktreeRoot", option_string(value)));
@@ -958,6 +962,39 @@ pub fn prepare_role_context(
             "worktreePath": worktree.worktree_path.clone()
         }),
     )?;
+    append_run_event(
+        &tx,
+        project_id,
+        task_id,
+        &run_id,
+        "artifact",
+        "Context Pack created",
+        json!({
+            "path": format!("{artifact_dir}/context-pack.md"),
+            "artifact": "context-pack.md",
+            "roleId": role_id,
+            "reads": [
+                "Task description",
+                "Task external refs",
+                "Git changed files",
+                "Recent commits",
+                "Role contract"
+            ]
+        }),
+    )?;
+    append_run_event(
+        &tx,
+        project_id,
+        task_id,
+        &run_id,
+        "artifact",
+        "Summary and structured result placeholders created",
+        json!({
+            "summaryPath": format!("{artifact_dir}/summary.md"),
+            "resultPath": format!("{artifact_dir}/structured-result.json"),
+            "schemaPath": format!("{artifact_dir}/structured-result.schema.json")
+        }),
+    )?;
     insert_audit(
         &tx,
         project_id,
@@ -992,6 +1029,74 @@ pub fn prepare_next_role_context(
     })?;
     ensure_task_worktree(conn, root, project_id, task_id)?;
     prepare_role_context(conn, root, project_id, task_id, role_id)
+}
+
+pub fn claim_host_run(
+    conn: &Connection,
+    project_id: &str,
+    run_id: &str,
+    runner_payload: Value,
+    event_sink: &mut Option<&mut dyn FnMut(&RunEventSummary)>,
+) -> CommandResult<AgentRunSummary> {
+    let run = get_agent_run(conn, run_id)?;
+    if run.project_id != project_id {
+        return Err(CommandError::validation(
+            "대상 실행 기록을 찾을 수 없습니다.",
+        ));
+    }
+    if run.status != "Queued" {
+        return Err(CommandError::new(
+            "RunAlreadyClaimed",
+            "Queued run이 이미 다른 worker에 의해 claim되었습니다.",
+        ));
+    }
+
+    let started_at = now();
+    let changed = conn
+        .execute(
+            "UPDATE agent_runs
+             SET status = 'Running', started_at = COALESCE(started_at, ?1), updated_at = ?1
+             WHERE id = ?2 AND project_id = ?3 AND status = 'Queued'",
+            params![started_at, run_id, project_id],
+        )
+        .map_err(|err| CommandError::database("host run claim을 저장하지 못했습니다.", err))?;
+    if changed == 0 {
+        return Err(CommandError::new(
+            "RunAlreadyClaimed",
+            "Queued run이 이미 다른 worker에 의해 claim되었습니다.",
+        ));
+    }
+
+    insert_audit(
+        conn,
+        project_id,
+        "AgentRun",
+        Some(run_id),
+        "agent_run.claimed",
+        json!({
+            "runId": run_id,
+            "taskId": run.task_id,
+            "roleId": run.role_id,
+            "runner": runner_payload.clone()
+        }),
+    )?;
+    append_and_emit_run_event(
+        conn,
+        project_id,
+        &run.task_id,
+        run_id,
+        "status",
+        "Running",
+        json!({
+            "status": "Running",
+            "roleId": run.role_id,
+            "claim": "app-worker",
+            "runner": runner_payload
+        }),
+        event_sink,
+    )?;
+
+    get_agent_run(conn, run_id)
 }
 
 pub fn run_host_role(
@@ -1029,38 +1134,11 @@ pub fn run_host_role(
         ));
     }
 
-    let started_at = now();
-    conn.execute(
-        "UPDATE agent_runs SET status = 'Running', started_at = ?1, updated_at = ?1 WHERE id = ?2",
-        params![started_at, run_id],
-    )
-    .map_err(|err| CommandError::database("host run 상태를 저장하지 못했습니다.", err))?;
-    insert_audit(
+    let run = claim_host_run(
         conn,
         project_id,
-        "AgentRun",
-        Some(run_id),
-        "agent_run.started",
-        json!({
-            "runId": run_id,
-            "taskId": run.task_id,
-            "roleId": run.role_id,
-            "runner": "HelmHostRunner",
-            "provider": runner_command.provider.clone(),
-            "connectionId": runner_command.connection_id.clone(),
-            "model": runner_command.model.clone()
-        }),
-    )?;
-    append_and_emit_run_event(
-        conn,
-        project_id,
-        &run.task_id,
         run_id,
-        "status",
-        "Running",
         json!({
-            "status": "Running",
-            "roleId": run.role_id,
             "runner": "HelmHostRunner",
             "provider": runner_command.provider.clone(),
             "connectionId": runner_command.connection_id.clone(),
@@ -1463,6 +1541,25 @@ pub fn list_agent_runs(
     collect_rows(rows, "실행 기록을 읽지 못했습니다.")
 }
 
+pub fn next_queued_agent_run(
+    conn: &Connection,
+    project_id: &str,
+) -> CommandResult<Option<AgentRunSummary>> {
+    conn.query_row(
+        "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+                stdout_log_path, stderr_log_path, exit_code, result_status, started_at, finished_at,
+                created_at, updated_at
+         FROM agent_runs
+         WHERE project_id = ?1 AND status = 'Queued'
+         ORDER BY created_at ASC
+         LIMIT 1",
+        params![project_id],
+        map_agent_run,
+    )
+    .optional()
+    .map_err(|err| CommandError::database("대기 중인 실행을 읽지 못했습니다.", err))
+}
+
 pub fn list_task_timeline(
     conn: &Connection,
     project_id: &str,
@@ -1724,6 +1821,19 @@ pub fn list_run_events(
         .query_map(params![project_id, run_id], map_run_event)
         .map_err(|err| CommandError::database("실행 이벤트를 읽지 못했습니다.", err))?;
     collect_rows(rows, "실행 이벤트를 읽지 못했습니다.")
+}
+
+pub fn append_system_run_event(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    run_id: &str,
+    message: &str,
+    payload: Value,
+) -> CommandResult<RunEventSummary> {
+    append_run_event(
+        conn, project_id, task_id, run_id, "system", message, payload,
+    )
 }
 
 pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> CommandResult<usize> {
@@ -2078,7 +2188,7 @@ fn get_epic(conn: &Connection, id: &str) -> CommandResult<EpicSummary> {
     .map_err(|err| CommandError::with_details("ValidationFailed", "대상 에픽을 찾을 수 없습니다.", err))
 }
 
-fn get_task(conn: &Connection, id: &str) -> CommandResult<TaskSummary> {
+pub fn get_task(conn: &Connection, id: &str) -> CommandResult<TaskSummary> {
     let row = conn
         .query_row(
             "SELECT id, project_id, epic_id, title, description, status, status_reason, sort_order,
@@ -4116,9 +4226,16 @@ mod tests {
             .expect("context");
         assert_eq!(run.status, "Queued");
         let events = list_run_events(&conn, &project.id, &run.id).expect("events");
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0].kind, "status");
         assert_eq!(events[0].message, "Queued");
+        assert_eq!(events[1].kind, "artifact");
+        assert_eq!(events[1].message, "Context Pack created");
+        assert_eq!(events[2].kind, "artifact");
+        assert_eq!(
+            events[2].message,
+            "Summary and structured result placeholders created"
+        );
 
         let artifact_dir = repo.root.join(&run.artifact_dir);
         assert!(artifact_dir.join("context-pack.md").exists());
@@ -4149,6 +4266,42 @@ mod tests {
                 .and_then(|value| value.get("gate")),
             Some(&Value::Null)
         );
+    }
+
+    #[test]
+    fn claim_host_run_is_atomic_and_records_running_event() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "planner")
+            .expect("context");
+        let mut event_sink: Option<&mut dyn FnMut(&RunEventSummary)> = None;
+        let claimed = claim_host_run(
+            &conn,
+            &project.id,
+            &run.id,
+            json!({ "runner": "test" }),
+            &mut event_sink,
+        )
+        .expect("claim");
+        assert_eq!(claimed.status, "Running");
+
+        let duplicate = claim_host_run(
+            &conn,
+            &project.id,
+            &run.id,
+            json!({ "runner": "test" }),
+            &mut event_sink,
+        )
+        .expect_err("duplicate claim should be rejected");
+        assert_eq!(duplicate.code, "RunAlreadyClaimed");
+
+        let events = list_run_events(&conn, &project.id, &run.id).expect("events");
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "status" && event.message == "Running"));
     }
 
     #[test]
@@ -4205,6 +4358,7 @@ mod tests {
                 ])),
                 ai_connections: None,
                 role_assignments: None,
+                conductor_config: None,
                 worktree_root: None,
                 jira_config: None,
                 obsidian_vault_path: None,
@@ -4321,6 +4475,7 @@ mod tests {
                 ])),
                 ai_connections: None,
                 role_assignments: None,
+                conductor_config: None,
                 worktree_root: None,
                 jira_config: None,
                 obsidian_vault_path: None,
@@ -4411,6 +4566,7 @@ mod tests {
                 ])),
                 ai_connections: None,
                 role_assignments: None,
+                conductor_config: None,
                 worktree_root: None,
                 jira_config: None,
                 obsidian_vault_path: None,
@@ -4500,6 +4656,7 @@ mod tests {
                 ])),
                 ai_connections: None,
                 role_assignments: None,
+                conductor_config: None,
                 worktree_root: None,
                 jira_config: None,
                 obsidian_vault_path: None,
@@ -4605,6 +4762,7 @@ mod tests {
                     "aggregationPolicy": null
                 }
             ]),
+            conductor_config: None,
             worktree_root: None,
             jira_config: None,
             obsidian_vault_path: None,
