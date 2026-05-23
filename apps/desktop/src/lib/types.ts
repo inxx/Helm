@@ -125,6 +125,7 @@ export interface PlannerConversationResult {
   stderr: string;
   exitCode: number;
   timedOut: boolean;
+  elapsedMs: number;
 }
 
 export interface JiraConfig {
@@ -349,6 +350,18 @@ export interface AgentRunSummary {
   finishedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface RunEventSummary {
+  id: string;
+  projectId: string;
+  taskId: string;
+  runId: string;
+  seq: number;
+  kind: "status" | "stdout" | "stderr" | "artifact" | "result" | "approval" | "system";
+  message: string;
+  payload: unknown;
+  createdAt: string;
 }
 
 export interface ApprovalSummary {

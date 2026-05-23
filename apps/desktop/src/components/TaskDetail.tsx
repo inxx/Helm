@@ -9,6 +9,7 @@ import type {
   AgentRunSummary,
   GitFileStatus,
   ProjectSnapshot,
+  RunEventSummary,
   TaskStatus,
   TaskSummary,
   TaskTimelineEntry,
@@ -41,6 +42,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
   const [busyAction, setBusyAction] = useState<{ key: string; label: string } | null>(null);
   const [runs, setRuns] = useState<AgentRunSummary[]>([]);
   const [timeline, setTimeline] = useState<TaskTimelineEntry[]>([]);
+  const [runEvents, setRunEvents] = useState<Record<string, RunEventSummary[]>>({});
   const [worktree, setWorktree] = useState<TaskWorktreeSummary | null>(null);
   const [worktreeFiles, setWorktreeFiles] = useState<GitFileStatus[]>([]);
   const [artifact, setArtifact] = useState<string | null>(null);
@@ -63,6 +65,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
   useEffect(() => {
     setActiveTab("overview");
     setArtifact(null);
+    setRunEvents({});
   }, [task?.id]);
 
   useEffect(() => {
@@ -73,7 +76,14 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
       setWorktreeFiles([]);
       return;
     }
-    void api.listAgentRuns(snapshot.project.id, task.id).then(setRuns);
+    void api.listAgentRuns(snapshot.project.id, task.id).then(async (nextRuns) => {
+      setRuns(nextRuns);
+      const recentRuns = nextRuns.slice(0, 3);
+      const entries = await Promise.all(
+        recentRuns.map(async (run) => [run.id, await api.listRunEvents(snapshot.project.id, run.id)] as const),
+      );
+      setRunEvents(Object.fromEntries(entries));
+    });
     void api.listTaskTimeline(snapshot.project.id, task.id).then(setTimeline);
     void api.getTaskWorktree(snapshot.project.id, task.id).then((nextWorktree) => {
       setWorktree(nextWorktree);
@@ -84,7 +94,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
   useEffect(() => {
     if (!task) return;
     let disposed = false;
-    let unlisten: (() => void) | null = null;
+    const cleanups: Array<() => void> = [];
 
     void listen<{ projectId?: string; taskId?: string }>("agent-run://updated", async (event) => {
       if (event.payload.projectId !== snapshot.project.id || event.payload.taskId !== task.id) return;
@@ -104,15 +114,34 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
       if (disposed) {
         cleanup();
       } else {
-        unlisten = cleanup;
+        cleanups.push(cleanup);
+      }
+    });
+    void listen<RunEventSummary>("agent-run://event", async (event) => {
+      const payload = event.payload;
+      if (payload.projectId !== snapshot.project.id || payload.taskId !== task.id) return;
+      setRunEvents((current) => appendRunEvent(current, payload));
+      if (payload.kind === "status" || payload.kind === "result") {
+        try {
+          const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
+          if (!disposed) setRuns(nextRuns);
+        } catch {
+          // Event rows still render; run summary refresh is best-effort.
+        }
+      }
+    }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+      } else {
+        cleanups.push(cleanup);
       }
     });
 
     return () => {
       disposed = true;
-      unlisten?.();
+      cleanups.forEach((cleanup) => cleanup());
     };
-  }, [snapshot.project.id, task?.id]);
+  }, [onRefresh, snapshot.project.id, task?.id]);
 
   if (!task) {
     return (
@@ -253,6 +282,21 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
       setWorktreeFiles(await api.getTaskWorktreeChangedFiles(snapshot.project.id, task.id));
     } catch {
       setWorktreeFiles([]);
+    }
+  }
+
+  async function showRunEvents(runId: string) {
+    try {
+      const events = await api.listRunEvents(snapshot.project.id, runId);
+      setRunEvents((current) => ({ ...current, [runId]: events }));
+      setArtifact(formatRunEvents(events));
+      setActiveTab("artifacts");
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "이벤트 열기 실패",
+        description: messageFromError(error, "실행 이벤트를 읽지 못했습니다."),
+      });
     }
   }
 
@@ -548,6 +592,9 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
                           <button onClick={() => showArtifact(latestRun.id, "context-pack.md")} type="button">
                             context
                           </button>
+                          <button onClick={() => showRunEvents(latestRun.id)} type="button">
+                            events
+                          </button>
                           <button
                             aria-busy={hostBusy ? true : undefined}
                             className={hostBusy ? "loading-button is-loading" : "loading-button"}
@@ -572,6 +619,11 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
                           {cancelBusy ? "취소 중..." : "cancel"}
                         </button>
                       ) : null}
+                      {latestRun && latestRun.status !== "Queued" ? (
+                        <button onClick={() => showRunEvents(latestRun.id)} type="button">
+                          events
+                        </button>
+                      ) : null}
                       {latestRun && isRetryableRunStatus(latestRun.status) ? (
                         <button
                           aria-busy={retryBusy ? true : undefined}
@@ -586,6 +638,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
                       ) : null}
                       {!isCurrentRole && !latestRun ? <span>현재 단계 아님</span> : null}
                     </div>
+                    {latestRun ? <RunEventPreview events={runEvents[latestRun.id] ?? []} /> : null}
                   </li>
                 );
               })}
@@ -708,6 +761,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
                   <div className="artifact-actions">
                     <button onClick={() => showArtifact(run.id, "summary.md")} type="button">summary</button>
                     <button onClick={() => showArtifact(run.id, "structured-result.json")} type="button">result</button>
+                    <button onClick={() => showRunEvents(run.id)} type="button">events</button>
                     <button onClick={() => showArtifact(run.id, "stdout.log")} type="button">stdout</button>
                     <button onClick={() => showArtifact(run.id, "stderr.log")} type="button">stderr</button>
                     {run.status !== "Queued" ? (
@@ -954,6 +1008,50 @@ function roleForTaskStatus(status: TaskStatus): RoleId | null {
 
 function isRetryableRunStatus(status: AgentRunSummary["status"]): boolean {
   return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
+}
+
+function RunEventPreview({ events }: { events: RunEventSummary[] }) {
+  if (events.length === 0) return null;
+  return (
+    <ol className="run-event-preview" aria-label="최근 실행 이벤트">
+      {events.slice(-4).map((event) => (
+        <li key={event.id}>
+          <span>{event.kind}</span>
+          <code>{compactEventMessage(event.message)}</code>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function appendRunEvent(
+  current: Record<string, RunEventSummary[]>,
+  event: RunEventSummary,
+): Record<string, RunEventSummary[]> {
+  const events = current[event.runId] ?? [];
+  if (events.some((item) => item.id === event.id || item.seq === event.seq)) {
+    return current;
+  }
+  return {
+    ...current,
+    [event.runId]: [...events, event].sort((left, right) => left.seq - right.seq),
+  };
+}
+
+function formatRunEvents(events: RunEventSummary[]): string {
+  if (events.length === 0) return "아직 기록된 실행 이벤트가 없습니다.";
+  return events
+    .map((event) => {
+      const timestamp = event.createdAt.replace("T", " ").replace(/\.\d+Z$/, "Z");
+      return `[${event.seq}] ${timestamp} ${event.kind}\n${event.message}`;
+    })
+    .join("\n\n");
+}
+
+function compactEventMessage(message: string): string {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 120) return normalized || "-";
+  return `${normalized.slice(0, 117)}...`;
 }
 
 function messageFromError(error: unknown, fallback: string): string {

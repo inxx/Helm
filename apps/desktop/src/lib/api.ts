@@ -17,6 +17,7 @@ import type {
   PlannerConversationResult,
   ProjectSettingsPatch,
   ProjectSnapshot,
+  RunEventSummary,
   RunnerCheckResult,
   RunnerTemplateSummary,
   TaskStatus,
@@ -118,6 +119,9 @@ export const api = {
   },
   listTaskTimeline(projectId: string, taskId: string) {
     return invoke<TaskTimelineEntry[]>("list_task_timeline", { projectId, taskId });
+  },
+  listRunEvents(projectId: string, runId: string) {
+    return invoke<RunEventSummary[]>("list_run_events", { projectId, runId });
   },
   readRunArtifact(projectId: string, runId: string, artifactName: string) {
     return invoke<string>("read_run_artifact", { projectId, runId, artifactName });

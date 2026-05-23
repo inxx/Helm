@@ -1603,6 +1603,38 @@ textarea {
   line-height: 1.45;
 }
 
+.run-event-preview {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.run-event-preview li {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.run-event-preview span {
+  color: var(--text-subtle);
+  text-transform: uppercase;
+}
+
+.run-event-preview code {
+  overflow: hidden;
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .artifact-viewer {
   max-height: 240px;
   overflow: auto;

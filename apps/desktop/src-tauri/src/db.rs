@@ -2,28 +2,30 @@ use crate::git;
 use crate::models::{
     AgentRunSummary, ApprovalSummary, AuditLogEntry, CommandError, CommandResult, CreateEpicInput,
     CreateTaskInput, EffectiveSettings, EpicSummary, GitFileStatus, ProjectSettingsPatch,
-    ProjectSummary, TaskCounts, TaskExternalRefInput, TaskExternalRefSummary, TaskSummary,
-    TaskTimelineEntry, TaskWorktreeSummary,
+    ProjectSummary, RunEventSummary, TaskCounts, TaskExternalRefInput, TaskExternalRefSummary,
+    TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    mpsc, Arc,
 };
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 4;
+const SUPPORTED_SCHEMA_VERSION: i64 = 5;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
 const PHASE4_MIGRATION: &str = include_str!("../migrations/0004_evidence_gate_timeline.sql");
+const PHASE5_MIGRATION: &str = include_str!("../migrations/0005_run_events.sql");
 
 pub fn now() -> String {
     Utc::now().to_rfc3339()
@@ -77,6 +79,13 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
     }
     if current_version < 4 {
         apply_migration(conn, 4, "evidence_gate_timeline", PHASE4_MIGRATION)?;
+    } else if !table_exists(conn, "command_evidence")? {
+        apply_schema_patch(conn, PHASE4_MIGRATION)?;
+    }
+    if current_version < 5 {
+        apply_migration(conn, 5, "phase5_run_events", PHASE5_MIGRATION)?;
+    } else if !table_exists(conn, "run_events")? {
+        apply_schema_patch(conn, PHASE5_MIGRATION)?;
     }
     Ok(())
 }
@@ -102,6 +111,17 @@ fn apply_migration(
     Ok(())
 }
 
+fn apply_schema_patch(conn: &mut Connection, sql: &str) -> CommandResult<()> {
+    let tx = conn
+        .transaction()
+        .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
+    tx.execute_batch(sql)
+        .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
+    tx.commit()
+        .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
+    Ok(())
+}
+
 fn schema_version(conn: &Connection) -> CommandResult<i64> {
     let table_exists: Option<i64> = conn
         .query_row(
@@ -121,6 +141,18 @@ fn schema_version(conn: &Connection) -> CommandResult<i64> {
         |row| row.get(0),
     )
     .map_err(|err| CommandError::database("Helm 데이터베이스를 확인하지 못했습니다.", err))
+}
+
+fn table_exists(conn: &Connection, table_name: &str) -> CommandResult<bool> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table_name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| CommandError::database("Helm 데이터베이스를 확인하지 못했습니다.", err))?;
+    Ok(exists.is_some())
 }
 
 pub fn upsert_project(conn: &Connection, root: &Path) -> CommandResult<ProjectSummary> {
@@ -699,6 +731,21 @@ pub fn run_stub_role(
         ],
     )
     .map_err(|err| CommandError::database("Helm 데이터 저장에 실패했습니다.", err))?;
+    append_run_event(
+        &tx,
+        project_id,
+        task_id,
+        &run_id,
+        "status",
+        "Succeeded",
+        json!({
+            "status": "Succeeded",
+            "roleId": role_id,
+            "runner": "StubRunner",
+            "exitCode": 0,
+            "resultStatus": result_status
+        }),
+    )?;
     insert_audit(
         &tx,
         project_id,
@@ -757,6 +804,19 @@ pub fn run_stub_role(
                 "entityType": "Task",
                 "entityId": task_id,
                 "requestedReason": "planner stub run completed"
+            }),
+        )?;
+        append_run_event(
+            &tx,
+            project_id,
+            task_id,
+            &run_id,
+            "approval",
+            "PlanApproval Pending",
+            json!({
+                "approvalId": approval_id,
+                "approvalType": "PlanApproval",
+                "status": "Pending"
             }),
         )?;
         created_approval_id = Some(approval_id);
@@ -884,6 +944,20 @@ pub fn prepare_role_context(
         ],
     )
     .map_err(|err| CommandError::database("실행 컨텍스트를 저장하지 못했습니다.", err))?;
+    append_run_event(
+        &tx,
+        project_id,
+        task_id,
+        &run_id,
+        "status",
+        "Queued",
+        json!({
+            "status": "Queued",
+            "roleId": role_id,
+            "artifactDir": artifact_dir,
+            "worktreePath": worktree.worktree_path.clone()
+        }),
+    )?;
     insert_audit(
         &tx,
         project_id,
@@ -926,6 +1000,7 @@ pub fn run_host_role(
     project_id: &str,
     run_id: &str,
     cancellation: Arc<AtomicBool>,
+    mut event_sink: Option<&mut dyn FnMut(&RunEventSummary)>,
 ) -> CommandResult<AgentRunSummary> {
     let run = get_agent_run(conn, run_id)?;
     if run.project_id != project_id {
@@ -975,6 +1050,23 @@ pub fn run_host_role(
             "connectionId": runner_command.connection_id.clone(),
             "model": runner_command.model.clone()
         }),
+    )?;
+    append_and_emit_run_event(
+        conn,
+        project_id,
+        &run.task_id,
+        run_id,
+        "status",
+        "Running",
+        json!({
+            "status": "Running",
+            "roleId": run.role_id,
+            "runner": "HelmHostRunner",
+            "provider": runner_command.provider.clone(),
+            "connectionId": runner_command.connection_id.clone(),
+            "model": runner_command.model.clone()
+        }),
+        &mut event_sink,
     )?;
 
     let artifact_path = root.join(&run.artifact_dir);
@@ -1051,6 +1143,22 @@ pub fn run_host_role(
             ),
         timeout_seconds,
         cancellation,
+        |stream, chunk| {
+            let text = String::from_utf8_lossy(chunk).to_string();
+            let _ = append_and_emit_run_event(
+                conn,
+                project_id,
+                &run.task_id,
+                run_id,
+                stream,
+                &text,
+                json!({
+                    "stream": stream,
+                    "bytes": chunk.len()
+                }),
+                &mut event_sink,
+            );
+        },
     )?;
     let command_duration_ms = command_started_instant
         .elapsed()
@@ -1164,8 +1272,8 @@ pub fn run_host_role(
                 "roleId": run.role_id,
                 "status": final_status,
                 "exitCode": exit_code,
-                "resultStatus": result_status,
-                "changedFiles": changed_files,
+                "resultStatus": result_status.clone(),
+                "changedFiles": &changed_files,
                 "evidenceId": evidence_id
             }),
         )?;
@@ -1215,6 +1323,22 @@ pub fn run_host_role(
         );
         return Err(err);
     }
+
+    append_and_emit_run_event(
+        conn,
+        project_id,
+        &run.task_id,
+        run_id,
+        "result",
+        final_status,
+        json!({
+            "status": final_status,
+            "exitCode": exit_code,
+            "resultStatus": result_status.clone(),
+            "changedFiles": &changed_files
+        }),
+        &mut event_sink,
+    )?;
 
     get_agent_run(conn, run_id)
 }
@@ -1270,6 +1394,31 @@ pub fn mark_host_run_launch_error(
             "taskId": run.task_id,
             "roleId": run.role_id,
             "message": message
+        }),
+    )?;
+    append_run_event(
+        conn,
+        project_id,
+        &run.task_id,
+        run_id,
+        "stderr",
+        message,
+        json!({
+            "stream": "stderr",
+            "source": "launch"
+        }),
+    )?;
+    append_run_event(
+        conn,
+        project_id,
+        &run.task_id,
+        run_id,
+        "result",
+        "NeedsInspection",
+        json!({
+            "status": "NeedsInspection",
+            "exitCode": -1,
+            "resultStatus": "needs_changes"
         }),
     )?;
     get_agent_run(conn, run_id)
@@ -1553,6 +1702,30 @@ pub fn get_agent_run(conn: &Connection, run_id: &str) -> CommandResult<AgentRunS
     })
 }
 
+pub fn list_run_events(
+    conn: &Connection,
+    project_id: &str,
+    run_id: &str,
+) -> CommandResult<Vec<RunEventSummary>> {
+    let run = get_agent_run(conn, run_id)?;
+    if run.project_id != project_id {
+        return Err(CommandError::validation(
+            "대상 실행 기록을 찾을 수 없습니다.",
+        ));
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, project_id, task_id, run_id, seq, kind, message, payload_json, created_at
+             FROM run_events WHERE project_id = ?1 AND run_id = ?2 ORDER BY seq ASC",
+        )
+        .map_err(|err| CommandError::database("실행 이벤트를 읽지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id, run_id], map_run_event)
+        .map_err(|err| CommandError::database("실행 이벤트를 읽지 못했습니다.", err))?;
+    collect_rows(rows, "실행 이벤트를 읽지 못했습니다.")
+}
+
 pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> CommandResult<usize> {
     let timestamp = now();
     let count = conn
@@ -1829,6 +2002,21 @@ fn map_agent_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunSummary> {
         finished_at: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
+    })
+}
+
+fn map_run_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunEventSummary> {
+    let payload_raw: String = row.get(7)?;
+    Ok(RunEventSummary {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        task_id: row.get(2)?,
+        run_id: row.get(3)?,
+        seq: row.get(4)?,
+        kind: row.get(5)?,
+        message: row.get(6)?,
+        payload: serde_json::from_str(&payload_raw).unwrap_or(Value::Null),
+        created_at: row.get(8)?,
     })
 }
 
@@ -2252,6 +2440,82 @@ fn gate_for_role(role_id: &str) -> Option<&'static str> {
         "tester" => Some("test"),
         _ => None,
     }
+}
+
+fn append_run_event(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    run_id: &str,
+    kind: &str,
+    message: &str,
+    payload: Value,
+) -> CommandResult<RunEventSummary> {
+    if !matches!(
+        kind,
+        "status" | "stdout" | "stderr" | "artifact" | "result" | "approval" | "system"
+    ) {
+        return Err(CommandError::validation(
+            "허용되지 않은 실행 이벤트 종류입니다.",
+        ));
+    }
+
+    let seq: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM run_events WHERE run_id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| CommandError::database("실행 이벤트 순서를 만들지 못했습니다.", err))?;
+    let id = new_id();
+    let timestamp = now();
+    conn.execute(
+        "INSERT INTO run_events (
+           id, project_id, task_id, run_id, seq, kind, message, payload_json, created_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            id,
+            project_id,
+            task_id,
+            run_id,
+            seq,
+            kind,
+            message,
+            payload.to_string(),
+            timestamp
+        ],
+    )
+    .map_err(|err| CommandError::database("실행 이벤트를 저장하지 못했습니다.", err))?;
+
+    Ok(RunEventSummary {
+        id,
+        project_id: project_id.to_string(),
+        task_id: task_id.to_string(),
+        run_id: run_id.to_string(),
+        seq,
+        kind: kind.to_string(),
+        message: message.to_string(),
+        payload,
+        created_at: timestamp,
+    })
+}
+
+fn append_and_emit_run_event(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    run_id: &str,
+    kind: &str,
+    message: &str,
+    payload: Value,
+    event_sink: &mut Option<&mut dyn FnMut(&RunEventSummary)>,
+) -> CommandResult<RunEventSummary> {
+    let event = append_run_event(conn, project_id, task_id, run_id, kind, message, payload)?;
+    if let Some(sink) = event_sink.as_deref_mut() {
+        sink(&event);
+    }
+    Ok(event)
 }
 
 fn ensure_epic_exists(conn: &Connection, project_id: &str, epic_id: &str) -> CommandResult<()> {
@@ -2720,29 +2984,127 @@ struct HostCommandOutput {
     canceled: bool,
 }
 
-fn run_command_with_timeout(
+struct HostOutputChunk {
+    stream: &'static str,
+    bytes: Vec<u8>,
+}
+
+fn spawn_output_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    stream: &'static str,
+    sender: mpsc::Sender<HostOutputChunk>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => {
+                    if sender
+                        .send(HostOutputChunk {
+                            stream,
+                            bytes: buffer[..size].to_vec(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn drain_host_output<F>(
+    receiver: &mpsc::Receiver<HostOutputChunk>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    on_output: &mut F,
+) where
+    F: FnMut(&str, &[u8]),
+{
+    while let Ok(chunk) = receiver.try_recv() {
+        match chunk.stream {
+            "stdout" => stdout.extend_from_slice(&chunk.bytes),
+            "stderr" => stderr.extend_from_slice(&chunk.bytes),
+            _ => {}
+        }
+        on_output(chunk.stream, &chunk.bytes);
+    }
+}
+
+fn finish_host_child<F>(
+    child: &mut std::process::Child,
+    stdout_reader: &mut Option<std::thread::JoinHandle<()>>,
+    stderr_reader: &mut Option<std::thread::JoinHandle<()>>,
+    receiver: &mpsc::Receiver<HostOutputChunk>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    on_output: &mut F,
+) -> CommandResult<std::process::ExitStatus>
+where
+    F: FnMut(&str, &[u8]),
+{
+    let status = child
+        .wait()
+        .map_err(|err| CommandError::io("host runner 종료 상태를 읽지 못했습니다.", err))?;
+    if let Some(reader) = stdout_reader.take() {
+        let _ = reader.join();
+    }
+    if let Some(reader) = stderr_reader.take() {
+        let _ = reader.join();
+    }
+    drain_host_output(receiver, stdout, stderr, on_output);
+    Ok(status)
+}
+
+fn run_command_with_timeout<F>(
     command: &mut Command,
     timeout_seconds: u64,
     cancellation: Arc<AtomicBool>,
-) -> CommandResult<HostCommandOutput> {
+    mut on_output: F,
+) -> CommandResult<HostCommandOutput>
+where
+    F: FnMut(&str, &[u8]),
+{
     let mut child = command
         .spawn()
         .map_err(|err| CommandError::io("host runner command를 실행하지 못했습니다.", err))?;
+    let (sender, receiver) = mpsc::channel();
+    let mut stdout_reader = child
+        .stdout
+        .take()
+        .map(|stdout| spawn_output_reader(stdout, "stdout", sender.clone()));
+    let mut stderr_reader = child
+        .stderr
+        .take()
+        .map(|stderr| spawn_output_reader(stderr, "stderr", sender));
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
 
     loop {
+        drain_host_output(&receiver, &mut stdout, &mut stderr, &mut on_output);
+
         if child
             .try_wait()
             .map_err(|err| CommandError::io("host runner 상태를 확인하지 못했습니다.", err))?
             .is_some()
         {
-            let output = child
-                .wait_with_output()
-                .map_err(|err| CommandError::io("host runner 출력을 읽지 못했습니다.", err))?;
+            let status = finish_host_child(
+                &mut child,
+                &mut stdout_reader,
+                &mut stderr_reader,
+                &receiver,
+                &mut stdout,
+                &mut stderr,
+                &mut on_output,
+            )?;
             return Ok(HostCommandOutput {
-                stdout: output.stdout,
-                stderr: output.stderr,
-                exit_code: output.status.code().unwrap_or(-1),
+                stdout,
+                stderr,
+                exit_code: status.code().unwrap_or(-1),
                 timed_out: false,
                 canceled: false,
             });
@@ -2750,13 +3112,19 @@ fn run_command_with_timeout(
 
         if cancellation.load(Ordering::SeqCst) {
             let _ = child.kill();
-            let output = child.wait_with_output().map_err(|err| {
-                CommandError::io("취소된 host runner 출력을 읽지 못했습니다.", err)
-            })?;
+            let status = finish_host_child(
+                &mut child,
+                &mut stdout_reader,
+                &mut stderr_reader,
+                &receiver,
+                &mut stdout,
+                &mut stderr,
+                &mut on_output,
+            )?;
             return Ok(HostCommandOutput {
-                stdout: output.stdout,
-                stderr: output.stderr,
-                exit_code: -1,
+                stdout,
+                stderr,
+                exit_code: status.code().unwrap_or(-1),
                 timed_out: false,
                 canceled: true,
             });
@@ -2764,13 +3132,19 @@ fn run_command_with_timeout(
 
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let output = child.wait_with_output().map_err(|err| {
-                CommandError::io("timeout 된 host runner 출력을 읽지 못했습니다.", err)
-            })?;
+            let status = finish_host_child(
+                &mut child,
+                &mut stdout_reader,
+                &mut stderr_reader,
+                &receiver,
+                &mut stdout,
+                &mut stderr,
+                &mut on_output,
+            )?;
             return Ok(HostCommandOutput {
-                stdout: output.stdout,
-                stderr: output.stderr,
-                exit_code: -1,
+                stdout,
+                stderr,
+                exit_code: status.code().unwrap_or(-1),
                 timed_out: true,
                 canceled: false,
             });
@@ -3599,6 +3973,7 @@ mod tests {
             project_id,
             &run.id,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .expect("host run")
     }
@@ -3615,7 +3990,7 @@ mod tests {
                 row.get(0)
             })
             .expect("version");
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[test]
@@ -3740,6 +4115,10 @@ mod tests {
         let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "coder")
             .expect("context");
         assert_eq!(run.status, "Queued");
+        let events = list_run_events(&conn, &project.id, &run.id).expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "status");
+        assert_eq!(events[0].message, "Queued");
 
         let artifact_dir = repo.root.join(&run.artifact_dir);
         assert!(artifact_dir.join("context-pack.md").exists());
@@ -3966,6 +4345,7 @@ mod tests {
             &project.id,
             &run.id,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .expect("host run");
         assert_eq!(finished.status, "Succeeded");
@@ -4055,6 +4435,7 @@ mod tests {
             &project.id,
             &run.id,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .expect("host run");
         assert_eq!(finished.status, "NeedsInspection");
@@ -4137,6 +4518,7 @@ mod tests {
             &project.id,
             &run.id,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .expect("host run");
         assert_eq!(finished.status, "NeedsInspection");

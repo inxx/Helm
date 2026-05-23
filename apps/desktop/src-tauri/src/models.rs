@@ -337,6 +337,7 @@ pub struct PlannerConversationResult {
     pub stderr: String,
     pub exit_code: i32,
     pub timed_out: bool,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -382,6 +383,20 @@ pub struct AgentRunSummary {
     pub finished_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RunEventSummary {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: String,
+    pub run_id: String,
+    pub seq: i64,
+    pub kind: String,
+    pub message: String,
+    pub payload: Value,
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize)]

@@ -57,7 +57,6 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   const [plannerRequest, setPlannerRequest] = useState("");
   const [jiraRef, setJiraRef] = useState("");
   const [sessions, setSessions] = useState<PlanningSessionStub[]>([]);
-  const [busy, setBusy] = useState(false);
   const [plannerOperation, setPlannerOperation] = useState<"planner" | "approve" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
@@ -109,7 +108,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   async function startPlannerSession() {
     const trimmed = goal.trim();
     const trimmedJiraRef = jiraRef.trim();
-    if (!trimmed || busy) return;
+    if (!trimmed || plannerRunning || approvingPlan) return;
 
     const existingTask = trimmedJiraRef ? findTaskByJiraRef(projectSnapshot, trimmedJiraRef) : null;
     const jiraState = existingTask ? "AlreadyTracked" : trimmedJiraRef ? "Linked" : "Missing";
@@ -119,8 +118,8 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     const session: PlanningSessionStub = {
       id: sessionId,
       title: fallbackDraft.title,
-      status: "Drafting",
-      updatedLabel: "응답 대기",
+      status: "ReadyForApproval",
+      updatedLabel: "빠른 초안",
       goalText: trimmed,
       jiraRef: trimmedJiraRef || null,
       jiraState,
@@ -134,8 +133,8 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         {
           id: pendingMessageId,
           role: "planner",
-          content: "응답 로딩중...",
-          createdLabel: "응답 대기",
+          content: quickPlannerDraftMessage(false),
+          createdLabel: "AI 정교화 중",
           pending: true,
         },
       ],
@@ -150,25 +149,28 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     setPlannerRequest("");
     setError(null);
     setPlannerOperation("planner");
-    setBusy(true);
     try {
       await waitForNextPaint();
       const plannerResult = await runPlannerPlanMode(trimmed, trimmed, null, fallbackDraft);
       const draft = plannerResult.draft;
+      const responseMessage = plannerResult.message ?? plannerOpeningMessage(draft, jiraState);
       setSessions((current) =>
         current.map((item) =>
           item.id === sessionId
             ? {
                 ...item,
-                title: draft.title,
-                status: "ReadyForApproval",
+                title: item.status === "Approved" ? item.title : draft.title,
+                status: item.status === "Approved" ? item.status : "ReadyForApproval",
                 updatedLabel: "방금 전",
-                draft,
+                draft: item.status === "Approved" ? item.draft : draft,
                 messages: item.messages.map((message) =>
                   message.id === pendingMessageId
                     ? {
                         ...message,
-                        content: plannerResult.message ?? plannerOpeningMessage(draft, jiraState),
+                        content:
+                          item.status === "Approved"
+                            ? "AI planner 응답은 승인 후 도착해서 이미 생성된 Task에는 반영하지 않았습니다."
+                            : responseMessage,
                         createdLabel: "방금 전",
                         pending: false,
                       }
@@ -181,25 +183,31 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       setError(plannerResult.warning ?? null);
     } finally {
       setPlannerOperation(null);
-      setBusy(false);
     }
   }
 
   async function reviseActiveDraft() {
     const trimmed = plannerRequest.trim();
-    if (!activeSession || !trimmed || busy) return;
+    if (!activeSession || !trimmed || plannerRunning || approvingPlan) return;
 
     setPlannerOperation("planner");
-    setBusy(true);
     const submittedAt = Date.now();
     const pendingMessageId = `${activeSession.id}-planner-pending-${submittedAt}`;
+    const fallbackDraft = buildPlannerDraft(
+      `${activeSession.goalText}\n\nplanner message: ${trimmed}`,
+      activeSession.taskId ? activeSession.draft.tasks[0]?.title ?? null : null,
+    );
+    const nextRevision = activeSession.revision + 1;
     setSessions((current) =>
       current.map((item) =>
         item.id === activeSession.id
           ? {
               ...item,
-              status: "Drafting",
-              updatedLabel: "응답 대기",
+              title: fallbackDraft.title,
+              status: "ReadyForApproval",
+              updatedLabel: "빠른 초안",
+              draft: fallbackDraft,
+              revision: nextRevision,
               messages: [
                 ...item.messages,
                 {
@@ -211,8 +219,8 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 {
                   id: pendingMessageId,
                   role: "planner",
-                  content: "응답 로딩중...",
-                  createdLabel: "응답 대기",
+                  content: quickPlannerDraftMessage(true),
+                  createdLabel: "AI 정교화 중",
                   pending: true,
                 },
               ],
@@ -224,10 +232,6 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     setError(null);
     try {
       await waitForNextPaint();
-      const fallbackDraft = buildPlannerDraft(
-        `${activeSession.goalText}\n\nplanner message: ${trimmed}`,
-        activeSession.taskId ? activeSession.draft.tasks[0]?.title ?? null : null,
-      );
       const plannerResult = await runPlannerPlanMode(
         trimmed,
         activeSession.goalText,
@@ -235,23 +239,26 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         fallbackDraft,
       );
       const revisedDraft = plannerResult.draft;
-      const nextRevision = activeSession.revision + 1;
+      const responseMessage = plannerResult.message ?? plannerRevisionMessage(revisedDraft, nextRevision);
 
       setSessions((current) =>
         current.map((item) =>
           item.id === activeSession.id
             ? {
                 ...item,
-                title: revisedDraft.title,
-                status: "ReadyForApproval",
+                title: item.status === "Approved" ? item.title : revisedDraft.title,
+                status: item.status === "Approved" ? item.status : "ReadyForApproval",
                 updatedLabel: "방금 전",
-                draft: revisedDraft,
-                revision: nextRevision,
+                draft: item.status === "Approved" ? item.draft : revisedDraft,
+                revision: item.status === "Approved" ? item.revision : nextRevision,
                 messages: item.messages.map((message) =>
                   message.id === pendingMessageId
                     ? {
                         ...message,
-                        content: plannerResult.message ?? plannerRevisionMessage(revisedDraft, nextRevision),
+                        content:
+                          item.status === "Approved"
+                            ? "AI planner 응답은 승인 후 도착해서 이미 생성된 Task에는 반영하지 않았습니다."
+                            : responseMessage,
                         createdLabel: "방금 전",
                         pending: false,
                       }
@@ -264,7 +271,6 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       setError(plannerResult.warning ?? null);
     } finally {
       setPlannerOperation(null);
-      setBusy(false);
     }
   }
 
@@ -304,14 +310,13 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   }
 
   async function approvePlanDraft() {
-    if (!activeSession || busy) return;
+    if (!activeSession || approvingPlan) return;
     if (activeSession.status === "Approved" && activeSession.taskId) {
       onOpenTask(activeSession.taskId);
       return;
     }
 
     setPlannerOperation("approve");
-    setBusy(true);
     try {
       if (activeSession.taskId && activeSession.jiraState === "AlreadyTracked") {
         setSessions((current) =>
@@ -361,7 +366,6 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       setError(errorMessage(err));
     } finally {
       setPlannerOperation(null);
-      setBusy(false);
     }
   }
 
@@ -495,7 +499,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
               <div className="planning-goal-actions">
                 <span className="planning-goal-hint">
                   {activeSession
-                    ? "메시지를 보내면 planner가 Plan Document draft를 갱신합니다."
+                    ? "빠른 로컬 초안을 즉시 반영하고 AI planner 응답이 도착하면 정교화합니다."
                     : goal.trim()
                       ? jiraChecks.summary
                       : "대화로 계획 문서를 고정하고 승인 후에만 Helm Task를 생성합니다."}
@@ -504,7 +508,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                   type="submit"
                   aria-busy={plannerRunning ? true : undefined}
                   className={plannerRunning ? "primary-button loading-button is-loading" : "primary-button loading-button"}
-                  disabled={busy || (activeSession ? !plannerRequest.trim() : !goal.trim())}
+                  disabled={plannerRunning || approvingPlan || (activeSession ? !plannerRequest.trim() : !goal.trim())}
                 >
                   {plannerRunning ? (
                     <Loader2 className="loading-icon" size={14} aria-hidden />
@@ -524,7 +528,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
               <span className="status-pill">
                 {activeSession
                   ? plannerRunning
-                    ? "초안 갱신 중"
+                    ? "AI 정교화 중"
                     : activeSession.status === "Approved"
                       ? "태스크 생성됨"
                       : jiraStateLabel(activeSession.jiraState)
@@ -620,7 +624,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                       type="button"
                       aria-busy={approvingPlan ? true : undefined}
                       className={approvingPlan ? "primary-button loading-button is-loading" : "primary-button loading-button"}
-                      disabled={busy || activeSession.status === "Approved"}
+                      disabled={approvingPlan || activeSession.status === "Approved"}
                       onClick={() => {
                         void approvePlanDraft();
                       }}
@@ -905,11 +909,23 @@ function plannerFailureMessage(result: PlannerConversationResult): string {
 
 function plannerMessageFromResult(result: PlannerConversationResult, draft: PlannerDraft): string {
   const mode = result.provider === "claude" ? "native plan mode" : result.provider === "codex" ? "read-only plan mode" : "planning mode";
+  const elapsed = formatElapsed(result.elapsedMs);
   return [
-    `${result.connectionId} ${mode} 응답을 Plan Document draft로 반영했습니다.`,
+    `${result.connectionId} ${mode} 응답을${elapsed ? ` ${elapsed} 후` : ""} Plan Document draft로 반영했습니다.`,
     `${draft.tasks.length}개의 Task 후보와 ${draft.tasks.reduce((total, task) => total + task.subtasks.length, 0)}개의 Subtask 후보가 있습니다.`,
     draft.openQuestions.length > 0 ? `남은 질문: ${draft.openQuestions.join(" ")}` : "현재 blocking question은 없습니다.",
   ].join(" ");
+}
+
+function quickPlannerDraftMessage(revision: boolean): string {
+  return revision
+    ? "빠른 로컬 갱신안을 먼저 채팅과 Plan Document에 반영했습니다. AI planner가 더 다듬는 중입니다."
+    : "빠른 로컬 초안을 먼저 채팅과 Plan Document에 반영했습니다. AI planner가 더 다듬는 중입니다.";
+}
+
+function formatElapsed(elapsedMs: number | undefined): string | null {
+  if (!Number.isFinite(elapsedMs) || !elapsedMs || elapsedMs < 1000) return null;
+  return `${(elapsedMs / 1000).toFixed(elapsedMs < 10_000 ? 1 : 0)}초`;
 }
 
 function plannerOpeningMessage(draft: PlannerDraft, jiraState: PlanningSessionStub["jiraState"]): string {

@@ -7,8 +7,9 @@ use crate::models::{
     CommandResult, CreateEpicInput, CreateTaskInput, EffectiveSettings, EpicSummary,
     GitBranchSummary, GitCommitSummary, GitFileStatus, GitRepositoryState, NodeRuntimeSummary,
     PlannerConversationInput, PlannerConversationResult, ProjectContext, ProjectSettingsPatch,
-    ProjectSnapshot, ProjectSummary, RunnerCheckResult, RunnerTemplateSummary, TaskSummary,
-    TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
+    ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult, RunnerTemplateSummary,
+    TaskSummary, TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult,
+    TerminalDirectoryEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -935,6 +936,7 @@ fn run_host_role(
     project_id: String,
     run_id: String,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> CommandResult<AgentRunSummary> {
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
@@ -949,17 +951,23 @@ fn run_host_role(
         }
         running_runs.insert(run_id.clone(), cancellation.clone());
     }
+    let mut event_sink = |event: &RunEventSummary| emit_run_event(&app, event);
     let result = db::run_host_role(
         &mut conn,
         &context.root_path,
         &project_id,
         &run_id,
         cancellation,
+        Some(&mut event_sink),
     );
     if let Ok(mut running_runs) = state.running_runs.lock() {
         running_runs.remove(&run_id);
     }
     result
+}
+
+fn emit_run_event(app: &AppHandle, event: &RunEventSummary) {
+    let _ = app.emit("agent-run://event", event);
 }
 
 fn spawn_background_host_run(
@@ -982,12 +990,14 @@ fn spawn_background_host_run(
         }
 
         let result = db::open_existing_db(&context.db_path).and_then(|mut conn| {
+            let mut event_sink = |event: &RunEventSummary| emit_run_event(&app, event);
             let result = db::run_host_role(
                 &mut conn,
                 &context.root_path,
                 &project_id,
                 &run_id,
                 cancellation,
+                Some(&mut event_sink),
             );
             if let Err(error) = &result {
                 let _ = db::mark_host_run_launch_error(
@@ -1083,6 +1093,17 @@ fn list_task_timeline(
     let context = project_context(&state, &project_id)?;
     let conn = db::open_existing_db(&context.db_path)?;
     db::list_task_timeline(&conn, &project_id, &task_id)
+}
+
+#[tauri::command]
+fn list_run_events(
+    project_id: String,
+    run_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<RunEventSummary>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::list_run_events(&conn, &project_id, &run_id)
 }
 
 #[tauri::command]
@@ -1742,6 +1763,7 @@ fn planner_result_from_output(
         stderr: output.stderr,
         exit_code: output.exit_code,
         timed_out: output.timed_out,
+        elapsed_ms: output.elapsed_ms,
     }
 }
 
@@ -2758,6 +2780,11 @@ struct ShellOutput {
     stderr: String,
     exit_code: i32,
     timed_out: bool,
+    elapsed_ms: u64,
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn run_pty_command_with_input(
@@ -2769,6 +2796,7 @@ fn run_pty_command_with_input(
     if command.is_empty() {
         return Err(CommandError::validation("실행할 CLI command가 없습니다."));
     }
+    let started_at = Instant::now();
 
     let mut master_fd: libc::c_int = -1;
     let mut winsize = libc::winsize {
@@ -2879,6 +2907,7 @@ fn run_pty_command_with_input(
         stderr: String::new(),
         exit_code,
         timed_out,
+        elapsed_ms: elapsed_millis(started_at),
     })
 }
 
@@ -3216,6 +3245,7 @@ fn run_direct_command_with_timeout(
             "실행할 planning command가 없습니다.",
         ));
     }
+    let started_at = Instant::now();
     let mut child = Command::new(&command[0])
         .args(&command[1..])
         .current_dir(cwd)
@@ -3239,6 +3269,7 @@ fn run_direct_command_with_timeout(
                 stderr: truncate_output(String::from_utf8_lossy(&output.stderr).to_string()),
                 exit_code: output.status.code().unwrap_or(-1),
                 timed_out: false,
+                elapsed_ms: elapsed_millis(started_at),
             });
         }
         if Instant::now() >= deadline {
@@ -3251,6 +3282,7 @@ fn run_direct_command_with_timeout(
                 stderr: truncate_output(String::from_utf8_lossy(&output.stderr).to_string()),
                 exit_code: -1,
                 timed_out: true,
+                elapsed_ms: elapsed_millis(started_at),
             });
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -3262,6 +3294,7 @@ fn run_shell_command(
     command: &str,
     timeout: Duration,
 ) -> CommandResult<ShellOutput> {
+    let started_at = Instant::now();
     let mut child = Command::new("/bin/zsh")
         .args(["-lc", command])
         .current_dir(cwd)
@@ -3285,6 +3318,7 @@ fn run_shell_command(
                 stderr: truncate_output(String::from_utf8_lossy(&output.stderr).to_string()),
                 exit_code: output.status.code().unwrap_or(-1),
                 timed_out: false,
+                elapsed_ms: elapsed_millis(started_at),
             });
         }
         if Instant::now() >= deadline {
@@ -3297,6 +3331,7 @@ fn run_shell_command(
                 stderr: truncate_output(String::from_utf8_lossy(&output.stderr).to_string()),
                 exit_code: -1,
                 timed_out: true,
+                elapsed_ms: elapsed_millis(started_at),
             });
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -3395,6 +3430,7 @@ fn main() {
             cancel_host_role,
             list_agent_runs,
             list_task_timeline,
+            list_run_events,
             get_agent_run,
             read_run_artifact,
             list_approvals,
