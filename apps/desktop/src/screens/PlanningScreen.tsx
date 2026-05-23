@@ -334,6 +334,12 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
 
       const firstTask = createdTasks[0];
       if (!firstTask) return;
+      let autoStartWarning: string | null = null;
+      try {
+        await api.startNextRoleRun(projectSnapshot.project.id, firstTask.id);
+      } catch (err) {
+        autoStartWarning = `Task는 생성됐지만 첫 planner 자동 실행을 시작하지 못했습니다: ${errorMessage(err)}`;
+      }
 
       setSessions((current) =>
         current.map((item) =>
@@ -349,6 +355,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         ),
       );
       await onRefresh();
+      setError(autoStartWarning);
       onOpenTask(firstTask.id);
     } catch (err) {
       setError(errorMessage(err));

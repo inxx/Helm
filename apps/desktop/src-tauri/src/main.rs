@@ -911,6 +911,26 @@ fn prepare_role_context(
 }
 
 #[tauri::command]
+fn start_next_role_run(
+    project_id: String,
+    task_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> CommandResult<AgentRunSummary> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    let run = db::prepare_next_role_context(&mut conn, &context.root_path, &project_id, &task_id)?;
+    spawn_background_host_run(
+        app,
+        context,
+        project_id,
+        run.task_id.clone(),
+        run.id.clone(),
+    );
+    Ok(run)
+}
+
+#[tauri::command]
 fn run_host_role(
     project_id: String,
     run_id: String,
@@ -940,6 +960,70 @@ fn run_host_role(
         running_runs.remove(&run_id);
     }
     result
+}
+
+fn spawn_background_host_run(
+    app: AppHandle,
+    context: ProjectContext,
+    project_id: String,
+    task_id: String,
+    run_id: String,
+) {
+    std::thread::spawn(move || {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let state = app.state::<AppState>();
+        let mut inserted_running_flag = false;
+        if let Ok(mut running_runs) = state.running_runs.lock() {
+            if running_runs.contains_key(&run_id) {
+                return;
+            }
+            running_runs.insert(run_id.clone(), cancellation.clone());
+            inserted_running_flag = true;
+        }
+
+        let result = db::open_existing_db(&context.db_path).and_then(|mut conn| {
+            let result = db::run_host_role(
+                &mut conn,
+                &context.root_path,
+                &project_id,
+                &run_id,
+                cancellation,
+            );
+            if let Err(error) = &result {
+                let _ = db::mark_host_run_launch_error(
+                    &mut conn,
+                    &context.root_path,
+                    &project_id,
+                    &run_id,
+                    &command_error_summary(error),
+                );
+            }
+            result
+        });
+
+        if inserted_running_flag {
+            if let Ok(mut running_runs) = state.running_runs.lock() {
+                running_runs.remove(&run_id);
+            }
+        }
+
+        let payload = match result {
+            Ok(run) => json!({
+                "projectId": project_id,
+                "taskId": run.task_id,
+                "runId": run.id,
+                "status": run.status
+            }),
+            Err(error) => json!({
+                "projectId": project_id,
+                "taskId": task_id,
+                "runId": run_id,
+                "status": "NeedsInspection",
+                "error": command_error_summary(&error)
+            }),
+        };
+        let _ = app.emit("agent-run://updated", payload);
+    });
 }
 
 #[tauri::command]
@@ -1053,10 +1137,15 @@ fn approve_approval(
     approval_id: String,
     reason: String,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> CommandResult<ApprovalSummary> {
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
-    db::decide_approval(&mut conn, &project_id, &approval_id, "Approved", &reason)
+    let approval = db::decide_approval(&mut conn, &project_id, &approval_id, "Approved", &reason)?;
+    if approval.approval_type == "PlanApproval" && approval.entity_type == "Task" {
+        spawn_next_role_run_after_approval(app, context, project_id, approval.entity_id.clone());
+    }
+    Ok(approval)
 }
 
 #[tauri::command]
@@ -1069,6 +1158,51 @@ fn reject_approval(
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
     db::decide_approval(&mut conn, &project_id, &approval_id, "Rejected", &reason)
+}
+
+fn spawn_next_role_run_after_approval(
+    app: AppHandle,
+    context: ProjectContext,
+    project_id: String,
+    task_id: String,
+) {
+    std::thread::spawn(move || {
+        let prepared = db::open_existing_db(&context.db_path).and_then(|mut conn| {
+            db::prepare_next_role_context(&mut conn, &context.root_path, &project_id, &task_id)
+        });
+
+        match prepared {
+            Ok(run) => {
+                let _ = app.emit(
+                    "agent-run://updated",
+                    json!({
+                        "projectId": project_id,
+                        "taskId": run.task_id,
+                        "runId": run.id,
+                        "status": run.status
+                    }),
+                );
+                spawn_background_host_run(
+                    app,
+                    context,
+                    project_id,
+                    run.task_id.clone(),
+                    run.id.clone(),
+                );
+            }
+            Err(error) => {
+                let _ = app.emit(
+                    "agent-run://updated",
+                    json!({
+                        "projectId": project_id,
+                        "taskId": task_id,
+                        "status": "AutoStartFailed",
+                        "error": command_error_summary(&error)
+                    }),
+                );
+            }
+        }
+    });
 }
 
 fn open_project_from_path(
@@ -3255,6 +3389,7 @@ fn main() {
             stop_terminal_pty,
             run_stub_role,
             prepare_role_context,
+            start_next_role_run,
             run_host_role,
             retry_host_role,
             cancel_host_role,

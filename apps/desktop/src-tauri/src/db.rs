@@ -903,6 +903,23 @@ pub fn prepare_role_context(
     get_agent_run(conn, &run_id)
 }
 
+pub fn prepare_next_role_context(
+    conn: &mut Connection,
+    root: &Path,
+    project_id: &str,
+    task_id: &str,
+) -> CommandResult<AgentRunSummary> {
+    let task = get_task(conn, task_id)?;
+    if task.project_id != project_id {
+        return Err(CommandError::validation("대상 태스크를 찾을 수 없습니다."));
+    }
+    let role_id = next_role_for_task_status(&task.status).ok_or_else(|| {
+        CommandError::validation("현재 태스크 상태에서 자동으로 실행할 role이 없습니다.")
+    })?;
+    ensure_task_worktree(conn, root, project_id, task_id)?;
+    prepare_role_context(conn, root, project_id, task_id, role_id)
+}
+
 pub fn run_host_role(
     conn: &mut Connection,
     root: &Path,
@@ -1199,6 +1216,62 @@ pub fn run_host_role(
         return Err(err);
     }
 
+    get_agent_run(conn, run_id)
+}
+
+pub fn mark_host_run_launch_error(
+    conn: &mut Connection,
+    root: &Path,
+    project_id: &str,
+    run_id: &str,
+    message: &str,
+) -> CommandResult<AgentRunSummary> {
+    let run = get_agent_run(conn, run_id)?;
+    if run.project_id != project_id {
+        return Err(CommandError::validation(
+            "대상 실행 기록을 찾을 수 없습니다.",
+        ));
+    }
+
+    let artifact_path = root.join(&run.artifact_dir);
+    fs::create_dir_all(&artifact_path)
+        .map_err(|err| CommandError::io("실행 산출물 폴더를 만들지 못했습니다.", err))?;
+    let stderr_path = artifact_path.join("stderr.log");
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    let next_stderr = if stderr.trim().is_empty() {
+        format!("{message}\n")
+    } else {
+        format!("{}\n{message}\n", stderr.trim_end())
+    };
+    fs::write(&stderr_path, next_stderr)
+        .map_err(|err| CommandError::io("stderr 로그를 저장하지 못했습니다.", err))?;
+    write_fallback_result(&artifact_path, -1)?;
+
+    let finished_at = now();
+    conn.execute(
+        "UPDATE agent_runs
+         SET status = 'NeedsInspection',
+             exit_code = -1,
+             result_status = 'needs_changes',
+             finished_at = ?1,
+             updated_at = ?1
+         WHERE id = ?2 AND project_id = ?3",
+        params![finished_at, run_id, project_id],
+    )
+    .map_err(|err| CommandError::database("host run 실패 상태를 저장하지 못했습니다.", err))?;
+    insert_audit(
+        conn,
+        project_id,
+        "AgentRun",
+        Some(run_id),
+        "agent_run.launch_failed",
+        json!({
+            "runId": run_id,
+            "taskId": run.task_id,
+            "roleId": run.role_id,
+            "message": message
+        }),
+    )?;
     get_agent_run(conn, run_id)
 }
 
@@ -3157,6 +3230,17 @@ fn next_status_for_role(role_id: &str) -> Option<&'static str> {
     }
 }
 
+fn next_role_for_task_status(status: &str) -> Option<&'static str> {
+    match status {
+        "Planned" | "Blocked" => Some("planner"),
+        "Ready" => Some("coder"),
+        "PlanVerification" => Some("plan_verifier"),
+        "CodeReview" => Some("code_reviewer"),
+        "Testing" => Some("tester"),
+        _ => None,
+    }
+}
+
 fn stub_summary(role_id: &str) -> String {
     format!(
         "# Stub {} Result\n\n이 실행은 실제 agent process 없이 생성된 Phase 2 검증용 결과입니다.\n\n- 역할: {}\n- 결과: pass\n",
@@ -4079,6 +4163,40 @@ mod tests {
             )
             .expect("repair count");
         assert_eq!(repair_count, 1);
+    }
+
+    #[test]
+    fn prepare_next_role_context_creates_worktree_and_planner_queue() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+
+        let run =
+            prepare_next_role_context(&mut conn, &repo.root, &project.id, &task.id).expect("next");
+        let worktree = get_task_worktree(&conn, &project.id, &task.id).expect("worktree");
+
+        assert_eq!(run.role_id, "planner");
+        assert_eq!(run.status, "Queued");
+        assert!(worktree.is_some());
+    }
+
+    #[test]
+    fn prepare_next_role_context_after_plan_approval_queues_coder() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+
+        run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "planner").expect("planner");
+        let approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("approvals")
+            .remove(0);
+        decide_approval(&mut conn, &project.id, &approval.id, "Approved", "승인").expect("approve");
+
+        let run =
+            prepare_next_role_context(&mut conn, &repo.root, &project.id, &task.id).expect("next");
+
+        assert_eq!(run.role_id, "coder");
+        assert_eq!(run.status, "Queued");
     }
 
     #[test]

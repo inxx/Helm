@@ -101,6 +101,9 @@ export const api = {
   prepareRoleContext(projectId: string, taskId: string, roleId: string) {
     return invoke<AgentRunSummary>("prepare_role_context", { projectId, taskId, roleId });
   },
+  startNextRoleRun(projectId: string, taskId: string) {
+    return invoke<AgentRunSummary>("start_next_role_run", { projectId, taskId });
+  },
   runHostRole(projectId: string, runId: string) {
     return invoke<AgentRunSummary>("run_host_role", { projectId, runId });
   },

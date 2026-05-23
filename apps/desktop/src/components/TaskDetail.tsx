@@ -1,4 +1,5 @@
 import { Loader2 } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { useToast } from "./ToastProvider";
 import { api } from "../lib/api";
@@ -78,6 +79,39 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
       setWorktree(nextWorktree);
       void refreshWorktreeFiles(nextWorktree);
     });
+  }, [snapshot.project.id, task?.id]);
+
+  useEffect(() => {
+    if (!task) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void listen<{ projectId?: string; taskId?: string }>("agent-run://updated", async (event) => {
+      if (event.payload.projectId !== snapshot.project.id || event.payload.taskId !== task.id) return;
+      try {
+        const [nextRuns, nextWorktree] = await Promise.all([
+          api.listAgentRuns(snapshot.project.id, task.id),
+          api.getTaskWorktree(snapshot.project.id, task.id),
+        ]);
+        if (disposed) return;
+        setRuns(nextRuns);
+        setWorktree(nextWorktree);
+        await onRefresh();
+      } catch {
+        // The user can still refresh manually; event refresh is best-effort.
+      }
+    }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+      } else {
+        unlisten = cleanup;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [snapshot.project.id, task?.id]);
 
   if (!task) {
@@ -736,7 +770,7 @@ function NextAction({
     return (
       <div className="next-action-card waiting">
         <strong>계획 승인 대기</strong>
-        <p>승인이 완료되면 구현자 역할을 실행할 수 있습니다.</p>
+        <p>승인이 완료되면 구현자 역할 자동 실행을 시도합니다.</p>
       </div>
     );
   }

@@ -32,7 +32,10 @@ export function ApprovalInbox({ snapshot, onRefresh }: ApprovalInboxProps) {
       showToast({
         tone: "success",
         title: decision === "approve" ? "승인 완료" : "반려 완료",
-        description: `${approvalLabel(approval.approvalType)} 상태가 반영되었습니다.`,
+        description:
+          decision === "approve" && approval.approvalType === "PlanApproval"
+            ? "계획 승인이 반영됐고 다음 role 자동 실행을 시도합니다."
+            : `${approvalLabel(approval.approvalType)} 상태가 반영되었습니다.`,
       });
     } catch (error) {
       showToast({
