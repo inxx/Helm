@@ -134,8 +134,8 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         {
           id: pendingMessageId,
           role: "planner",
-          content: "...",
-          createdLabel: "진행 중",
+          content: "응답 로딩중...",
+          createdLabel: "응답 대기",
           pending: true,
         },
       ],
@@ -211,8 +211,8 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 {
                   id: pendingMessageId,
                   role: "planner",
-                  content: "...",
-                  createdLabel: "진행 중",
+                  content: "응답 로딩중...",
+                  createdLabel: "응답 대기",
                   pending: true,
                 },
               ],
@@ -406,23 +406,11 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 <h2>{activeSession?.title ?? "새 계획"}</h2>
                 <p>planner와 대화하면서 계획 문서를 고정하고, 승인한 문서만 Helm Task로 변환합니다.</p>
               </div>
-              {plannerRunning ? (
-                <span className="operation-pill" role="status">
-                  <Loader2 className="loading-icon" size={14} aria-hidden />
-                  planner 실행 중
-                </span>
-              ) : null}
             </header>
 
             <div className="planning-canvas-body">
               {activeSession ? (
                 <div className="planning-thread">
-                  {plannerRunning ? (
-                    <div className="operation-status planning-operation-status" role="status">
-                      <Loader2 className="loading-icon" size={14} aria-hidden />
-                      <span>planner가 응답을 만들고 있습니다.</span>
-                    </div>
-                  ) : null}
                   {activeSession.messages.map((message) => (
                     <article
                       className={`planning-message ${message.role}${message.pending ? " pending" : ""}`}
@@ -433,10 +421,13 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                         <span>{message.createdLabel}</span>
                       </div>
                       {message.pending ? (
-                        <p className="planning-typing" aria-label="Planner가 입력 중입니다.">
-                          <span>.</span>
-                          <span>.</span>
-                          <span>.</span>
+                        <p className="planning-typing" role="status" aria-live="polite">
+                          <span className="planning-typing-label">{message.content}</span>
+                          <span className="planning-typing-dots" aria-hidden="true">
+                            <span>.</span>
+                            <span>.</span>
+                            <span>.</span>
+                          </span>
                         </p>
                       ) : (
                         <p>{message.content}</p>
@@ -513,7 +504,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                   ) : (
                     <Sparkles size={14} aria-hidden />
                   )}
-                  {plannerRunning ? "planner 실행 중..." : activeSession ? "planner에게 보내기" : "대화 시작"}
+                  {plannerRunning ? "응답 대기" : activeSession ? "planner에게 보내기" : "대화 시작"}
                 </button>
               </div>
               {error ? <p className="planning-form-error">{error}</p> : null}
@@ -526,7 +517,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
               <span className="status-pill">
                 {activeSession
                   ? plannerRunning
-                    ? "planner 실행 중"
+                    ? "초안 갱신 중"
                     : activeSession.status === "Approved"
                       ? "태스크 생성됨"
                       : jiraStateLabel(activeSession.jiraState)

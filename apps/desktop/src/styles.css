@@ -4273,10 +4273,6 @@ textarea {
   line-height: 1.55;
 }
 
-.planning-operation-status {
-  width: min(100%, 760px);
-}
-
 .planning-message {
   display: grid;
   gap: 6px;
@@ -4327,28 +4323,43 @@ textarea {
 .planning-message.pending {
   overflow: hidden;
   position: relative;
+  border-color: color-mix(in oklch, var(--primary) 22%, var(--line));
+  background: color-mix(in oklch, var(--surface) 88%, var(--brand-weak));
 }
 
 .planning-message .planning-typing {
   display: flex;
-  min-height: 20px;
   align-items: center;
-  gap: 3px;
+  gap: 7px;
+  min-height: 20px;
   color: var(--text);
-  font-size: 18px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.planning-typing-label {
+  color: var(--text-muted);
+}
+
+.planning-typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--brand-strong);
+  font-size: 15px;
   line-height: 1;
 }
 
-.planning-typing span {
+.planning-typing-dots span {
   animation: planning-typing-dot 1s ease-in-out infinite;
   opacity: 0.35;
 }
 
-.planning-typing span:nth-child(2) {
+.planning-typing-dots span:nth-child(2) {
   animation-delay: 0.12s;
 }
 
-.planning-typing span:nth-child(3) {
+.planning-typing-dots span:nth-child(3) {
   animation-delay: 0.24s;
 }
 
