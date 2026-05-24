@@ -315,6 +315,24 @@ export interface TerminalDirectoryEntry {
   kind: "projectRoot" | "parent" | "child" | string;
 }
 
+export interface TerminalPtySummary {
+  terminalId: string;
+  projectId: string;
+  cwd: string;
+  nodeBinPath: string | null;
+  cols: number;
+  rows: number;
+  running: boolean;
+  exitCode: number | null;
+  seq: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TerminalPtySnapshot extends TerminalPtySummary {
+  history: string;
+}
+
 export interface ProjectSnapshot {
   project: ProjectSummary;
   settings: EffectiveSettings;

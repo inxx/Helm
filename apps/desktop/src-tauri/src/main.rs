@@ -30,6 +30,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 const MAX_RECENT_PROJECTS: usize = 12;
 const AI_CLI_SMOKE_SENTINEL: &str = "HELM_CLI_OK";
+const MAX_TERMINAL_HISTORY_CHARS: usize = 250_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +85,7 @@ struct AppState {
 struct PtySession {
     child_pid: libc::pid_t,
     writer: Arc<Mutex<fs::File>>,
+    state: Arc<Mutex<TerminalSessionState>>,
 }
 
 struct RolePtySession {
@@ -91,11 +93,61 @@ struct RolePtySession {
     writer: Arc<Mutex<fs::File>>,
 }
 
+#[derive(Debug)]
+struct TerminalSessionState {
+    terminal_id: String,
+    project_id: String,
+    cwd: String,
+    node_bin_path: Option<String>,
+    cols: u16,
+    rows: u16,
+    running: bool,
+    exit_code: Option<i32>,
+    seq: u64,
+    history: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TerminalPtySummary {
+    terminal_id: String,
+    project_id: String,
+    cwd: String,
+    node_bin_path: Option<String>,
+    cols: u16,
+    rows: u16,
+    running: bool,
+    exit_code: Option<i32>,
+    seq: u64,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TerminalPtySnapshot {
+    terminal_id: String,
+    project_id: String,
+    cwd: String,
+    node_bin_path: Option<String>,
+    cols: u16,
+    rows: u16,
+    running: bool,
+    exit_code: Option<i32>,
+    seq: u64,
+    history: String,
+    created_at: String,
+    updated_at: String,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TerminalPtyOutput {
     terminal_id: String,
     data: String,
+    seq: u64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -882,14 +934,40 @@ fn start_terminal_pty(
         return Err(CommandError::validation("터미널 cwd를 찾을 수 없습니다."));
     }
     let node_bin_path = resolve_node_bin_path(node_bin_path)?;
+    let cols = cols.unwrap_or(120).max(20);
+    let rows = rows.unwrap_or(32).max(4);
 
-    stop_terminal_session(&state, &terminal_id);
+    if let Some((writer, session_state)) = terminal_session_handles(&state, &terminal_id)? {
+        let (existing_project_id, existing_cwd, running) = {
+            let session_state = session_state.lock().map_err(|_| {
+                CommandError::new("IoFailed", "터미널 세션 상태를 읽지 못했습니다.")
+            })?;
+            (
+                session_state.project_id.clone(),
+                session_state.cwd.clone(),
+                session_state.running,
+            )
+        };
+
+        if existing_project_id != project_id {
+            return Err(CommandError::validation(
+                "다른 프로젝트의 터미널 세션 ID와 충돌했습니다.",
+            ));
+        }
+
+        if running {
+            resize_pty_writer(&writer, cols, rows)?;
+        }
+        update_terminal_session_size(&session_state, cols, rows)?;
+        return Ok(existing_cwd);
+    }
 
     let pty = spawn_pty_shell(
+        &project_id,
         &terminal_id,
         &cwd,
-        cols.unwrap_or(120).max(20),
-        rows.unwrap_or(32).max(4),
+        cols,
+        rows,
         node_bin_path.as_deref(),
         app,
     )?;
@@ -900,6 +978,54 @@ fn start_terminal_pty(
         .insert(terminal_id, pty);
 
     Ok(cwd.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn list_terminal_ptys(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<TerminalPtySummary>> {
+    let _ = project_context(&state, &project_id)?;
+    let sessions = state
+        .terminal_sessions
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "터미널 세션 상태를 읽지 못했습니다."))?;
+    let mut summaries = sessions
+        .values()
+        .filter_map(|session| {
+            let state = session.state.lock().ok()?;
+            if state.project_id == project_id {
+                Some(state.summary())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    Ok(summaries)
+}
+
+#[tauri::command]
+fn get_terminal_pty_snapshot(
+    terminal_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<TerminalPtySnapshot>> {
+    let session_state = {
+        let sessions = state
+            .terminal_sessions
+            .lock()
+            .map_err(|_| CommandError::new("IoFailed", "터미널 세션 상태를 읽지 못했습니다."))?;
+        sessions
+            .get(&terminal_id)
+            .map(|session| session.state.clone())
+    };
+    let Some(session_state) = session_state else {
+        return Ok(None);
+    };
+    let session_state = session_state
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "터미널 세션 상태를 읽지 못했습니다."))?;
+    Ok(Some(session_state.snapshot()))
 }
 
 #[tauri::command]
@@ -935,33 +1061,10 @@ fn resize_terminal_pty(
     rows: u16,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    let writer = {
-        let sessions = state
-            .terminal_sessions
-            .lock()
-            .map_err(|_| CommandError::new("IoFailed", "터미널 세션 상태를 읽지 못했습니다."))?;
-        sessions
-            .get(&terminal_id)
-            .map(|session| session.writer.clone())
-            .ok_or_else(|| CommandError::validation("터미널 세션을 찾을 수 없습니다."))?
-    };
-
-    let file = writer
-        .lock()
-        .map_err(|_| CommandError::new("IoFailed", "터미널 크기 변경에 실패했습니다."))?;
-    let winsize = libc::winsize {
-        ws_row: rows.max(4),
-        ws_col: cols.max(20),
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    let result = unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCSWINSZ, &winsize) };
-    if result == -1 {
-        return Err(CommandError::io(
-            "터미널 크기 변경에 실패했습니다.",
-            std::io::Error::last_os_error(),
-        ));
-    }
+    let (writer, session_state) = terminal_session_handles(&state, &terminal_id)?
+        .ok_or_else(|| CommandError::validation("터미널 세션을 찾을 수 없습니다."))?;
+    resize_pty_writer(&writer, cols.max(20), rows.max(4))?;
+    update_terminal_session_size(&session_state, cols.max(20), rows.max(4))?;
     Ok(())
 }
 
@@ -4056,6 +4159,7 @@ fn set_child_env(key: &str, value: &str) {
 }
 
 fn spawn_pty_shell(
+    project_id: &str,
     terminal_id: &str,
     cwd: &Path,
     cols: u16,
@@ -4127,18 +4231,45 @@ fn spawn_pty_shell(
             CommandError::io("PTY 입력 스트림을 열지 못했습니다.", err)
         })?));
     let terminal_id_for_thread = terminal_id.to_string();
+    let timestamp = db::now();
+    let session_state = Arc::new(Mutex::new(TerminalSessionState {
+        terminal_id: terminal_id.to_string(),
+        project_id: project_id.to_string(),
+        cwd: cwd.to_string_lossy().to_string(),
+        node_bin_path: node_bin_path.map(|path| path.to_string_lossy().to_string()),
+        cols,
+        rows,
+        running: true,
+        exit_code: None,
+        seq: 0,
+        history: String::new(),
+        created_at: timestamp.clone(),
+        updated_at: timestamp,
+    }));
+    let session_state_for_thread = session_state.clone();
 
     std::thread::spawn(move || {
-        read_pty_output(reader, child_pid, terminal_id_for_thread, app);
+        read_pty_output(
+            reader,
+            child_pid,
+            terminal_id_for_thread,
+            session_state_for_thread,
+            app,
+        );
     });
 
-    Ok(PtySession { child_pid, writer })
+    Ok(PtySession {
+        child_pid,
+        writer,
+        state: session_state,
+    })
 }
 
 fn read_pty_output(
     mut reader: fs::File,
     child_pid: libc::pid_t,
     terminal_id: String,
+    session_state: Arc<Mutex<TerminalSessionState>>,
     app: AppHandle,
 ) {
     let mut buffer = [0_u8; 8192];
@@ -4147,11 +4278,16 @@ fn read_pty_output(
             Ok(0) => break,
             Ok(size) => {
                 let data = String::from_utf8_lossy(&buffer[..size]).to_string();
+                let seq = session_state
+                    .lock()
+                    .map(|mut state| state.append_output(&data))
+                    .unwrap_or(0);
                 let _ = app.emit(
                     "terminal://output",
                     TerminalPtyOutput {
                         terminal_id: terminal_id.clone(),
                         data,
+                        seq,
                     },
                 );
             }
@@ -4170,6 +4306,9 @@ fn read_pty_output(
     } else {
         -1
     };
+    if let Ok(mut state) = session_state.lock() {
+        state.mark_exit(exit_code);
+    }
     let _ = app.emit(
         "terminal://exit",
         TerminalPtyExit {
@@ -4191,6 +4330,122 @@ fn stop_terminal_session(state: &State<'_, AppState>, terminal_id: &str) {
             libc::kill(session.child_pid, libc::SIGHUP);
         }
     }
+}
+
+fn terminal_session_handles(
+    state: &State<'_, AppState>,
+    terminal_id: &str,
+) -> CommandResult<Option<(Arc<Mutex<fs::File>>, Arc<Mutex<TerminalSessionState>>)>> {
+    let sessions = state
+        .terminal_sessions
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "터미널 세션 상태를 읽지 못했습니다."))?;
+    Ok(sessions
+        .get(terminal_id)
+        .map(|session| (session.writer.clone(), session.state.clone())))
+}
+
+fn resize_pty_writer(
+    writer: &Arc<Mutex<fs::File>>,
+    cols: u16,
+    rows: u16,
+) -> CommandResult<()> {
+    let file = writer
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "터미널 크기 변경에 실패했습니다."))?;
+    let winsize = libc::winsize {
+        ws_row: rows.max(4),
+        ws_col: cols.max(20),
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCSWINSZ, &winsize) };
+    if result == -1 {
+        return Err(CommandError::io(
+            "터미널 크기 변경에 실패했습니다.",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
+}
+
+fn update_terminal_session_size(
+    session_state: &Arc<Mutex<TerminalSessionState>>,
+    cols: u16,
+    rows: u16,
+) -> CommandResult<()> {
+    let mut session_state = session_state
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "터미널 세션 상태를 저장하지 못했습니다."))?;
+    session_state.cols = cols.max(20);
+    session_state.rows = rows.max(4);
+    session_state.updated_at = db::now();
+    Ok(())
+}
+
+impl TerminalSessionState {
+    fn summary(&self) -> TerminalPtySummary {
+        TerminalPtySummary {
+            terminal_id: self.terminal_id.clone(),
+            project_id: self.project_id.clone(),
+            cwd: self.cwd.clone(),
+            node_bin_path: self.node_bin_path.clone(),
+            cols: self.cols,
+            rows: self.rows,
+            running: self.running,
+            exit_code: self.exit_code,
+            seq: self.seq,
+            created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
+        }
+    }
+
+    fn snapshot(&self) -> TerminalPtySnapshot {
+        TerminalPtySnapshot {
+            terminal_id: self.terminal_id.clone(),
+            project_id: self.project_id.clone(),
+            cwd: self.cwd.clone(),
+            node_bin_path: self.node_bin_path.clone(),
+            cols: self.cols,
+            rows: self.rows,
+            running: self.running,
+            exit_code: self.exit_code,
+            seq: self.seq,
+            history: self.history.clone(),
+            created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
+        }
+    }
+
+    fn append_output(&mut self, data: &str) -> u64 {
+        if data.is_empty() {
+            return self.seq;
+        }
+        self.history.push_str(data);
+        trim_terminal_history(&mut self.history);
+        self.seq = self.seq.saturating_add(1);
+        self.updated_at = db::now();
+        self.seq
+    }
+
+    fn mark_exit(&mut self, exit_code: i32) {
+        self.running = false;
+        self.exit_code = Some(exit_code);
+        self.seq = self.seq.saturating_add(1);
+        self.updated_at = db::now();
+    }
+}
+
+fn trim_terminal_history(history: &mut String) {
+    if history.len() <= MAX_TERMINAL_HISTORY_CHARS {
+        return;
+    }
+    let excess = history.len() - MAX_TERMINAL_HISTORY_CHARS;
+    let drain_to = history
+        .char_indices()
+        .find_map(|(index, _)| (index >= excess).then_some(index))
+        .unwrap_or(history.len());
+    history.drain(..drain_to);
 }
 
 fn role_pty_session_id(project_id: &str, task_id: &str, role_id: &str) -> String {
@@ -4666,6 +4921,45 @@ mod tests {
 
         assert_eq!(result.models, Some(vec!["gpt-5.5".to_string()]));
     }
+
+    #[test]
+    fn terminal_session_state_tracks_history_seq_and_exit() {
+        let timestamp = db::now();
+        let mut state = TerminalSessionState {
+            terminal_id: "term-1".to_string(),
+            project_id: "project-1".to_string(),
+            cwd: "/tmp".to_string(),
+            node_bin_path: None,
+            cols: 120,
+            rows: 32,
+            running: true,
+            exit_code: None,
+            seq: 0,
+            history: String::new(),
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+        };
+
+        assert_eq!(state.append_output("hello"), 1);
+        assert_eq!(state.append_output(" world"), 2);
+        state.mark_exit(0);
+
+        assert_eq!(state.history, "hello world");
+        assert_eq!(state.seq, 3);
+        assert!(!state.running);
+        assert_eq!(state.exit_code, Some(0));
+    }
+
+    #[test]
+    fn terminal_history_trim_preserves_recent_utf8_output() {
+        let mut history = "가".repeat(MAX_TERMINAL_HISTORY_CHARS / "가".len() + 32);
+        history.push_str("tail");
+
+        trim_terminal_history(&mut history);
+
+        assert!(history.len() <= MAX_TERMINAL_HISTORY_CHARS);
+        assert!(history.ends_with("tail"));
+    }
 }
 
 fn main() {
@@ -4710,6 +5004,8 @@ fn main() {
             run_terminal_command,
             resolve_terminal_cwd,
             start_terminal_pty,
+            list_terminal_ptys,
+            get_terminal_pty_snapshot,
             write_terminal_pty,
             resize_terminal_pty,
             stop_terminal_pty,

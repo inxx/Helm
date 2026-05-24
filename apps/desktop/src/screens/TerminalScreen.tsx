@@ -20,6 +20,8 @@ import type {
   NodeRuntimeSummary,
   ProjectSnapshot,
   TerminalDirectoryEntry,
+  TerminalPtySnapshot,
+  TerminalPtySummary,
 } from "../lib/types";
 
 interface TerminalScreenProps {
@@ -41,6 +43,7 @@ interface TerminalPaneState {
 interface TerminalPtyOutput {
   terminalId: string;
   data: string;
+  seq: number;
 }
 
 interface TerminalPtyExit {
@@ -56,6 +59,17 @@ function createPane(cwd: string, nodeBinPath: string | null): TerminalPaneState 
     running: false,
     error: null,
     exitCode: null,
+  };
+}
+
+function paneFromSession(session: TerminalPtySummary): TerminalPaneState {
+  return {
+    id: session.terminalId,
+    cwd: session.cwd,
+    nodeBinPath: session.nodeBinPath,
+    running: session.running,
+    error: null,
+    exitCode: session.exitCode,
   };
 }
 
@@ -81,6 +95,9 @@ export function TerminalScreen({
   const inputDisposers = useRef(new Map<string, { dispose: () => void }>());
   const resizeObservers = useRef(new Map<string, ResizeObserver>());
   const isActiveRef = useRef(isActive);
+  const lastOutputSeqRefs = useRef(new Map<string, number>());
+  const restoringPaneIds = useRef(new Set<string>());
+  const pendingOutputRefs = useRef(new Map<string, TerminalPtyOutput[]>());
 
   const selectedPaneId = activePaneId ?? panes[0]?.id ?? null;
   const activePane = panes.find((pane) => pane.id === selectedPaneId) ?? panes[0] ?? null;
@@ -91,13 +108,37 @@ export function TerminalScreen({
   }, [isActive]);
 
   useEffect(() => {
-    if (!snapshot) return;
+    if (!snapshot) {
+      disposeAllPanes();
+      setPanes([]);
+      setActivePaneId(null);
+      return;
+    }
+    let cancelled = false;
     const restoredNodeBinPath = loadTerminalNodeSelection(snapshot.project.id);
     setSelectedNodeBinPath(restoredNodeBinPath);
     disposeAllPanes();
-    const firstPane = createPane(snapshot.project.rootPath, restoredNodeBinPath);
-    setPanes([firstPane]);
-    setActivePaneId(firstPane.id);
+    void api
+      .listTerminalPtys(snapshot.project.id)
+      .then((sessions) => {
+        if (cancelled) return;
+        const nextPanes =
+          sessions.length > 0
+            ? sessions.map(paneFromSession)
+            : [createPane(snapshot.project.rootPath, restoredNodeBinPath)];
+        setPanes(nextPanes);
+        setActivePaneId(nextPanes[0]?.id ?? null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setControlError(errorMessage(err));
+        const firstPane = createPane(snapshot.project.rootPath, restoredNodeBinPath);
+        setPanes([firstPane]);
+        setActivePaneId(firstPane.id);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [snapshot?.project.id]);
 
   useEffect(() => {
@@ -168,11 +209,15 @@ export function TerminalScreen({
 
     async function bindEvents() {
       unlistenOutput = await listen<TerminalPtyOutput>("terminal://output", (event) => {
-        const terminal = xtermRefs.current.get(event.payload.terminalId);
-        terminal?.write(event.payload.data);
+        if (restoringPaneIds.current.has(event.payload.terminalId)) {
+          const pending = pendingOutputRefs.current.get(event.payload.terminalId) ?? [];
+          pending.push(event.payload);
+          pendingOutputRefs.current.set(event.payload.terminalId, pending);
+          return;
+        }
+        writeTerminalOutput(event.payload);
       });
       unlistenExit = await listen<TerminalPtyExit>("terminal://exit", (event) => {
-        void api.stopTerminalPty(event.payload.terminalId).catch(() => undefined);
         setPanes((current) =>
           current.map((pane) =>
             pane.id === event.payload.terminalId
@@ -356,6 +401,7 @@ export function TerminalScreen({
     if (!snapshot || !isActiveRef.current || xtermRefs.current.has(pane.id)) return;
     const container = terminalRefs.current.get(pane.id);
     if (!container) return;
+    restoringPaneIds.current.add(pane.id);
 
     const terminal = new XTerm({
       allowProposedApi: false,
@@ -407,16 +453,72 @@ export function TerminalScreen({
 
     const size = resize() ?? terminalSize(container);
     updatePane(pane.id, { running: true, error: null, exitCode: null });
-    void api
-      .startTerminalPty(snapshot.project.id, pane.id, pane.cwd, size, pane.nodeBinPath)
-      .then((resolvedCwd) => {
-        updatePane(pane.id, { cwd: resolvedCwd, running: true, error: null });
-        terminal.focus();
-      })
-      .catch((err) => {
-        updatePane(pane.id, { running: false, error: errorMessage(err) });
-        terminal.writeln(`\r\nPTY start failed: ${errorMessage(err)}`);
-      });
+    void restoreOrStartTerminal(pane, terminal, size);
+  }
+
+  async function restoreOrStartTerminal(
+    pane: TerminalPaneState,
+    terminal: XTerm,
+    size: { cols: number; rows: number },
+  ) {
+    if (!snapshot) return;
+    try {
+      const existing = await api.getTerminalPtySnapshot(pane.id);
+      if (existing) {
+        restoreTerminalSnapshot(terminal, existing);
+        updatePane(pane.id, {
+          cwd: existing.cwd,
+          nodeBinPath: existing.nodeBinPath,
+          running: existing.running,
+          error: null,
+          exitCode: existing.exitCode,
+        });
+        if (existing.running) {
+          await api.resizeTerminalPty(pane.id, size).catch(() => undefined);
+        }
+        if (isActiveRef.current) terminal.focus();
+        finishTerminalRestore(pane.id);
+        return;
+      }
+
+      const resolvedCwd = await api.startTerminalPty(
+        snapshot.project.id,
+        pane.id,
+        pane.cwd,
+        size,
+        pane.nodeBinPath,
+      );
+      updatePane(pane.id, { cwd: resolvedCwd, running: true, error: null, exitCode: null });
+      if (isActiveRef.current) terminal.focus();
+      finishTerminalRestore(pane.id);
+    } catch (err) {
+      updatePane(pane.id, { running: false, error: errorMessage(err) });
+      terminal.writeln(`\r\nPTY start failed: ${errorMessage(err)}`);
+      finishTerminalRestore(pane.id);
+    }
+  }
+
+  function restoreTerminalSnapshot(terminal: XTerm, snapshot: TerminalPtySnapshot) {
+    if (snapshot.history) {
+      terminal.write(snapshot.history);
+    }
+    lastOutputSeqRefs.current.set(snapshot.terminalId, snapshot.seq);
+  }
+
+  function finishTerminalRestore(id: string) {
+    restoringPaneIds.current.delete(id);
+    const pending = pendingOutputRefs.current.get(id) ?? [];
+    pendingOutputRefs.current.delete(id);
+    for (const output of pending) {
+      writeTerminalOutput(output);
+    }
+  }
+
+  function writeTerminalOutput(output: TerminalPtyOutput) {
+    const lastSeq = lastOutputSeqRefs.current.get(output.terminalId) ?? 0;
+    if (output.seq <= lastSeq) return;
+    xtermRefs.current.get(output.terminalId)?.write(output.data);
+    lastOutputSeqRefs.current.set(output.terminalId, output.seq);
   }
 
   function resizePane(id: string): { cols: number; rows: number } | null {
@@ -441,6 +543,9 @@ export function TerminalScreen({
     inputDisposers.current.delete(id);
     xtermRefs.current.get(id)?.dispose();
     xtermRefs.current.delete(id);
+    lastOutputSeqRefs.current.delete(id);
+    restoringPaneIds.current.delete(id);
+    pendingOutputRefs.current.delete(id);
     if (options.stopPty) {
       void api.stopTerminalPty(id).catch(() => undefined);
     }

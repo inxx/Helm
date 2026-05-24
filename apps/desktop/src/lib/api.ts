@@ -27,6 +27,8 @@ import type {
   TaskWorktreeSummary,
   TerminalCommandResult,
   TerminalDirectoryEntry,
+  TerminalPtySnapshot,
+  TerminalPtySummary,
 } from "./types";
 
 export const api = {
@@ -201,6 +203,12 @@ export const api = {
       rows: size.rows,
       nodeBinPath,
     });
+  },
+  listTerminalPtys(projectId: string) {
+    return invoke<TerminalPtySummary[]>("list_terminal_ptys", { projectId });
+  },
+  getTerminalPtySnapshot(terminalId: string) {
+    return invoke<TerminalPtySnapshot | null>("get_terminal_pty_snapshot", { terminalId });
   },
   writeTerminalPty(terminalId: string, data: string) {
     return invoke<void>("write_terminal_pty", { terminalId, data });
