@@ -950,6 +950,59 @@ textarea {
   line-height: 1.4;
 }
 
+.task-card-run {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 7px 8px;
+  min-width: 0;
+}
+
+.task-card-run span {
+  grid-row: span 2;
+  align-self: start;
+  border-radius: var(--radius-sm);
+  background: var(--brand-weak);
+  color: var(--brand);
+  padding: 2px 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.task-card-run strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-card-run small {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+
+.task-card-run.queued span {
+  background: var(--amber-weak);
+  color: var(--amber);
+}
+
+.task-card-run.attention {
+  border-color: var(--amber);
+}
+
+.task-card-run.attention span {
+  background: var(--red-weak);
+  color: var(--red);
+}
+
 .task-card-topline {
   display: flex;
   align-items: center;
@@ -1266,6 +1319,42 @@ textarea {
   color: var(--text-muted);
   font-family: var(--mono);
   font-size: 11px;
+}
+
+.run-liveness-card {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--brand);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 8px 9px;
+}
+
+.run-liveness-card strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.run-liveness-card span {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.run-liveness-card.queued {
+  border-left-color: var(--amber);
+}
+
+.run-liveness-card.quiet {
+  border-left-color: var(--amber);
+  background: var(--amber-weak);
+}
+
+.run-liveness-card.done {
+  border-left-color: var(--green);
 }
 
 .run-document-grid {
@@ -1625,6 +1714,13 @@ textarea {
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.run-event-empty {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
 }
 
 .run-event-preview li {

@@ -1,5 +1,6 @@
 import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
-import type { TaskStatus, TaskSummary } from "../lib/types";
+import { roleLabel } from "../lib/runnerReadiness";
+import type { AgentRunSummary, TaskStatus, TaskSummary } from "../lib/types";
 
 type StageTone = "idle" | "ready" | "active" | "review" | "done" | "blocked";
 
@@ -84,11 +85,12 @@ const EMPTY_COLUMN_COPY: Record<TaskStatus, string> = {
 
 interface TaskBoardProps {
   tasks: TaskSummary[];
+  taskRuns?: Record<string, AgentRunSummary[]>;
   selectedTaskId: string | null;
   onSelectTask: (taskId: string | null) => void;
 }
 
-export function TaskBoard({ tasks, selectedTaskId, onSelectTask }: TaskBoardProps) {
+export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask }: TaskBoardProps) {
   const tasksByStatus = groupTasksByStatus(tasks);
 
   return (
@@ -114,6 +116,9 @@ export function TaskBoard({ tasks, selectedTaskId, onSelectTask }: TaskBoardProp
               ) : null}
               {columnTasks.map((task) => {
                 const externalRef = task.externalRefs[0];
+                const activeRun = activeRunForTask(taskRuns[task.id] ?? []);
+                const flowLabel = activeRun ? runFlowLabel(activeRun) : stage.next;
+                const flowCaption = activeRun ? "run" : "next";
                 return (
                   <button
                     aria-pressed={task.id === selectedTaskId}
@@ -128,9 +133,16 @@ export function TaskBoard({ tasks, selectedTaskId, onSelectTask }: TaskBoardProp
                     </div>
                     <strong className="task-card-title">{task.title}</strong>
                     {task.description ? <span className="task-card-description">{task.description}</span> : null}
+                    {activeRun ? (
+                      <div className={`task-card-run ${runTone(activeRun)}`}>
+                        <span>{activeRun.status}</span>
+                        <strong>{roleLabel(activeRun.roleId)}</strong>
+                        <small>{runHint(activeRun)}</small>
+                      </div>
+                    ) : null}
                     <div className="task-card-flow">
-                      <span>next</span>
-                      <strong>{stage.next}</strong>
+                      <span>{flowCaption}</span>
+                      <strong>{flowLabel}</strong>
                     </div>
                     {task.statusReason ? <span className="task-card-reason">{task.statusReason}</span> : null}
                     {externalRef ? (
@@ -148,6 +160,37 @@ export function TaskBoard({ tasks, selectedTaskId, onSelectTask }: TaskBoardProp
       })}
     </div>
   );
+}
+
+function activeRunForTask(runs: AgentRunSummary[]): AgentRunSummary | null {
+  return (
+    runs.find((run) => run.status === "Running") ??
+    runs.find((run) => run.status === "Queued") ??
+    runs.find((run) => isAttentionRun(run.status)) ??
+    null
+  );
+}
+
+function runFlowLabel(run: AgentRunSummary): string {
+  if (run.status === "Running") return `${roleLabel(run.roleId)} 진행 중`;
+  if (run.status === "Queued") return `${roleLabel(run.roleId)} 대기`;
+  return `${roleLabel(run.roleId)} 점검`;
+}
+
+function runHint(run: AgentRunSummary): string {
+  if (run.status === "Running") return "report가 올 때까지 실행 중";
+  if (run.status === "Queued") return "worker queue 대기";
+  return run.resultStatus ? `${run.resultStatus} · retry 가능` : "상세에서 근거 확인";
+}
+
+function runTone(run: AgentRunSummary): "running" | "queued" | "attention" {
+  if (run.status === "Running") return "running";
+  if (run.status === "Queued") return "queued";
+  return "attention";
+}
+
+function isAttentionRun(status: string): boolean {
+  return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
 }
 
 function groupTasksByStatus(tasks: TaskSummary[]): Record<TaskStatus, TaskSummary[]> {

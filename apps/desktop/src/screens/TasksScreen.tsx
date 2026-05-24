@@ -1,8 +1,11 @@
-import type { ProjectSnapshot, TaskSummary } from "../lib/types";
+import { useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import type { AgentRunSummary, ProjectSnapshot, TaskSummary } from "../lib/types";
 import { AgentUsageBar } from "../components/AgentUsageBar";
 import { ApprovalInbox } from "../components/ApprovalInbox";
 import { TaskBoard } from "../components/TaskBoard";
 import { TaskDetail } from "../components/TaskDetail";
+import { api } from "../lib/api";
 
 interface TasksScreenProps {
   snapshot: ProjectSnapshot | null;
@@ -25,6 +28,61 @@ export function TasksScreen({
   onGoGit,
   onGoSettings,
 }: TasksScreenProps) {
+  const [taskRuns, setTaskRuns] = useState<Record<string, AgentRunSummary[]>>({});
+  const [runRefreshKey, setRunRefreshKey] = useState(0);
+  const taskRunKey = useMemo(
+    () => snapshot?.tasks.map((task) => task.id).join(":") ?? "",
+    [snapshot?.tasks],
+  );
+
+  useEffect(() => {
+    if (!snapshot) return;
+    let disposed = false;
+    let cleanup: (() => void) | null = null;
+
+    void listen<{ projectId?: string }>("agent-run://updated", (event) => {
+      if (!disposed && event.payload.projectId === snapshot.project.id) {
+        setRunRefreshKey((value) => value + 1);
+      }
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanup = unlisten;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, [snapshot?.project.id]);
+
+  useEffect(() => {
+    let disposed = false;
+    if (!snapshot || snapshot.tasks.length === 0) {
+      setTaskRuns({});
+      return;
+    }
+
+    void (async () => {
+      const entries = await Promise.all(
+        snapshot.tasks.map(async (task) => {
+          try {
+            return [task.id, await api.listAgentRuns(snapshot.project.id, task.id)] as const;
+          } catch {
+            return [task.id, []] as const;
+          }
+        }),
+      );
+      if (!disposed) setTaskRuns(Object.fromEntries(entries));
+    })();
+
+    return () => {
+      disposed = true;
+    };
+  }, [snapshot?.project.id, taskRunKey, runRefreshKey]);
+
   if (!snapshot) {
     return (
       <section className="empty-state">
@@ -52,6 +110,7 @@ export function TasksScreen({
         ) : (
           <TaskBoard
             tasks={snapshot.tasks}
+            taskRuns={taskRuns}
             selectedTaskId={selectedTaskId}
             onSelectTask={onSelectTask}
           />

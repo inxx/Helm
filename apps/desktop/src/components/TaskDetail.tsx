@@ -28,6 +28,7 @@ const DETAIL_TABS: Array<{ id: DetailTab; label: string }> = [
 ];
 
 const ROLE_IDS: RoleId[] = ["planner", "coder", "plan_verifier", "code_reviewer", "tester"];
+const RUN_STALE_NOTICE_MS = 5 * 60 * 1000;
 
 interface TaskDetailProps {
   snapshot: ProjectSnapshot;
@@ -117,12 +118,14 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     void listen<{ projectId?: string; taskId?: string }>("agent-run://updated", async (event) => {
       if (event.payload.projectId !== snapshot.project.id || event.payload.taskId !== task.id) return;
       try {
-        const [nextRuns, nextWorktree] = await Promise.all([
+        const [nextRuns, nextTimeline, nextWorktree] = await Promise.all([
           api.listAgentRuns(snapshot.project.id, task.id),
+          api.listTaskTimeline(snapshot.project.id, task.id),
           api.getTaskWorktree(snapshot.project.id, task.id),
         ]);
         if (disposed) return;
         setRuns(nextRuns);
+        setTimeline(nextTimeline);
         setWorktree(nextWorktree);
         await onRefresh();
       } catch {
@@ -139,10 +142,16 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
       const payload = event.payload;
       if (payload.projectId !== snapshot.project.id || payload.taskId !== task.id) return;
       setRunEvents((current) => appendRunEvent(current, payload));
-      if (payload.kind === "status" || payload.kind === "result") {
+      if (payload.kind === "status" || payload.kind === "result" || payload.kind === "approval") {
         try {
-          const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
-          if (!disposed) setRuns(nextRuns);
+          const [nextRuns, nextTimeline] = await Promise.all([
+            api.listAgentRuns(snapshot.project.id, task.id),
+            api.listTaskTimeline(snapshot.project.id, task.id),
+          ]);
+          if (!disposed) {
+            setRuns(nextRuns);
+            setTimeline(nextTimeline);
+          }
         } catch {
           // Event rows still render; run summary refresh is best-effort.
         }
@@ -464,6 +473,8 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     ? runs.find((run) => run.roleId === activeRoleId && isRetryableRunStatus(run.status)) ?? null
     : null;
   const visibleRun = runs.find((run) => run.status === "Running" || run.status === "Queued") ?? runs[0] ?? null;
+  const visibleRunEvents = visibleRun ? runEvents[visibleRun.id] ?? [] : [];
+  const visibleRunActivity = visibleRun ? runActivityFor(visibleRun, visibleRunEvents) : null;
 
   return (
     <aside className="detail-panel task-console">
@@ -567,6 +578,12 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
               </button>
             ) : null}
           </div>
+          {visibleRunActivity ? (
+            <div className={`run-liveness-card ${visibleRunActivity.tone}`}>
+              <strong>{visibleRunActivity.title}</strong>
+              <span>{visibleRunActivity.description}</span>
+            </div>
+          ) : null}
           <div className="run-document-grid">
             <RunDocumentCard
               description="runner가 읽는 md 계획/컨텍스트"
@@ -593,7 +610,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
               onOpen={() => showRunEvents(visibleRun.id)}
             />
           </div>
-          <RunEventPreview events={runEvents[visibleRun.id] ?? []} />
+          <RunEventPreview events={visibleRunEvents} />
         </section>
       ) : null}
 
@@ -1067,7 +1084,7 @@ function NextAction({
       <div className="next-action-card">
         <div>
           <strong>{roleLabel(runningRun.roleId)} 실행 중</strong>
-          <p>실행 탭에서 stdout, events, context-pack.md, summary.md를 볼 수 있습니다.</p>
+          <p>조용해 보여도 실행은 계속 유지합니다. 완료/실패 전환은 structured result나 명시 report가 도착했을 때만 처리합니다.</p>
         </div>
         <button
           aria-busy={cancelBusy ? true : undefined}
@@ -1211,6 +1228,76 @@ function isRetryableRunStatus(status: AgentRunSummary["status"]): boolean {
   return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
 }
 
+function runActivityFor(run: AgentRunSummary, events: RunEventSummary[]): {
+  tone: "live" | "quiet" | "queued" | "done";
+  title: string;
+  description: string;
+} {
+  const latestEvent = events.length > 0 ? events[events.length - 1] : null;
+  const anchor = latestEvent?.createdAt ?? run.startedAt ?? run.updatedAt ?? run.createdAt;
+  const ageMs = ageFromNow(anchor);
+  const ageLabel = formatRelativeAge(anchor);
+
+  if (run.status === "Queued") {
+    return {
+      tone: "queued",
+      title: "Worker queue 대기",
+      description: `Context Pack은 준비됐고 실행 순서를 기다립니다. 마지막 상태 변경은 ${ageLabel}입니다.`,
+    };
+  }
+
+  if (run.status === "Running") {
+    if (!latestEvent) {
+      return {
+        tone: "quiet",
+        title: "실행 이벤트 대기",
+        description: "PTY 실행은 시작됐지만 아직 기록된 이벤트가 없습니다. 완료 여부는 report가 올 때까지 추정하지 않습니다.",
+      };
+    }
+
+    if (ageMs > RUN_STALE_NOTICE_MS) {
+      return {
+        tone: "quiet",
+        title: "조용하지만 실행 중",
+        description: `마지막 이벤트는 ${ageLabel}입니다. Hive 방식처럼 프로세스 활동만으로 완료를 추정하지 않고, structured result/report를 기다립니다.`,
+      };
+    }
+
+    return {
+      tone: "live",
+      title: "실행 신호 수신 중",
+      description: `마지막 이벤트는 ${ageLabel}입니다. 결과 report가 오면 다음 gate로 이동합니다.`,
+    };
+  }
+
+  return {
+    tone: "done",
+    title: "명시 report로 종료",
+    description: run.finishedAt
+      ? `실행은 ${formatRelativeAge(run.finishedAt)}에 종료됐습니다. 상태 전환은 저장된 result를 기준으로 처리했습니다.`
+      : "실행이 종료됐습니다. 상세 근거는 events와 structured-result.json에서 확인할 수 있습니다.",
+  };
+}
+
+function ageFromNow(value: string | null | undefined): number {
+  const time = value ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(time)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, Date.now() - time);
+}
+
+function formatRelativeAge(value: string | null | undefined): string {
+  const time = value ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(time)) return "알 수 없음";
+  const diffMs = Math.max(0, Date.now() - time);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diffMs < minute) return "방금 전";
+  if (diffMs < hour) return `${Math.floor(diffMs / minute)}분 전`;
+  if (diffMs < day) return `${Math.floor(diffMs / hour)}시간 전`;
+  return `${Math.floor(diffMs / day)}일 전`;
+}
+
 function RunDocumentCard({
   description,
   label,
@@ -1232,7 +1319,9 @@ function RunDocumentCard({
 }
 
 function RunEventPreview({ events }: { events: RunEventSummary[] }) {
-  if (events.length === 0) return null;
+  if (events.length === 0) {
+    return <p className="run-event-empty">아직 기록된 이벤트가 없습니다. 실행이 시작되면 stdout/stderr/status가 여기에 쌓입니다.</p>;
+  }
   return (
     <ol className="run-event-preview" aria-label="최근 실행 이벤트">
       {events.slice(-4).map((event) => (
