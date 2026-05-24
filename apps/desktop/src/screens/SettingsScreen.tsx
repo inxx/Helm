@@ -88,6 +88,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const [orchestratorModelRefresh, setOrchestratorModelRefresh] = useState<ModelRefreshState | null>(null);
   const [rolePresets, setRolePresets] = useState("");
   const [worktreeRoot, setWorktreeRoot] = useState("");
+  const [worktreeSetup, setWorktreeSetup] = useState("");
   const [templates, setTemplates] = useState<RunnerTemplateSummary[]>([]);
   const [runnerChecks, setRunnerChecks] = useState<RunnerCheckResult[]>([]);
   const [connectionChecks, setConnectionChecks] = useState<Record<string, AiConnectionCheckResult>>({});
@@ -139,6 +140,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     setConductorConfig(normalizeConductorConfig(snapshot.settings.conductorConfig));
     setJiraConfig(normalizeJiraConfig(snapshot.settings.jiraConfig));
     setWorktreeRoot(snapshot.settings.worktreeRoot ?? "");
+    setWorktreeSetup(snapshot.settings.worktreeSetup ? JSON.stringify(snapshot.settings.worktreeSetup, null, 2) : "");
     void api.listRunnerTemplates(snapshot.project.id).then(setTemplates);
     setRunnerChecks([]);
     setConnectionChecks({});
@@ -182,11 +184,13 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     setBusy(true);
     try {
       const parsedRolePresets = JSON.parse(rolePresets);
+      const parsedWorktreeSetup = worktreeSetup.trim() ? JSON.parse(worktreeSetup) : null;
       await api.updateProjectSettings(snapshot.project.id, {
         rolePresets: parsedRolePresets,
         aiConnections,
         roleAssignments: normalizeRoleAssignments(roleAssignments),
         worktreeRoot: worktreeRoot.trim() ? worktreeRoot.trim() : null,
+        worktreeSetup: parsedWorktreeSetup,
         jiraConfig: normalizeJiraConfig(jiraConfig),
       });
       await onRefresh();
@@ -1373,6 +1377,18 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                   />
                   <small className="muted">비워두면 프로젝트 내 <code>.helm/worktrees</code>가 사용됩니다.</small>
                 </label>
+                <label className="settings-field">
+                  <span>Setup config JSON</span>
+                  <textarea
+                    spellCheck={false}
+                    placeholder={'{ "steps": [{ "name": "install", "command": "pnpm install" }] }'}
+                    value={worktreeSetup}
+                    onChange={(event) => setWorktreeSetup(event.target.value)}
+                  />
+                  <small className="muted">
+                    비워두면 <code>.helm/worktree-setup.json</code>이 있으면 사용합니다. Helm은 자동 실행하지 않고 Context Pack에만 포함합니다.
+                  </small>
+                </label>
               </section>
             ) : null}
 
@@ -1578,6 +1594,7 @@ function normalizeAiConnections(value: unknown): AiConnection[] {
         id: typeof item.id === "string" ? item.id : crypto.randomUUID(),
         label: typeof item.label === "string" ? item.label : "AI CLI 연결",
         provider,
+        runnerAdapter: typeof item.runnerAdapter === "string" ? item.runnerAdapter : null,
         commandArgs: normalizeCliArgs(
           provider,
           Array.isArray(item.commandArgs) ? item.commandArgs.filter(isString) : [],
@@ -1597,6 +1614,8 @@ function normalizeAiConnections(value: unknown): AiConnection[] {
           ? normalizeModelList(provider, item.availableModels.filter(isString))
           : [],
         defaultEffort: typeof item.defaultEffort === "string" ? item.defaultEffort : null,
+        approvalPolicy: typeof item.approvalPolicy === "string" ? item.approvalPolicy : null,
+        sandbox: typeof item.sandbox === "string" ? item.sandbox : null,
       };
     });
 }
@@ -1835,6 +1854,9 @@ function codexConnection(cliPath = "codex"): AiConnection {
     enabled: true,
     defaultModel: "gpt-5.2",
     availableModels: ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"],
+    runnerAdapter: "codex_app_server",
+    approvalPolicy: "on-request",
+    sandbox: "workspace-write",
   };
 }
 

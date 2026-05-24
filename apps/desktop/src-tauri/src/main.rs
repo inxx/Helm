@@ -407,6 +407,7 @@ fn apply_runner_template(
             role_assignments: Some((template.assignments)()),
             conductor_config: None,
             worktree_root: None,
+            worktree_setup: None,
             jira_config: None,
             obsidian_vault_path: None,
             token_budget: None,
@@ -1053,6 +1054,17 @@ fn run_host_role(
 
 fn emit_run_event(app: &AppHandle, event: &RunEventSummary) {
     let _ = app.emit("agent-run://event", event);
+    if event.kind == "approval" {
+        let _ = app.emit(
+            "agent-run://updated",
+            json!({
+                "projectId": event.project_id,
+                "taskId": event.task_id,
+                "runId": event.run_id,
+                "status": "ApprovalPending"
+            }),
+        );
+    }
 }
 
 fn register_running_run(
@@ -2196,7 +2208,10 @@ fn codex_ai_connections() -> Value {
             "planningModel": null,
             "enabled": true,
             "defaultModel": "gpt-5.2",
-            "availableModels": ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"]
+            "availableModels": ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"],
+            "runnerAdapter": "codex_app_server",
+            "approvalPolicy": "on-request",
+            "sandbox": "workspace-write"
         }
     ])
 }

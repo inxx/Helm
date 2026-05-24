@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -238,6 +238,9 @@ pub fn effective_settings(conn: &Connection, project_id: &str) -> CommandResult<
         worktree_root: settings
             .remove("worktreeRoot")
             .and_then(|value| value.as_str().map(str::to_string)),
+        worktree_setup: settings
+            .remove("worktreeSetup")
+            .filter(|value| !value.is_null()),
         jira_config: settings.remove("jiraConfig"),
         obsidian_vault_path: settings
             .remove("obsidianVaultPath")
@@ -274,6 +277,12 @@ pub fn update_settings(
     }
     if let Some(value) = patch.worktree_root {
         values.push(("worktreeRoot", option_string(value)));
+    }
+    if let Some(value) = patch.worktree_setup {
+        if let Some(config) = value.as_ref() {
+            validate_worktree_setup_config(config)?;
+        }
+        values.push(("worktreeSetup", value.unwrap_or(Value::Null)));
     }
     if let Some(value) = patch.jira_config {
         values.push(("jiraConfig", value.unwrap_or(Value::Null)));
@@ -875,6 +884,8 @@ pub fn prepare_role_context(
             "이미 준비 중이거나 실행 중인 role run이 있습니다.",
         ));
     }
+    let settings = effective_settings(conn, project_id)?;
+    let worktree_setup = resolve_worktree_setup_config(root, settings.worktree_setup.as_ref())?;
 
     let run_id = new_id();
     let timestamp = now();
@@ -884,8 +895,10 @@ pub fn prepare_role_context(
     fs::create_dir_all(&artifact_path)
         .map_err(|err| CommandError::io("실행 산출물 폴더를 만들지 못했습니다.", err))?;
 
-    let context_pack = build_context_pack_markdown(root, &task, &worktree, role_id)?;
-    let context_manifest = build_context_manifest(root, &task, &worktree, role_id)?;
+    let context_pack =
+        build_context_pack_markdown(root, &task, &worktree, role_id, worktree_setup.as_ref())?;
+    let context_manifest =
+        build_context_manifest(root, &task, &worktree, role_id, worktree_setup.as_ref())?;
     let placeholder_result = json!({
         "schemaVersion": 1,
         "status": "needs_changes",
@@ -903,6 +916,15 @@ pub fn prepare_role_context(
             .map_err(|err| CommandError::io("Context Pack manifest를 만들지 못했습니다.", err))?,
     )
     .map_err(|err| CommandError::io("Context Pack manifest를 저장하지 못했습니다.", err))?;
+    if let Some(setup) = worktree_setup.as_ref() {
+        fs::write(
+            artifact_path.join("worktree-setup.json"),
+            serde_json::to_string_pretty(setup).map_err(|err| {
+                CommandError::io("worktree setup config를 만들지 못했습니다.", err)
+            })?,
+        )
+        .map_err(|err| CommandError::io("worktree setup config를 저장하지 못했습니다.", err))?;
+    }
     fs::write(
         artifact_path.join("structured-result.schema.json"),
         include_str!("../schemas/structured-result.schema.json"),
@@ -978,7 +1000,8 @@ pub fn prepare_role_context(
                 "Task external refs",
                 "Git changed files",
                 "Recent commits",
-                "Role contract"
+                "Role contract",
+                "Worktree setup config"
             ]
         }),
     )?;
@@ -1126,7 +1149,7 @@ pub fn run_host_role(
     let settings = effective_settings(conn, project_id)?;
     let placeholders = host_runner_placeholders(root, &worktree, &run);
     let runner_command = resolve_host_runner_command(&settings, &run.role_id, &placeholders)?;
-    let command_args = runner_command.args;
+    let command_args = runner_command.args.clone();
     let timeout_seconds = runner_command.timeout_seconds;
     if command_args.is_empty() {
         return Err(CommandError::validation(
@@ -1142,102 +1165,126 @@ pub fn run_host_role(
             "runner": "HelmHostRunner",
             "provider": runner_command.provider.clone(),
             "connectionId": runner_command.connection_id.clone(),
-            "model": runner_command.model.clone()
+            "model": runner_command.model.clone(),
+            "adapter": runner_adapter_label(runner_command.runner_adapter)
         }),
         &mut event_sink,
     )?;
 
     let artifact_path = root.join(&run.artifact_dir);
+    write_runner_request(
+        &artifact_path,
+        &worktree.worktree_path,
+        &command_args,
+        &runner_command,
+    )?;
     let command_started_at = now();
     let command_started_instant = Instant::now();
-    let command_output = run_command_with_timeout(
-        Command::new(&command_args[0])
-            .args(&command_args[1..])
-            .current_dir(&worktree.worktree_path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env(
-                "HELM_ARTIFACT_DIR",
-                artifact_path.to_string_lossy().to_string(),
-            )
-            .env(
-                "HELM_CONTEXT_PACK",
-                artifact_path
-                    .join("context-pack.md")
-                    .to_string_lossy()
-                    .to_string(),
-            )
-            .env(
-                "HELM_CONTEXT_MANIFEST",
-                artifact_path
-                    .join("context-pack.json")
-                    .to_string_lossy()
-                    .to_string(),
-            )
-            .env(
-                "HELM_RESULT_PATH",
-                artifact_path
-                    .join("structured-result.json")
-                    .to_string_lossy()
-                    .to_string(),
-            )
-            .env(
-                "HELM_SUMMARY_PATH",
-                artifact_path
-                    .join("summary.md")
-                    .to_string_lossy()
-                    .to_string(),
-            )
-            .env(
-                "HELM_SCHEMA_PATH",
-                artifact_path
-                    .join("structured-result.schema.json")
-                    .to_string_lossy()
-                    .to_string(),
-            )
-            .env("HELM_WORKTREE_PATH", worktree.worktree_path.clone())
-            .env("HELM_TASK_ID", run.task_id.clone())
-            .env("HELM_ROLE_ID", run.role_id.clone())
-            .env("HELM_MODEL", runner_command.model.unwrap_or_default())
-            .env(
-                "HELM_JIRA_ENABLED",
-                jira_config_bool(&settings.jira_config, "enabled"),
-            )
-            .env(
-                "HELM_JIRA_SITE_URL",
-                jira_config_string(&settings.jira_config, "siteUrl"),
-            )
-            .env(
-                "HELM_JIRA_PROJECT_KEY",
-                jira_config_string(&settings.jira_config, "projectKey"),
-            )
-            .env(
-                "HELM_JIRA_EPIC_ISSUE_TYPE",
-                jira_config_string(&settings.jira_config, "epicIssueType"),
-            )
-            .env(
-                "HELM_JIRA_TASK_ISSUE_TYPE",
-                jira_config_string(&settings.jira_config, "taskIssueType"),
-            ),
-        timeout_seconds,
-        cancellation,
-        |stream, chunk| {
-            let text = String::from_utf8_lossy(chunk).to_string();
-            let _ = append_and_emit_run_event(
-                conn,
-                project_id,
-                &run.task_id,
-                run_id,
-                stream,
-                &text,
-                json!({
-                    "stream": stream,
-                    "bytes": chunk.len()
-                }),
-                &mut event_sink,
-            );
-        },
-    )?;
+    let command_output = match runner_command.runner_adapter {
+        RunnerAdapterKind::Process => run_command_with_timeout(
+            Command::new(&command_args[0])
+                .args(&command_args[1..])
+                .current_dir(&worktree.worktree_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .env(
+                    "HELM_ARTIFACT_DIR",
+                    artifact_path.to_string_lossy().to_string(),
+                )
+                .env(
+                    "HELM_CONTEXT_PACK",
+                    artifact_path
+                        .join("context-pack.md")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                .env(
+                    "HELM_CONTEXT_MANIFEST",
+                    artifact_path
+                        .join("context-pack.json")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                .env(
+                    "HELM_RESULT_PATH",
+                    artifact_path
+                        .join("structured-result.json")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                .env(
+                    "HELM_SUMMARY_PATH",
+                    artifact_path
+                        .join("summary.md")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                .env(
+                    "HELM_SCHEMA_PATH",
+                    artifact_path
+                        .join("structured-result.schema.json")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                .env("HELM_WORKTREE_PATH", worktree.worktree_path.clone())
+                .env("HELM_TASK_ID", run.task_id.clone())
+                .env("HELM_ROLE_ID", run.role_id.clone())
+                .env(
+                    "HELM_MODEL",
+                    runner_command.model.clone().unwrap_or_default(),
+                )
+                .env(
+                    "HELM_JIRA_ENABLED",
+                    jira_config_bool(&settings.jira_config, "enabled"),
+                )
+                .env(
+                    "HELM_JIRA_SITE_URL",
+                    jira_config_string(&settings.jira_config, "siteUrl"),
+                )
+                .env(
+                    "HELM_JIRA_PROJECT_KEY",
+                    jira_config_string(&settings.jira_config, "projectKey"),
+                )
+                .env(
+                    "HELM_JIRA_EPIC_ISSUE_TYPE",
+                    jira_config_string(&settings.jira_config, "epicIssueType"),
+                )
+                .env(
+                    "HELM_JIRA_TASK_ISSUE_TYPE",
+                    jira_config_string(&settings.jira_config, "taskIssueType"),
+                ),
+            timeout_seconds,
+            cancellation,
+            |stream, chunk| {
+                let text = String::from_utf8_lossy(chunk).to_string();
+                let _ = append_and_emit_run_event(
+                    conn,
+                    project_id,
+                    &run.task_id,
+                    run_id,
+                    stream,
+                    &text,
+                    json!({
+                        "stream": stream,
+                        "bytes": chunk.len()
+                    }),
+                    &mut event_sink,
+                );
+            },
+        )?,
+        RunnerAdapterKind::CodexAppServer => run_codex_app_server_role(
+            conn,
+            project_id,
+            &run,
+            &worktree.worktree_path,
+            &artifact_path,
+            &command_args,
+            &runner_command,
+            timeout_seconds,
+            cancellation,
+            &mut event_sink,
+        )?,
+    };
     let command_duration_ms = command_started_instant
         .elapsed()
         .as_millis()
@@ -2850,6 +2897,15 @@ struct ResolvedHostRunnerCommand {
     provider: Option<String>,
     connection_id: Option<String>,
     model: Option<String>,
+    runner_adapter: RunnerAdapterKind,
+    approval_policy: Option<String>,
+    sandbox: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunnerAdapterKind {
+    Process,
+    CodexAppServer,
 }
 
 fn resolve_host_runner_command(
@@ -2867,6 +2923,9 @@ fn resolve_host_runner_command(
         provider: None,
         connection_id: None,
         model: None,
+        runner_adapter: RunnerAdapterKind::Process,
+        approval_policy: None,
+        sandbox: None,
     })
 }
 
@@ -2929,6 +2988,7 @@ fn role_assignment_command(
         .get("provider")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let runner_adapter = runner_adapter_kind(connection, provider.as_deref());
     let model = selection
         .get("model")
         .and_then(Value::as_str)
@@ -2961,7 +3021,30 @@ fn role_assignment_command(
         provider,
         connection_id: Some(connection_id.to_string()),
         model,
+        runner_adapter,
+        approval_policy: optional_connection_string(connection, "approvalPolicy"),
+        sandbox: optional_connection_string(connection, "sandbox"),
     }))
+}
+
+fn runner_adapter_kind(connection: &Value, provider: Option<&str>) -> RunnerAdapterKind {
+    match connection
+        .get("runnerAdapter")
+        .and_then(Value::as_str)
+        .unwrap_or("process")
+    {
+        "codex_app_server" if provider == Some("codex") => RunnerAdapterKind::CodexAppServer,
+        _ => RunnerAdapterKind::Process,
+    }
+}
+
+fn optional_connection_string(connection: &Value, key: &str) -> Option<String> {
+    connection
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn first_role_selection(assignment: &Value) -> Option<Value> {
@@ -3027,6 +3110,801 @@ fn insert_after_index<const N: usize>(
         args.insert(insert_at + offset, value);
     }
     args
+}
+
+fn runner_adapter_label(kind: RunnerAdapterKind) -> &'static str {
+    match kind {
+        RunnerAdapterKind::Process => "process",
+        RunnerAdapterKind::CodexAppServer => "codex_app_server",
+    }
+}
+
+fn write_runner_request(
+    artifact_path: &Path,
+    cwd: &str,
+    command_args: &[String],
+    runner_command: &ResolvedHostRunnerCommand,
+) -> CommandResult<()> {
+    let setup_config_path = artifact_path.join("worktree-setup.json");
+    let setup_config_path = setup_config_path
+        .exists()
+        .then(|| setup_config_path.to_string_lossy().to_string());
+    fs::write(
+        artifact_path.join("runner-request.json"),
+        serde_json::to_string_pretty(&json!({
+            "schemaVersion": 1,
+            "adapter": runner_adapter_label(runner_command.runner_adapter),
+            "provider": runner_command.provider,
+            "connectionId": runner_command.connection_id,
+            "model": runner_command.model,
+            "approvalPolicy": runner_command.approval_policy,
+            "sandbox": runner_command.sandbox,
+            "setupConfigPath": setup_config_path,
+            "command": command_args,
+            "cwd": cwd
+        }))
+        .map_err(|err| CommandError::io("runner request를 만들지 못했습니다.", err))?,
+    )
+    .map_err(|err| CommandError::io("runner request를 저장하지 못했습니다.", err))
+}
+
+enum CodexAppServerOutput {
+    StdoutLine(String),
+    Stderr(Vec<u8>),
+}
+
+fn run_codex_app_server_role(
+    conn: &mut Connection,
+    project_id: &str,
+    run: &AgentRunSummary,
+    worktree_path: &str,
+    artifact_path: &Path,
+    command_args: &[String],
+    runner_command: &ResolvedHostRunnerCommand,
+    timeout_seconds: u64,
+    cancellation: Arc<AtomicBool>,
+    event_sink: &mut Option<&mut dyn FnMut(&RunEventSummary)>,
+) -> CommandResult<HostCommandOutput> {
+    let server_args = codex_app_server_command_args(command_args);
+    let Some(program) = server_args.first() else {
+        return Err(CommandError::validation(
+            "Codex app-server command가 비어 있습니다.",
+        ));
+    };
+    let mut child = Command::new(program)
+        .args(&server_args[1..])
+        .current_dir(worktree_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| CommandError::io("Codex app-server를 실행하지 못했습니다.", err))?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        CommandError::new("IoFailed", "Codex app-server stdin을 열지 못했습니다.")
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        CommandError::new("IoFailed", "Codex app-server stdout을 열지 못했습니다.")
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        CommandError::new("IoFailed", "Codex app-server stderr를 열지 못했습니다.")
+    })?;
+    let (sender, receiver) = mpsc::channel();
+    let stdout_reader = spawn_codex_json_line_reader(stdout, sender.clone());
+    let stderr_reader = spawn_codex_stderr_reader(stderr, sender);
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut stdout_log = Vec::new();
+    let mut stderr_log = Vec::new();
+    let mut next_id = 1_i64;
+
+    let init_id = codex_rpc_send_request(
+        &mut stdin,
+        &mut next_id,
+        "initialize",
+        json!({
+            "clientInfo": { "name": "Helm", "title": "Helm", "version": env!("CARGO_PKG_VERSION") },
+            "capabilities": { "experimentalApi": true }
+        }),
+    )?;
+    let _ = codex_rpc_wait_for_response(CodexRpcWait {
+        conn,
+        project_id,
+        run,
+        stdin: &mut stdin,
+        child: &mut child,
+        receiver: &receiver,
+        stdout_log: &mut stdout_log,
+        stderr_log: &mut stderr_log,
+        event_sink,
+        deadline,
+        cancellation: cancellation.clone(),
+        target_id: init_id,
+    })?;
+    codex_rpc_send_notification(&mut stdin, "initialized", json!({}))?;
+
+    let thread_id = codex_rpc_send_request(
+        &mut stdin,
+        &mut next_id,
+        "thread/start",
+        codex_thread_start_params(worktree_path, runner_command),
+    )?;
+    let thread_response = codex_rpc_wait_for_response(CodexRpcWait {
+        conn,
+        project_id,
+        run,
+        stdin: &mut stdin,
+        child: &mut child,
+        receiver: &receiver,
+        stdout_log: &mut stdout_log,
+        stderr_log: &mut stderr_log,
+        event_sink,
+        deadline,
+        cancellation: cancellation.clone(),
+        target_id: thread_id,
+    })?;
+    let thread_id = thread_response
+        .get("thread")
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            CommandError::with_details(
+                "RunnerFailed",
+                "Codex app-server thread/start 응답에서 thread id를 찾지 못했습니다.",
+                thread_response.to_string(),
+            )
+        })?
+        .to_string();
+
+    let prompt = codex_app_server_role_prompt(artifact_path, run);
+    fs::write(artifact_path.join("codex-prompt.txt"), &prompt)
+        .map_err(|err| CommandError::io("Codex prompt를 저장하지 못했습니다.", err))?;
+    let turn_id = codex_rpc_send_request(
+        &mut stdin,
+        &mut next_id,
+        "turn/start",
+        codex_turn_start_params(&thread_id, &prompt, runner_command),
+    )?;
+    let _ = codex_rpc_wait_for_response(CodexRpcWait {
+        conn,
+        project_id,
+        run,
+        stdin: &mut stdin,
+        child: &mut child,
+        receiver: &receiver,
+        stdout_log: &mut stdout_log,
+        stderr_log: &mut stderr_log,
+        event_sink,
+        deadline,
+        cancellation: cancellation.clone(),
+        target_id: turn_id,
+    })?;
+
+    let mut turn_failed = false;
+    loop {
+        if cancellation.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+        match codex_recv_message(&receiver, &mut child, deadline, cancellation.clone())? {
+            Some(CodexAppServerOutput::Stderr(bytes)) => {
+                stderr_log.extend_from_slice(&bytes);
+                emit_host_output_event(conn, project_id, run, "stderr", &bytes, event_sink);
+            }
+            Some(CodexAppServerOutput::StdoutLine(line)) => {
+                let outcome = codex_handle_rpc_line(CodexRpcLine {
+                    conn,
+                    project_id,
+                    run,
+                    stdin: &mut stdin,
+                    line: &line,
+                    stdout_log: &mut stdout_log,
+                    stderr_log: &mut stderr_log,
+                    event_sink,
+                    deadline,
+                    cancellation: cancellation.clone(),
+                    target_id: None,
+                })?;
+                if let CodexRpcLineOutcome::TurnCompleted { failed } = outcome {
+                    turn_failed = failed;
+                    break;
+                }
+            }
+            None => {}
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = stdout_reader.join();
+    let _ = stderr_reader.join();
+    while let Ok(message) = receiver.try_recv() {
+        match message {
+            CodexAppServerOutput::Stderr(bytes) => stderr_log.extend_from_slice(&bytes),
+            CodexAppServerOutput::StdoutLine(line) => {
+                stdout_log.extend_from_slice(line.as_bytes());
+                stdout_log.push(b'\n');
+            }
+        }
+    }
+
+    let timed_out = Instant::now() >= deadline;
+    let canceled = cancellation.load(Ordering::SeqCst);
+    Ok(HostCommandOutput {
+        stdout: stdout_log,
+        stderr: stderr_log,
+        exit_code: if turn_failed || timed_out || canceled {
+            1
+        } else {
+            0
+        },
+        timed_out,
+        canceled,
+    })
+}
+
+fn codex_app_server_command_args(command_args: &[String]) -> Vec<String> {
+    if command_args.iter().any(|arg| arg == "app-server") {
+        return command_args.to_vec();
+    }
+    let cli = command_args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "codex".to_string());
+    vec![cli, "app-server".to_string()]
+}
+
+fn codex_thread_start_params(
+    worktree_path: &str,
+    runner_command: &ResolvedHostRunnerCommand,
+) -> Value {
+    let mut params = json!({
+        "cwd": worktree_path,
+        "ephemeral": true,
+        "threadSource": { "kind": "api" }
+    });
+    if let Some(model) = runner_command.model.as_deref() {
+        params["model"] = json!(model);
+    }
+    if let Some(policy) = runner_command.approval_policy.as_deref() {
+        params["approvalPolicy"] = json!(policy);
+    }
+    if let Some(sandbox) = runner_command.sandbox.as_deref() {
+        params["sandbox"] = json!(sandbox);
+    }
+    params
+}
+
+fn codex_turn_start_params(
+    thread_id: &str,
+    prompt: &str,
+    runner_command: &ResolvedHostRunnerCommand,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": [{ "type": "text", "text": prompt }]
+    });
+    if let Some(model) = runner_command.model.as_deref() {
+        params["model"] = json!(model);
+    }
+    if let Some(policy) = runner_command.approval_policy.as_deref() {
+        params["approvalPolicy"] = json!(policy);
+    }
+    params
+}
+
+fn codex_app_server_role_prompt(artifact_path: &Path, run: &AgentRunSummary) -> String {
+    format!(
+        "Read {context_pack}, perform the {role_id} role, then write {summary_path} and {result_path} following {schema_path}.\n\nRules:\n- Work only inside the task worktree and approved task scope.\n- If {setup_path} exists, inspect it before changing files and run only relevant setup steps under the active approval policy.\n- Do not skip the structured-result.json file; Helm gates depend on it.\n- Keep the final chat answer brief because Helm reads the artifact files as source of truth.",
+        context_pack = artifact_path.join("context-pack.md").to_string_lossy(),
+        role_id = run.role_id,
+        setup_path = artifact_path.join("worktree-setup.json").to_string_lossy(),
+        summary_path = artifact_path.join("summary.md").to_string_lossy(),
+        result_path = artifact_path.join("structured-result.json").to_string_lossy(),
+        schema_path = artifact_path
+            .join("structured-result.schema.json")
+            .to_string_lossy()
+    )
+}
+
+fn spawn_codex_json_line_reader(
+    stdout: std::process::ChildStdout,
+    sender: mpsc::Sender<CodexAppServerOutput>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if sender.send(CodexAppServerOutput::StdoutLine(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn spawn_codex_stderr_reader(
+    mut stderr: std::process::ChildStderr,
+    sender: mpsc::Sender<CodexAppServerOutput>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match stderr.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => {
+                    if sender
+                        .send(CodexAppServerOutput::Stderr(buffer[..size].to_vec()))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn codex_rpc_send_request(
+    stdin: &mut std::process::ChildStdin,
+    next_id: &mut i64,
+    method: &str,
+    params: Value,
+) -> CommandResult<i64> {
+    let id = *next_id;
+    *next_id += 1;
+    codex_rpc_write(
+        stdin,
+        json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+    )?;
+    Ok(id)
+}
+
+fn codex_rpc_send_notification(
+    stdin: &mut std::process::ChildStdin,
+    method: &str,
+    params: Value,
+) -> CommandResult<()> {
+    codex_rpc_write(
+        stdin,
+        json!({ "jsonrpc": "2.0", "method": method, "params": params }),
+    )
+}
+
+fn codex_rpc_write(stdin: &mut std::process::ChildStdin, message: Value) -> CommandResult<()> {
+    stdin
+        .write_all(format!("{message}\n").as_bytes())
+        .map_err(|err| CommandError::io("Codex app-server 요청을 쓰지 못했습니다.", err))?;
+    stdin
+        .flush()
+        .map_err(|err| CommandError::io("Codex app-server 요청을 flush하지 못했습니다.", err))
+}
+
+struct CodexRpcWait<'a, 'b> {
+    conn: &'a mut Connection,
+    project_id: &'a str,
+    run: &'a AgentRunSummary,
+    stdin: &'a mut std::process::ChildStdin,
+    child: &'a mut std::process::Child,
+    receiver: &'a mpsc::Receiver<CodexAppServerOutput>,
+    stdout_log: &'a mut Vec<u8>,
+    stderr_log: &'a mut Vec<u8>,
+    event_sink: &'a mut Option<&'b mut dyn FnMut(&RunEventSummary)>,
+    deadline: Instant,
+    cancellation: Arc<AtomicBool>,
+    target_id: i64,
+}
+
+fn codex_rpc_wait_for_response(wait: CodexRpcWait<'_, '_>) -> CommandResult<Value> {
+    loop {
+        match codex_recv_message(
+            wait.receiver,
+            wait.child,
+            wait.deadline,
+            wait.cancellation.clone(),
+        )? {
+            Some(CodexAppServerOutput::Stderr(bytes)) => {
+                wait.stderr_log.extend_from_slice(&bytes);
+                emit_host_output_event(
+                    wait.conn,
+                    wait.project_id,
+                    wait.run,
+                    "stderr",
+                    &bytes,
+                    wait.event_sink,
+                );
+            }
+            Some(CodexAppServerOutput::StdoutLine(line)) => {
+                let outcome = codex_handle_rpc_line(CodexRpcLine {
+                    conn: wait.conn,
+                    project_id: wait.project_id,
+                    run: wait.run,
+                    stdin: wait.stdin,
+                    line: &line,
+                    stdout_log: wait.stdout_log,
+                    stderr_log: wait.stderr_log,
+                    event_sink: wait.event_sink,
+                    deadline: wait.deadline,
+                    cancellation: wait.cancellation.clone(),
+                    target_id: Some(wait.target_id),
+                })?;
+                if let CodexRpcLineOutcome::Response(value) = outcome {
+                    return Ok(value);
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+fn codex_recv_message(
+    receiver: &mpsc::Receiver<CodexAppServerOutput>,
+    child: &mut std::process::Child,
+    deadline: Instant,
+    cancellation: Arc<AtomicBool>,
+) -> CommandResult<Option<CodexAppServerOutput>> {
+    if cancellation.load(Ordering::SeqCst) {
+        let _ = child.kill();
+        return Err(CommandError::new(
+            "Canceled",
+            "Codex app-server 실행이 취소되었습니다.",
+        ));
+    }
+    if Instant::now() >= deadline {
+        let _ = child.kill();
+        return Err(CommandError::new(
+            "TimedOut",
+            "Codex app-server 실행 시간이 초과되었습니다.",
+        ));
+    }
+    if let Some(status) = child
+        .try_wait()
+        .map_err(|err| CommandError::io("Codex app-server 상태를 확인하지 못했습니다.", err))?
+    {
+        return Err(CommandError::with_details(
+            "RunnerFailed",
+            "Codex app-server가 예기치 않게 종료되었습니다.",
+            format!("exit status: {status}"),
+        ));
+    }
+    match receiver.recv_timeout(Duration::from_millis(100)) {
+        Ok(message) => Ok(Some(message)),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(CommandError::new(
+            "RunnerFailed",
+            "Codex app-server 출력 스트림이 종료되었습니다.",
+        )),
+    }
+}
+
+struct CodexRpcLine<'a, 'b> {
+    conn: &'a mut Connection,
+    project_id: &'a str,
+    run: &'a AgentRunSummary,
+    stdin: &'a mut std::process::ChildStdin,
+    line: &'a str,
+    stdout_log: &'a mut Vec<u8>,
+    stderr_log: &'a mut Vec<u8>,
+    event_sink: &'a mut Option<&'b mut dyn FnMut(&RunEventSummary)>,
+    deadline: Instant,
+    cancellation: Arc<AtomicBool>,
+    target_id: Option<i64>,
+}
+
+enum CodexRpcLineOutcome {
+    Continue,
+    Response(Value),
+    TurnCompleted { failed: bool },
+}
+
+fn codex_handle_rpc_line(line: CodexRpcLine<'_, '_>) -> CommandResult<CodexRpcLineOutcome> {
+    let value = serde_json::from_str::<Value>(line.line).map_err(|err| {
+        CommandError::with_details(
+            "RunnerFailed",
+            "Codex app-server JSON-RPC 응답을 파싱하지 못했습니다.",
+            format!("{err}: {}", line.line),
+        )
+    })?;
+    let id = value.get("id").and_then(Value::as_i64);
+    let method = value.get("method").and_then(Value::as_str);
+
+    if let Some(target_id) = line.target_id {
+        if id == Some(target_id) && value.get("method").is_none() {
+            if let Some(error) = value.get("error") {
+                return Err(CommandError::with_details(
+                    "RunnerFailed",
+                    "Codex app-server 요청이 실패했습니다.",
+                    error.to_string(),
+                ));
+            }
+            return Ok(CodexRpcLineOutcome::Response(
+                value.get("result").cloned().unwrap_or(Value::Null),
+            ));
+        }
+    }
+
+    if id.is_some() && method.is_some() {
+        let response = bridge_codex_server_request(
+            line.conn,
+            line.project_id,
+            line.run,
+            method.unwrap(),
+            value.get("params").cloned().unwrap_or(Value::Null),
+            line.deadline,
+            line.cancellation.clone(),
+            line.event_sink,
+        )?;
+        codex_rpc_write(
+            line.stdin,
+            json!({ "jsonrpc": "2.0", "id": id, "result": response }),
+        )?;
+        return Ok(CodexRpcLineOutcome::Continue);
+    }
+
+    if let Some(method) = method {
+        return handle_codex_notification(
+            line.conn,
+            line.project_id,
+            line.run,
+            method,
+            value.get("params").cloned().unwrap_or(Value::Null),
+            line.stdout_log,
+            line.stderr_log,
+            line.event_sink,
+        );
+    }
+
+    Ok(CodexRpcLineOutcome::Continue)
+}
+
+fn handle_codex_notification(
+    conn: &Connection,
+    project_id: &str,
+    run: &AgentRunSummary,
+    method: &str,
+    params: Value,
+    stdout_log: &mut Vec<u8>,
+    stderr_log: &mut Vec<u8>,
+    event_sink: &mut Option<&mut dyn FnMut(&RunEventSummary)>,
+) -> CommandResult<CodexRpcLineOutcome> {
+    match method {
+        "item/agentMessage/delta"
+        | "item/reasoning/textDelta"
+        | "item/reasoning/summaryTextDelta"
+        | "item/plan/delta" => {
+            if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+                stdout_log.extend_from_slice(delta.as_bytes());
+                emit_host_output_event(
+                    conn,
+                    project_id,
+                    run,
+                    "stdout",
+                    delta.as_bytes(),
+                    event_sink,
+                );
+            }
+        }
+        "item/commandExecution/outputDelta" => {
+            if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+                stdout_log.extend_from_slice(delta.as_bytes());
+                emit_host_output_event(
+                    conn,
+                    project_id,
+                    run,
+                    "stdout",
+                    delta.as_bytes(),
+                    event_sink,
+                );
+            }
+        }
+        "error" => {
+            let text = params
+                .get("error")
+                .and_then(|value| value.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("Codex app-server error");
+            stderr_log.extend_from_slice(text.as_bytes());
+            stderr_log.push(b'\n');
+            emit_host_output_event(conn, project_id, run, "stderr", text.as_bytes(), event_sink);
+        }
+        "turn/completed" => {
+            let failed = params
+                .get("turn")
+                .and_then(|turn| turn.get("status"))
+                .and_then(Value::as_str)
+                .is_some_and(|status| !matches!(status, "completed" | "succeeded"));
+            append_run_event(
+                conn,
+                project_id,
+                &run.task_id,
+                &run.id,
+                "system",
+                "Codex turn completed",
+                json!({ "method": method, "params": params }),
+            )?;
+            return Ok(CodexRpcLineOutcome::TurnCompleted { failed });
+        }
+        "turn/started" | "item/started" | "item/completed" | "turn/plan/updated" => {
+            append_run_event(
+                conn,
+                project_id,
+                &run.task_id,
+                &run.id,
+                "system",
+                &codex_notification_message(method, &params),
+                json!({ "method": method, "params": params }),
+            )?;
+        }
+        _ => {}
+    }
+    Ok(CodexRpcLineOutcome::Continue)
+}
+
+fn codex_notification_message(method: &str, params: &Value) -> String {
+    if let Some(item_type) = params
+        .get("item")
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+    {
+        return format!("Codex {method} {item_type}");
+    }
+    method.to_string()
+}
+
+fn emit_host_output_event(
+    conn: &Connection,
+    project_id: &str,
+    run: &AgentRunSummary,
+    stream: &str,
+    chunk: &[u8],
+    event_sink: &mut Option<&mut dyn FnMut(&RunEventSummary)>,
+) {
+    let text = String::from_utf8_lossy(chunk).to_string();
+    let _ = append_and_emit_run_event(
+        conn,
+        project_id,
+        &run.task_id,
+        &run.id,
+        stream,
+        &text,
+        json!({
+            "stream": stream,
+            "bytes": chunk.len()
+        }),
+        event_sink,
+    );
+}
+
+fn bridge_codex_server_request(
+    conn: &mut Connection,
+    project_id: &str,
+    run: &AgentRunSummary,
+    method: &str,
+    params: Value,
+    deadline: Instant,
+    cancellation: Arc<AtomicBool>,
+    event_sink: &mut Option<&mut dyn FnMut(&RunEventSummary)>,
+) -> CommandResult<Value> {
+    if !matches!(
+        method,
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
+    ) {
+        return Ok(json!({ "decision": "decline" }));
+    }
+    let approval = create_run_approval(
+        conn,
+        project_id,
+        &run.task_id,
+        &run.id,
+        &codex_approval_reason(method, &params),
+    )?;
+    append_and_emit_run_event(
+        conn,
+        project_id,
+        &run.task_id,
+        &run.id,
+        "approval",
+        "RunApproval Pending",
+        json!({
+            "approvalId": approval.id,
+            "approvalType": "RunApproval",
+            "status": "Pending",
+            "rpcMethod": method,
+            "params": params
+        }),
+        event_sink,
+    )?;
+
+    loop {
+        if cancellation.load(Ordering::SeqCst) || Instant::now() >= deadline {
+            return Ok(json!({ "decision": "cancel" }));
+        }
+        let current = get_approval(conn, &approval.id)?;
+        match current.status.as_str() {
+            "Approved" => return Ok(json!({ "decision": "accept" })),
+            "Rejected" | "Expired" => return Ok(json!({ "decision": "decline" })),
+            _ => std::thread::sleep(Duration::from_millis(500)),
+        }
+    }
+}
+
+fn codex_approval_reason(method: &str, params: &Value) -> String {
+    match method {
+        "item/commandExecution/requestApproval" => {
+            let command = params
+                .get("command")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    params
+                        .get("action")
+                        .and_then(|value| value.get("command"))
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or("command execution");
+            format!(
+                "Codex command approval requested: {}",
+                command.lines().next().unwrap_or(command)
+            )
+        }
+        "item/fileChange/requestApproval" => {
+            let path = params
+                .get("path")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    params
+                        .get("changes")
+                        .and_then(Value::as_array)
+                        .and_then(|items| items.first())
+                        .and_then(|item| item.get("path"))
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or("file change");
+            format!("Codex file change approval requested: {path}")
+        }
+        _ => format!("Codex approval requested: {method}"),
+    }
+}
+
+fn create_run_approval(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    run_id: &str,
+    requested_reason: &str,
+) -> CommandResult<ApprovalSummary> {
+    let approval_id = new_id();
+    let timestamp = now();
+    conn.execute(
+        "INSERT INTO approvals (
+           id, project_id, entity_type, entity_id, approval_type, status,
+           requested_reason, requested_at, created_at, updated_at
+         )
+         VALUES (?1, ?2, 'AgentRun', ?3, 'RunApproval', 'Pending', ?4, ?5, ?5, ?5)",
+        params![approval_id, project_id, run_id, requested_reason, timestamp],
+    )
+    .map_err(|err| CommandError::database("실행 승인 요청을 저장하지 못했습니다.", err))?;
+    insert_audit(
+        conn,
+        project_id,
+        "AgentRun",
+        Some(run_id),
+        "approval.created",
+        json!({
+            "approvalId": approval_id,
+            "approvalType": "RunApproval",
+            "entityType": "AgentRun",
+            "entityId": run_id,
+            "taskId": task_id,
+            "requestedReason": requested_reason
+        }),
+    )?;
+    get_approval(conn, &approval_id)
 }
 
 fn role_command_args(
@@ -3520,11 +4398,93 @@ fn markdown_list(items: &[&str]) -> String {
         .join("\n")
 }
 
+fn resolve_worktree_setup_config(
+    root: &Path,
+    settings_setup: Option<&Value>,
+) -> CommandResult<Option<Value>> {
+    if let Some(value) = settings_setup {
+        validate_worktree_setup_config(value)?;
+        return Ok(Some(value.clone()));
+    }
+
+    let setup_path = root.join(".helm").join("worktree-setup.json");
+    if !setup_path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&setup_path)
+        .map_err(|err| CommandError::io("worktree setup config를 읽지 못했습니다.", err))?;
+    let value = serde_json::from_str::<Value>(&raw).map_err(|err| {
+        CommandError::with_details(
+            "ValidationFailed",
+            "worktree setup config JSON이 올바르지 않습니다.",
+            err.to_string(),
+        )
+    })?;
+    validate_worktree_setup_config(&value)?;
+    Ok(Some(value))
+}
+
+fn validate_worktree_setup_config(value: &Value) -> CommandResult<()> {
+    let Some(object) = value.as_object() else {
+        return Err(CommandError::validation(
+            "worktreeSetup은 JSON object여야 합니다.",
+        ));
+    };
+    if let Some(steps) = object.get("steps") {
+        let Some(items) = steps.as_array() else {
+            return Err(CommandError::validation(
+                "worktreeSetup.steps는 배열이어야 합니다.",
+            ));
+        };
+        for step in items {
+            let command = step
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if command.is_empty() {
+                return Err(CommandError::validation(
+                    "worktreeSetup.steps[].command는 비어 있을 수 없습니다.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn worktree_setup_markdown(setup: Option<&Value>) -> String {
+    let Some(setup) = setup else {
+        return "- 설정 없음".to_string();
+    };
+    let steps = setup
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let name = item.get("name").and_then(Value::as_str).unwrap_or("setup");
+                    let command = item.get("command").and_then(Value::as_str).unwrap_or("");
+                    format!("{}. {}: `{}`", index + 1, name, command)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "- steps 없음".to_string());
+    format!(
+        "{}\n\n원본 config는 artifact의 `worktree-setup.json`에 저장됩니다. Helm은 이 설정을 자동 실행하지 않으며 runner approval policy를 따른 명시 실행만 허용합니다.",
+        steps
+    )
+}
+
 fn build_context_pack_markdown(
     root: &Path,
     task: &TaskSummary,
     worktree: &TaskWorktreeSummary,
     role_id: &str,
+    worktree_setup: Option<&Value>,
 ) -> CommandResult<String> {
     let contract = role_context_contract(role_id);
     let changed_files = git::changed_files(root)?;
@@ -3565,6 +4525,7 @@ fn build_context_pack_markdown(
          ### Pass Conditions\n\n{}\n\n\
          ### Blocking Conditions\n\n{}\n\n\
          ### Forbidden\n\n{}\n\n\
+         ## Worktree Setup\n\n{}\n\n\
          ## External Refs\n\n{}\n\n\
          ## Changed Files\n\n{}\n\n\
          ## Recent Commits\n\n{}\n\n\
@@ -3590,6 +4551,7 @@ fn build_context_pack_markdown(
         markdown_list(contract.pass_conditions.as_ref()),
         markdown_list(contract.blocking_conditions.as_ref()),
         markdown_list(contract.forbidden.as_ref()),
+        worktree_setup_markdown(worktree_setup),
         if refs.is_empty() {
             "- 없음"
         } else {
@@ -3613,6 +4575,7 @@ fn build_context_manifest(
     task: &TaskSummary,
     worktree: &TaskWorktreeSummary,
     role_id: &str,
+    worktree_setup: Option<&Value>,
 ) -> CommandResult<Value> {
     let contract = role_context_contract(role_id);
     Ok(json!({
@@ -3623,6 +4586,7 @@ fn build_context_manifest(
         "roleId": role_id,
         "roleContract": contract.to_json(role_id),
         "worktree": worktree,
+        "worktreeSetup": worktree_setup.cloned(),
         "git": {
             "changedFiles": git::changed_files(root)?,
             "recentCommits": git::recent_commits(root, 5)?
@@ -3633,7 +4597,8 @@ fn build_context_manifest(
             "externalRefs",
             "git.changedFiles",
             "git.recentCommits",
-            "roleContract"
+            "roleContract",
+            "worktreeSetup"
         ],
         "expectedArtifacts": [
             "summary.md",
@@ -4269,6 +5234,71 @@ mod tests {
     }
 
     #[test]
+    fn prepare_role_context_includes_worktree_setup_config() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        fs::create_dir_all(repo.root.join(".helm")).expect("helm dir");
+        fs::write(
+            repo.root.join(".helm").join("worktree-setup.json"),
+            r#"{
+              "steps": [
+                { "name": "install", "command": "pnpm install" },
+                { "name": "test", "command": "pnpm test" }
+              ]
+            }"#,
+        )
+        .expect("setup config");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "planner")
+            .expect("context");
+        let artifact_dir = repo.root.join(&run.artifact_dir);
+        assert!(artifact_dir.join("worktree-setup.json").exists());
+
+        let context_pack =
+            fs::read_to_string(artifact_dir.join("context-pack.md")).expect("context pack");
+        assert!(context_pack.contains("## Worktree Setup"));
+        assert!(context_pack.contains("pnpm install"));
+
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(artifact_dir.join("context-pack.json")).expect("manifest"),
+        )
+        .expect("manifest json");
+        assert_eq!(
+            manifest["worktreeSetup"]["steps"][0]["command"],
+            "pnpm install"
+        );
+    }
+
+    #[test]
+    fn create_run_approval_records_pending_agent_run_approval() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "planner")
+            .expect("context");
+
+        let approval = create_run_approval(
+            &conn,
+            &project.id,
+            &task.id,
+            &run.id,
+            "Codex command approval requested: pnpm test",
+        )
+        .expect("approval");
+
+        assert_eq!(approval.approval_type, "RunApproval");
+        assert_eq!(approval.entity_type, "AgentRun");
+        assert_eq!(approval.entity_id, run.id);
+        assert_eq!(approval.status, "Pending");
+        let pending =
+            list_approvals(&conn, &project.id, Some("Pending".to_string())).expect("pending");
+        assert!(pending.iter().any(|item| item.id == approval.id));
+    }
+
+    #[test]
     fn claim_host_run_is_atomic_and_records_running_event() {
         let repo = test_repo();
         let (mut conn, project) = open_test_project(&repo);
@@ -4360,6 +5390,7 @@ mod tests {
                 role_assignments: None,
                 conductor_config: None,
                 worktree_root: None,
+                worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: None,
                 token_budget: None,
@@ -4477,6 +5508,7 @@ mod tests {
                 role_assignments: None,
                 conductor_config: None,
                 worktree_root: None,
+                worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: None,
                 token_budget: None,
@@ -4568,6 +5600,7 @@ mod tests {
                 role_assignments: None,
                 conductor_config: None,
                 worktree_root: None,
+                worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: None,
                 token_budget: None,
@@ -4658,6 +5691,7 @@ mod tests {
                 role_assignments: None,
                 conductor_config: None,
                 worktree_root: None,
+                worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: None,
                 token_budget: None,
@@ -4750,7 +5784,10 @@ mod tests {
                     "commandArgs": ["codex", "exec", "--cd", "{worktreePath}", "--", "run {roleId}"],
                     "timeoutSeconds": 120,
                     "enabled": true,
-                    "defaultModel": "gpt-5.2"
+                    "defaultModel": "gpt-5.2",
+                    "runnerAdapter": "codex_app_server",
+                    "approvalPolicy": "on-request",
+                    "sandbox": "workspace-write"
                 }
             ]),
             role_assignments: json!([
@@ -4764,6 +5801,7 @@ mod tests {
             ]),
             conductor_config: None,
             worktree_root: None,
+            worktree_setup: None,
             jira_config: None,
             obsidian_vault_path: None,
             token_budget: None,
@@ -4792,6 +5830,9 @@ mod tests {
         );
         assert_eq!(command.timeout_seconds, 120);
         assert_eq!(command.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(command.runner_adapter, RunnerAdapterKind::CodexAppServer);
+        assert_eq!(command.approval_policy.as_deref(), Some("on-request"));
+        assert_eq!(command.sandbox.as_deref(), Some("workspace-write"));
     }
 
     #[test]

@@ -58,6 +58,7 @@ export interface EffectiveSettings {
   roleAssignments: RoleAssignment[];
   conductorConfig: ConductorConfig | null;
   worktreeRoot: string | null;
+  worktreeSetup: unknown | null;
   jiraConfig: JiraConfig | null;
   obsidianVaultPath: string | null;
   tokenBudget: number | null;
@@ -68,6 +69,7 @@ export interface AiConnection {
   id: string;
   label: string;
   provider: "fixture" | "codex" | "claude" | string;
+  runnerAdapter?: "process" | "codex_app_server" | string | null;
   commandArgs: string[];
   planningCommandArgs?: string[];
   planningMode?: "native_plan" | "prompt_guarded" | "fixture" | string;
@@ -79,6 +81,8 @@ export interface AiConnection {
   defaultModel?: string | null;
   availableModels?: string[];
   defaultEffort?: string | null;
+  approvalPolicy?: string | null;
+  sandbox?: string | null;
 }
 
 export interface RoleRunnerSelection {
@@ -339,6 +343,7 @@ export interface ProjectSettingsPatch {
   roleAssignments?: RoleAssignment[];
   conductorConfig?: ConductorConfig | null;
   worktreeRoot?: string | null;
+  worktreeSetup?: unknown | null;
   jiraConfig?: JiraConfig | null;
   obsidianVaultPath?: string | null;
   tokenBudget?: number | null;

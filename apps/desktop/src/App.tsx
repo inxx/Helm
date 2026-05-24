@@ -1,4 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { Compass, GitBranch, ListChecks, Settings, SquareTerminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
@@ -70,6 +71,31 @@ export function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    let disposed = false;
+    let cleanup: (() => void) | null = null;
+    void listen<{ projectId?: string }>("agent-run://updated", async (event) => {
+      if (disposed || event.payload.projectId !== snapshot.project.id) return;
+      try {
+        const next = await api.getProjectSnapshot(snapshot.project.id);
+        if (!disposed) applySnapshotUpdate(next);
+      } catch {
+        // Detail panels still receive run events; global refresh is best-effort.
+      }
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanup = unlisten;
+      }
+    });
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, [snapshot?.project.id]);
 
   function hydrateSnapshot(next: ProjectSnapshot) {
     setSnapshot(next);
