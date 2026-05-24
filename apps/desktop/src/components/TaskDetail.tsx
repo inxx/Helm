@@ -18,6 +18,34 @@ import type {
 } from "../lib/types";
 
 type DetailTab = "overview" | "timeline" | "runs" | "git" | "artifacts";
+type TaskBlockerSource = "agent_run" | "runner_check" | "worktree" | "approval";
+type TaskBlockerKind =
+  | "timeout"
+  | "launch_failed"
+  | "runner_missing"
+  | "auth_required"
+  | "schema_invalid"
+  | "gate_failed"
+  | "worktree_conflict"
+  | "manual_decision";
+type TaskBlockerActionKind = "retry" | "open_settings" | "open_git" | "view_events";
+
+interface TaskBlocker {
+  id: string;
+  source: TaskBlockerSource;
+  kind: TaskBlockerKind;
+  tone: "warning" | "danger" | "info";
+  title: string;
+  reason: string;
+  nextStep: string;
+  actions: TaskBlockerAction[];
+}
+
+interface TaskBlockerAction {
+  kind: TaskBlockerActionKind;
+  label: string;
+  runId?: string;
+}
 
 const DETAIL_TABS: Array<{ id: DetailTab; label: string }> = [
   { id: "overview", label: "개요" },
@@ -47,6 +75,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
   const [timeline, setTimeline] = useState<TaskTimelineEntry[]>([]);
   const [runEvents, setRunEvents] = useState<Record<string, RunEventSummary[]>>({});
   const [worktree, setWorktree] = useState<TaskWorktreeSummary | null>(null);
+  const [worktreeError, setWorktreeError] = useState<string | null>(null);
   const [worktreeFiles, setWorktreeFiles] = useState<GitFileStatus[]>([]);
   const [artifact, setArtifact] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
@@ -70,6 +99,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     setActiveTab("overview");
     setArtifact(null);
     setRunEvents({});
+    setWorktreeError(null);
     setDetailsLoaded(false);
   }, [task?.id]);
 
@@ -268,6 +298,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     try {
       const nextWorktree = await api.ensureTaskWorktree(snapshot.project.id, task.id);
       setWorktree(nextWorktree);
+      setWorktreeError(null);
       await refreshWorktreeFiles(nextWorktree);
       await onRefresh();
       showToast({
@@ -276,11 +307,13 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
         description: nextWorktree.branchName,
       });
     } catch (error) {
+      const description = messageFromError(error, "태스크 worktree를 준비하지 못했습니다.");
       showToast({
         tone: "error",
         title: "Worktree 준비 실패",
-        description: messageFromError(error, "태스크 worktree를 준비하지 못했습니다."),
+        description,
       });
+      setWorktreeError(description);
     } finally {
       setBusyAction(null);
     }
@@ -475,6 +508,16 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
   const visibleRun = runs.find((run) => run.status === "Running" || run.status === "Queued") ?? runs[0] ?? null;
   const visibleRunEvents = visibleRun ? runEvents[visibleRun.id] ?? [] : [];
   const visibleRunActivity = visibleRun ? runActivityFor(visibleRun, visibleRunEvents) : null;
+  const taskBlockers = taskBlockersFor({
+    activeRoleId,
+    pendingPlanApproval,
+    runnerReadiness: activeRunnerReadiness,
+    runEvents,
+    runs,
+    task,
+    worktree,
+    worktreeError,
+  });
 
   return (
     <aside className="detail-panel task-console">
@@ -556,6 +599,17 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
           />
         )}
       </section>
+
+      {detailsLoaded && taskBlockers.length > 0 ? (
+        <TaskBlockerPanel
+          blockers={taskBlockers}
+          busy={busy}
+          onGoGit={onGoGit}
+          onGoSettings={onGoSettings}
+          onRetryHost={retryHost}
+          onShowRunEvents={showRunEvents}
+        />
+      ) : null}
 
       {visibleRun ? (
         <section className="detail-section run-focus-panel">
@@ -970,6 +1024,71 @@ interface NextActionProps {
   onGoGit: () => void;
 }
 
+function TaskBlockerPanel({
+  blockers,
+  busy,
+  onGoGit,
+  onGoSettings,
+  onRetryHost,
+  onShowRunEvents,
+}: {
+  blockers: TaskBlocker[];
+  busy: boolean;
+  onGoGit: () => void;
+  onGoSettings: () => void;
+  onRetryHost: (runId: string) => Promise<void>;
+  onShowRunEvents: (runId: string) => Promise<void>;
+}) {
+  return (
+    <section className="detail-section task-blocker-panel" aria-label="현재 blocker">
+      <div className="task-blocker-panel-header">
+        <h3>Blocker</h3>
+        <span>{blockers.length}</span>
+      </div>
+      <ul className="task-blocker-list">
+        {blockers.map((blocker) => (
+          <li className={`task-blocker-card ${blocker.tone}`} key={blocker.id}>
+            <div>
+              <span>{blocker.source} · {blocker.kind}</span>
+              <strong>{blocker.title}</strong>
+              <p>{blocker.reason}</p>
+              <small>{blocker.nextStep}</small>
+            </div>
+            <div className="artifact-actions">
+              {blocker.actions.map((action) => (
+                <button
+                  disabled={busy}
+                  key={`${blocker.id}-${action.kind}-${action.runId ?? "task"}`}
+                  onClick={() => {
+                    if (action.kind === "open_settings") {
+                      onGoSettings();
+                      return;
+                    }
+                    if (action.kind === "open_git") {
+                      onGoGit();
+                      return;
+                    }
+                    if (action.kind === "retry" && action.runId) {
+                      void onRetryHost(action.runId);
+                      return;
+                    }
+                    if (action.kind === "view_events" && action.runId) {
+                      void onShowRunEvents(action.runId);
+                    }
+                  }}
+                  type="button"
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function NextAction({
   busy,
   pendingPlanApproval,
@@ -1226,6 +1345,230 @@ function roleForTaskStatus(status: TaskStatus): RoleId | null {
 
 function isRetryableRunStatus(status: AgentRunSummary["status"]): boolean {
   return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
+}
+
+function taskBlockersFor({
+  activeRoleId,
+  pendingPlanApproval,
+  runnerReadiness,
+  runEvents,
+  runs,
+  task,
+  worktree,
+  worktreeError,
+}: {
+  activeRoleId: RoleId | null;
+  pendingPlanApproval: ApprovalSummary | null;
+  runnerReadiness: ReturnType<typeof runnerReadinessFor> | null;
+  runEvents: Record<string, RunEventSummary[]>;
+  runs: AgentRunSummary[];
+  task: TaskSummary;
+  worktree: TaskWorktreeSummary | null;
+  worktreeError: string | null;
+}): TaskBlocker[] {
+  const blockers: TaskBlocker[] = [];
+
+  if (activeRoleId && !pendingPlanApproval && runnerReadiness && !runnerReadiness.ready) {
+    blockers.push({
+      id: `runner:${activeRoleId}`,
+      source: "runner_check",
+      kind: runnerReadiness.description.includes("인증") ? "auth_required" : "runner_missing",
+      tone: "warning",
+      title: `${roleLabel(activeRoleId)} runner 설정 필요`,
+      reason: runnerReadiness.description,
+      nextStep: "설정 화면에서 연결을 배정하거나 Runner Template을 다시 적용한 뒤 실행을 이어갑니다.",
+      actions: [{ kind: "open_settings", label: "설정 열기" }],
+    });
+  }
+
+  if (!worktree && worktreeError) {
+    blockers.push(worktreeErrorBlocker(worktreeError));
+  }
+
+  const blockedRoles = new Set<string>();
+  for (const run of runs) {
+    if (!isRetryableRunStatus(run.status) || blockedRoles.has(run.roleId)) continue;
+    const blocker = blockerForRun(run, runEvents[run.id] ?? []);
+    if (blocker.kind === "worktree_conflict" && blockers.some((item) => item.kind === "worktree_conflict")) {
+      continue;
+    }
+    blockers.push(blocker);
+    blockedRoles.add(run.roleId);
+  }
+
+  if (task.status === "Blocked" && blockers.length === 0) {
+    blockers.push({
+      id: `task:${task.id}:blocked`,
+      source: "approval",
+      kind: "manual_decision",
+      tone: "warning",
+      title: "사용자 결정 필요",
+      reason: task.statusReason ?? "Task가 Blocked 상태입니다.",
+      nextStep: "타임라인에서 차단 사유를 확인하고 상태를 되돌리거나 계획을 수정합니다.",
+      actions: [],
+    });
+  }
+
+  return blockers.slice(0, 4);
+}
+
+function worktreeErrorBlocker(message: string): TaskBlocker {
+  return {
+    id: "worktree:last-error",
+    source: "worktree",
+    kind: hasWorktreeConflict(message) ? "worktree_conflict" : "launch_failed",
+    tone: "danger",
+    title: hasWorktreeConflict(message) ? "Worktree 경로 충돌" : "Worktree 준비 실패",
+    reason: message,
+    nextStep: hasWorktreeConflict(message)
+      ? "이미 만들어진 작업 디렉터리를 정리하거나 Settings의 worktreeRoot를 다른 위치로 바꾼 뒤 다시 준비합니다."
+      : "Git 상태와 worktree 설정을 확인한 뒤 다시 준비합니다.",
+    actions: [
+      { kind: "open_settings", label: "설정 열기" },
+      { kind: "open_git", label: "Git 보기" },
+    ],
+  };
+}
+
+function blockerForRun(run: AgentRunSummary, events: RunEventSummary[]): TaskBlocker {
+  const evidence = evidenceFromRun(run, events);
+  const baseActions: TaskBlockerAction[] = [
+    { kind: "retry", label: "retry 준비", runId: run.id },
+    { kind: "view_events", label: "events", runId: run.id },
+  ];
+
+  if (run.status === "TimedOut") {
+    return {
+      id: `run:${run.id}:timeout`,
+      source: "agent_run",
+      kind: "timeout",
+      tone: "danger",
+      title: `${roleLabel(run.roleId)} 시간 초과`,
+      reason: evidence || `${roleLabel(run.roleId)} 실행이 제한 시간을 넘겨 TimedOut으로 종료됐습니다.`,
+      nextStep: "마지막 이벤트와 Context Pack을 확인한 뒤 retry 준비로 새 실행을 만듭니다.",
+      actions: baseActions,
+    };
+  }
+
+  if (hasWorktreeConflict(evidence)) {
+    return {
+      id: `run:${run.id}:worktree`,
+      source: "worktree",
+      kind: "worktree_conflict",
+      tone: "danger",
+      title: "Worktree 경로 충돌",
+      reason: evidence,
+      nextStep: "중복된 worktree 경로를 정리하거나 Settings의 worktreeRoot를 바꾼 뒤 다시 시도합니다.",
+      actions: [
+        { kind: "open_settings", label: "설정 열기" },
+        { kind: "open_git", label: "Git 보기" },
+        { kind: "view_events", label: "events", runId: run.id },
+      ],
+    };
+  }
+
+  if (hasAuthProblem(evidence)) {
+    return {
+      id: `run:${run.id}:auth`,
+      source: "runner_check",
+      kind: "auth_required",
+      tone: "warning",
+      title: `${roleLabel(run.roleId)} 인증 필요`,
+      reason: evidence,
+      nextStep: "CLI 로그인, 토큰, provider 설정을 확인한 뒤 retry 준비로 이어갑니다.",
+      actions: [
+        { kind: "open_settings", label: "설정 열기" },
+        { kind: "view_events", label: "events", runId: run.id },
+      ],
+    };
+  }
+
+  if (run.status === "NeedsInspection" && hasSchemaProblem(evidence)) {
+    return {
+      id: `run:${run.id}:schema`,
+      source: "agent_run",
+      kind: "schema_invalid",
+      tone: "warning",
+      title: "결과 스키마 점검 필요",
+      reason: evidence,
+      nextStep: "structured-result.json 형식을 확인하고 runner 출력이 Helm 계약을 지키도록 수정합니다.",
+      actions: baseActions,
+    };
+  }
+
+  if (run.status === "NeedsInspection") {
+    return {
+      id: `run:${run.id}:gate`,
+      source: "agent_run",
+      kind: "gate_failed",
+      tone: "warning",
+      title: `${roleLabel(run.roleId)} gate 점검 필요`,
+      reason: evidence || "실행은 끝났지만 pass로 닫히지 않아 NeedsInspection 상태입니다.",
+      nextStep: "summary와 gate 근거를 확인한 뒤 retry 준비 또는 계획 수정으로 이어갑니다.",
+      actions: baseActions,
+    };
+  }
+
+  if (run.status === "Canceled") {
+    return {
+      id: `run:${run.id}:canceled`,
+      source: "agent_run",
+      kind: "manual_decision",
+      tone: "info",
+      title: `${roleLabel(run.roleId)} 실행 취소됨`,
+      reason: evidence || "사용자 요청이나 외부 중단으로 실행이 Canceled 상태입니다.",
+      nextStep: "다시 진행하려면 retry 준비를 눌러 실행 상태를 갱신합니다.",
+      actions: baseActions,
+    };
+  }
+
+  return {
+    id: `run:${run.id}:failed`,
+    source: "agent_run",
+    kind: "launch_failed",
+    tone: "danger",
+    title: `${roleLabel(run.roleId)} 실행 실패`,
+    reason: evidence || "Host runner가 실패 상태로 종료됐습니다.",
+    nextStep: "stderr/events에서 실패 원인을 확인한 뒤 runner 설정이나 Context Pack을 수정합니다.",
+    actions: baseActions,
+  };
+}
+
+function evidenceFromRun(run: AgentRunSummary, events: RunEventSummary[]): string {
+  const event = [...events]
+    .reverse()
+    .find((item) => item.message.trim() && item.kind !== "status");
+  if (event) return compactEventMessage(event.message);
+  if (run.resultStatus) return `structured result status: ${run.resultStatus}`;
+  return "";
+}
+
+function hasWorktreeConflict(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes("worktree") && (message.includes("이미 존재") || lower.includes("already exists") || lower.includes("path exists"));
+}
+
+function hasAuthProblem(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("auth") ||
+    lower.includes("login") ||
+    lower.includes("unauthorized") ||
+    lower.includes("api key") ||
+    message.includes("로그인") ||
+    message.includes("인증") ||
+    message.includes("토큰")
+  );
+}
+
+function hasSchemaProblem(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("schema") ||
+    lower.includes("structured-result") ||
+    lower.includes("structured result") ||
+    message.includes("스키마")
+  );
 }
 
 function runActivityFor(run: AgentRunSummary, events: RunEventSummary[]): {

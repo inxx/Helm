@@ -1309,6 +1309,109 @@ textarea {
   margin: 0 16px 12px;
 }
 
+.task-blocker-panel {
+  margin: 0 16px 12px;
+}
+
+.task-blocker-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.task-blocker-panel-header h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.task-blocker-panel-header span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.task-blocker-list {
+  display: grid;
+  gap: 7px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.task-blocker-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--amber);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 9px 10px;
+}
+
+.task-blocker-card.danger {
+  border-left-color: var(--red);
+  background: var(--red-weak);
+}
+
+.task-blocker-card.warning {
+  border-left-color: var(--amber);
+  background: var(--amber-weak);
+}
+
+.task-blocker-card.info {
+  border-left-color: var(--slate);
+  background: var(--slate-weak);
+}
+
+.task-blocker-card > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.task-blocker-card span {
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+}
+
+.task-blocker-card strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.task-blocker-card p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.task-blocker-card small {
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
 .run-focus-panel {
   margin: 0 16px 12px;
   border: 1px solid var(--line);
