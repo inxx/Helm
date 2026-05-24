@@ -471,8 +471,7 @@ h3 {
 .form-grid button,
 .role-grid button,
 .artifact-actions button,
-.approval-actions button,
-.segmented button {
+.approval-actions button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -794,35 +793,9 @@ textarea {
   padding: 10px 20px;
 }
 
-.segmented {
-  display: inline-flex;
-  align-self: start;
-  gap: 0;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  padding: 2px;
-  overflow: hidden;
-}
-
-.segmented button {
-  height: 24px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
-  padding: 0 10px;
-  font-size: 12px;
-}
-
-.segmented button.active {
-  background: var(--surface-3);
-  color: var(--text);
-}
-
 .form-grid {
   display: grid;
-  grid-template-columns: minmax(160px, 1.2fr) minmax(160px, 1fr) minmax(180px, 1.4fr) auto;
+  grid-template-columns: minmax(160px, 1.2fr) minmax(220px, 1.8fr) auto;
   gap: 8px;
 }
 

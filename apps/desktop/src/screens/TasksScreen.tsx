@@ -29,10 +29,8 @@ export function TasksScreen({
   onGoSettings,
 }: TasksScreenProps) {
   const { showToast } = useToast();
-  const [mode, setMode] = useState<"new" | "jira">("new");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [externalRef, setExternalRef] = useState("");
   const [busy, setBusy] = useState(false);
 
   if (!snapshot) {
@@ -52,17 +50,6 @@ export function TasksScreen({
     const input: CreateTaskInput = {
       title,
       description,
-      externalRefs:
-        mode === "jira" && externalRef.trim()
-          ? [
-              {
-                refType: externalRef.includes("browse/") || externalRef.startsWith("http")
-                  ? "Url"
-                  : "JiraTask",
-                refValue: externalRef,
-              },
-            ]
-          : [],
     };
     setBusy(true);
     try {
@@ -70,7 +57,6 @@ export function TasksScreen({
       await onRefresh();
       setTitle("");
       setDescription("");
-      setExternalRef("");
       showToast({
         tone: "success",
         title: "태스크 생성 완료",
@@ -98,27 +84,12 @@ export function TasksScreen({
         </div>
 
         <div className="create-panel">
-          <div className="segmented">
-            <button className={mode === "new" ? "active" : ""} onClick={() => setMode("new")} type="button">
-              새 태스크
-            </button>
-            <button className={mode === "jira" ? "active" : ""} onClick={() => setMode("jira")} type="button">
-              Jira에서 시작
-            </button>
-          </div>
           <div className="form-grid">
             <input
               placeholder="태스크 제목"
               value={title}
               onChange={(event) => setTitle(event.target.value)}
             />
-            {mode === "jira" ? (
-              <input
-                placeholder="Jira key 또는 URL"
-                value={externalRef}
-                onChange={(event) => setExternalRef(event.target.value)}
-              />
-            ) : null}
             <input
               placeholder="설명, 기대 결과, acceptance"
               value={description}
