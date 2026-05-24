@@ -3016,7 +3016,9 @@ fn refresh_openai_models() -> ModelRefreshResult {
     else {
         return ModelRefreshResult {
             models: None,
-            message: Some("OPENAI_API_KEY가 없어 모델 목록을 갱신하지 않았습니다.".to_string()),
+            message: Some(
+                "OPENAI_API_KEY가 없어 OpenAI API 모델 조회는 건너뛰었습니다.".to_string(),
+            ),
         };
     };
 
@@ -3054,7 +3056,9 @@ fn refresh_anthropic_models() -> ModelRefreshResult {
     else {
         return ModelRefreshResult {
             models: None,
-            message: Some("ANTHROPIC_API_KEY가 없어 모델 목록을 갱신하지 않았습니다.".to_string()),
+            message: Some(
+                "ANTHROPIC_API_KEY가 없어 Anthropic API 모델 조회는 건너뛰었습니다.".to_string(),
+            ),
         };
     };
 
@@ -3226,48 +3230,69 @@ fn refresh_codex_debug_models(connection: &Value, cwd: &Path) -> ModelRefreshRes
         "models".to_string(),
     ];
     match run_direct_command_with_timeout(cwd, &command, Duration::from_secs(10)) {
-        Ok(output) if output.exit_code == 0 && !output.timed_out => {
-            let raw_output = format!("{}\n{}", output.stdout, output.stderr);
-            match parse_json_value_from_output(&raw_output) {
-                Ok(value) => {
-                    let models = codex_debug_model_ids(&value);
-                    if models.is_empty() {
-                        ModelRefreshResult {
-                            models: None,
-                            message: Some(
-                                "Codex debug models에서 list 모델을 찾지 못했습니다.".to_string(),
-                            ),
-                        }
-                    } else {
-                        ModelRefreshResult {
-                            message: Some(format!(
-                                "Codex debug models에서 모델 {}개를 갱신했습니다.",
-                                models.len()
-                            )),
-                            models: Some(models),
-                        }
-                    }
-                }
-                Err(err) => ModelRefreshResult {
-                    models: None,
-                    message: Some(format!(
-                        "Codex debug models JSON 파싱 실패: {err}. {}",
-                        compact_output_excerpt(&strip_terminal_controls(&raw_output))
-                    )),
-                },
-            }
-        }
-        Ok(output) => ModelRefreshResult {
-            models: None,
-            message: Some(format!(
-                "Codex debug models 실행 실패: {}",
-                command_output_message(&output)
-            )),
-        },
+        Ok(output) => codex_debug_models_from_output(&output),
         Err(err) => ModelRefreshResult {
             models: None,
             message: Some(format!("Codex debug models 실행 실패: {}", err.message)),
         },
+    }
+}
+
+fn codex_debug_models_from_output(output: &ShellOutput) -> ModelRefreshResult {
+    let raw_output = format!("{}\n{}", output.stdout, output.stderr);
+    if !output.timed_out {
+        match parse_json_value_from_output(&raw_output) {
+            Ok(value) => {
+                let mut models = codex_debug_model_ids(&value);
+                if models.is_empty() {
+                    models = codex_debug_model_ids_from_text(&raw_output);
+                }
+                if !models.is_empty() {
+                    return codex_debug_models_success(models);
+                }
+                if output.exit_code == 0 {
+                    return ModelRefreshResult {
+                        models: None,
+                        message: Some(
+                            "Codex debug models에서 list 모델을 찾지 못했습니다.".to_string(),
+                        ),
+                    };
+                }
+            }
+            Err(err) => {
+                let models = codex_debug_model_ids_from_text(&raw_output);
+                if !models.is_empty() {
+                    return codex_debug_models_success(models);
+                }
+                if output.exit_code == 0 {
+                    return ModelRefreshResult {
+                        models: None,
+                        message: Some(format!(
+                            "Codex debug models JSON 파싱 실패: {err}. {}",
+                            codex_debug_failure_excerpt(&raw_output)
+                        )),
+                    };
+                }
+            }
+        }
+    }
+
+    ModelRefreshResult {
+        models: None,
+        message: Some(format!(
+            "Codex debug models 실행 실패: {}",
+            codex_debug_failure_excerpt(&raw_output)
+        )),
+    }
+}
+
+fn codex_debug_models_success(models: Vec<String>) -> ModelRefreshResult {
+    ModelRefreshResult {
+        message: Some(format!(
+            "Codex debug models에서 모델 {}개를 갱신했습니다.",
+            models.len()
+        )),
+        models: Some(models),
     }
 }
 
@@ -3285,6 +3310,79 @@ fn codex_debug_model_ids(value: &Value) -> Vec<String> {
     models.sort();
     models.dedup();
     models
+}
+
+fn codex_debug_model_ids_from_text(output: &str) -> Vec<String> {
+    let text = strip_terminal_controls(output);
+    let mut models = Vec::new();
+    let mut search_start = 0;
+    let slug_key = "\"slug\"";
+
+    while let Some(relative_start) = text[search_start..].find(slug_key) {
+        let start = search_start + relative_start;
+        let after_slug_key = start + slug_key.len();
+        let next_start = text[after_slug_key..]
+            .find(slug_key)
+            .map(|relative| after_slug_key + relative)
+            .unwrap_or(text.len());
+        let segment = &text[start..next_start];
+
+        if json_string_property(segment, "visibility").as_deref() == Some("list") {
+            if let Some(slug) = json_string_property(segment, "slug") {
+                if is_openai_agent_model(&slug) {
+                    models.push(slug);
+                }
+            }
+        }
+
+        if next_start == text.len() {
+            break;
+        }
+        search_start = next_start;
+    }
+
+    models.sort();
+    models.dedup();
+    models
+}
+
+fn json_string_property(segment: &str, property: &str) -> Option<String> {
+    let key = format!("\"{property}\"");
+    let key_start = segment.find(&key)?;
+    let after_key = &segment[key_start + key.len()..];
+    let colon = after_key.find(':')?;
+    let value = after_key[colon + 1..].trim_start();
+    if !value.starts_with('"') {
+        return None;
+    }
+
+    let mut escaped = false;
+    for (offset, ch) in value[1..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            return serde_json::from_str(&value[..offset + 2]).ok();
+        }
+    }
+
+    None
+}
+
+fn codex_debug_failure_excerpt(raw_output: &str) -> String {
+    let text = strip_terminal_controls(raw_output);
+    if text.contains("\"models\"") {
+        if text.contains("[output truncated]") {
+            return "출력이 너무 커 일부가 잘렸고 모델 후보를 찾지 못했습니다.".to_string();
+        }
+        return "모델 JSON 출력에서 모델 후보를 찾지 못했습니다.".to_string();
+    }
+    compact_output_excerpt(&text)
 }
 
 fn parse_json_value_from_output(output: &str) -> Result<Value, String> {
@@ -4280,37 +4378,41 @@ fn run_direct_command_with_timeout(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| CommandError::io("planner command를 실행하지 못했습니다.", err))?;
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(spawn_output_reader)
+        .ok_or_else(|| CommandError::validation("planner command stdout을 열지 못했습니다."))?;
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(spawn_output_reader)
+        .ok_or_else(|| CommandError::validation("planner command stderr를 열지 못했습니다."))?;
     let deadline = Instant::now() + timeout;
 
     loop {
-        if child
+        if let Some(status) = child
             .try_wait()
             .map_err(|err| CommandError::io("planner command 상태를 확인하지 못했습니다.", err))?
-            .is_some()
         {
-            let output = child
-                .wait_with_output()
-                .map_err(|err| CommandError::io("planner command 출력을 읽지 못했습니다.", err))?;
-            return Ok(ShellOutput {
-                stdout: truncate_output(String::from_utf8_lossy(&output.stdout).to_string()),
-                stderr: truncate_output(String::from_utf8_lossy(&output.stderr).to_string()),
-                exit_code: output.status.code().unwrap_or(-1),
-                timed_out: false,
-                elapsed_ms: elapsed_millis(started_at),
-            });
+            return Ok(shell_output_from_readers(
+                stdout_reader,
+                stderr_reader,
+                status.code().unwrap_or(-1),
+                false,
+                started_at,
+            ));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let output = child.wait_with_output().map_err(|err| {
-                CommandError::io("timeout 된 planner command 출력을 읽지 못했습니다.", err)
-            })?;
-            return Ok(ShellOutput {
-                stdout: truncate_output(String::from_utf8_lossy(&output.stdout).to_string()),
-                stderr: truncate_output(String::from_utf8_lossy(&output.stderr).to_string()),
-                exit_code: -1,
-                timed_out: true,
-                elapsed_ms: elapsed_millis(started_at),
-            });
+            let _ = child.wait();
+            return Ok(shell_output_from_readers(
+                stdout_reader,
+                stderr_reader,
+                -1,
+                true,
+                started_at,
+            ));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -4329,39 +4431,72 @@ fn run_shell_command(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| CommandError::io("터미널 명령을 실행하지 못했습니다.", err))?;
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(spawn_output_reader)
+        .ok_or_else(|| CommandError::validation("터미널 명령 stdout을 열지 못했습니다."))?;
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(spawn_output_reader)
+        .ok_or_else(|| CommandError::validation("터미널 명령 stderr를 열지 못했습니다."))?;
     let deadline = Instant::now() + timeout;
 
     loop {
-        if child
+        if let Some(status) = child
             .try_wait()
             .map_err(|err| CommandError::io("터미널 명령 상태를 확인하지 못했습니다.", err))?
-            .is_some()
         {
-            let output = child
-                .wait_with_output()
-                .map_err(|err| CommandError::io("터미널 출력을 읽지 못했습니다.", err))?;
-            return Ok(ShellOutput {
-                stdout: truncate_output(String::from_utf8_lossy(&output.stdout).to_string()),
-                stderr: truncate_output(String::from_utf8_lossy(&output.stderr).to_string()),
-                exit_code: output.status.code().unwrap_or(-1),
-                timed_out: false,
-                elapsed_ms: elapsed_millis(started_at),
-            });
+            return Ok(shell_output_from_readers(
+                stdout_reader,
+                stderr_reader,
+                status.code().unwrap_or(-1),
+                false,
+                started_at,
+            ));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let output = child.wait_with_output().map_err(|err| {
-                CommandError::io("timeout 된 터미널 출력을 읽지 못했습니다.", err)
-            })?;
-            return Ok(ShellOutput {
-                stdout: truncate_output(String::from_utf8_lossy(&output.stdout).to_string()),
-                stderr: truncate_output(String::from_utf8_lossy(&output.stderr).to_string()),
-                exit_code: -1,
-                timed_out: true,
-                elapsed_ms: elapsed_millis(started_at),
-            });
+            let _ = child.wait();
+            return Ok(shell_output_from_readers(
+                stdout_reader,
+                stderr_reader,
+                -1,
+                true,
+                started_at,
+            ));
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn spawn_output_reader<R>(mut reader: R) -> std::thread::JoinHandle<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let _ = reader.read_to_end(&mut output);
+        output
+    })
+}
+
+fn shell_output_from_readers(
+    stdout_reader: std::thread::JoinHandle<Vec<u8>>,
+    stderr_reader: std::thread::JoinHandle<Vec<u8>>,
+    exit_code: i32,
+    timed_out: bool,
+    started_at: Instant,
+) -> ShellOutput {
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    ShellOutput {
+        stdout: truncate_output(String::from_utf8_lossy(&stdout).to_string()),
+        stderr: truncate_output(String::from_utf8_lossy(&stderr).to_string()),
+        exit_code,
+        timed_out,
+        elapsed_ms: elapsed_millis(started_at),
     }
 }
 
@@ -4406,6 +4541,67 @@ fn truncate_output(value: String) -> String {
     truncated.truncate(MAX_OUTPUT_BYTES);
     truncated.push_str("\n\n[output truncated]");
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shell_output(stdout: &str, stderr: &str, exit_code: i32) -> ShellOutput {
+        ShellOutput {
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            exit_code,
+            timed_out: false,
+            elapsed_ms: 12,
+        }
+    }
+
+    #[test]
+    fn codex_debug_models_reads_models_from_nonzero_output() {
+        let output = shell_output(
+            r#"{"models":[{"slug":"gpt-5.5","visibility":"list"},{"slug":"gpt-hidden","visibility":"hidden"},{"slug":"sora-1","visibility":"list"}]}"#,
+            "",
+            1,
+        );
+
+        let result = codex_debug_models_from_output(&output);
+
+        assert_eq!(result.models, Some(vec!["gpt-5.5".to_string()]));
+        assert_eq!(
+            result.message.as_deref(),
+            Some("Codex debug models에서 모델 1개를 갱신했습니다.")
+        );
+    }
+
+    #[test]
+    fn codex_debug_models_reads_models_with_cli_warning() {
+        let output = shell_output(
+            r#"{"models":[{"slug":"gpt-5.4","visibility":"list"},{"slug":"o4-mini","visibility":"list"}]}"#,
+            "WARNING: proceeding, even though we could not update PATH",
+            1,
+        );
+
+        let result = codex_debug_models_from_output(&output);
+
+        assert_eq!(
+            result.models,
+            Some(vec!["gpt-5.4".to_string(), "o4-mini".to_string()])
+        );
+    }
+
+    #[test]
+    fn codex_debug_models_reads_models_from_truncated_json_text() {
+        let output = shell_output(
+            r#"{"models":[{"slug":"gpt-hidden","visibility":"hidden"},{"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list","base_instructions":"very long text"#,
+            "\n[output truncated]",
+            1,
+        );
+
+        let result = codex_debug_models_from_output(&output);
+
+        assert_eq!(result.models, Some(vec!["gpt-5.5".to_string()]));
+    }
 }
 
 fn main() {
