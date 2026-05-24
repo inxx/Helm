@@ -75,6 +75,22 @@ pub struct EffectiveSettings {
     pub artifact_retention_days: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub version: u32,
+    pub orchestrator: OrchestratorSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorSettings {
+    pub enabled: bool,
+    pub mode: String,
+    pub connection: Option<Value>,
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerTemplateSummary {

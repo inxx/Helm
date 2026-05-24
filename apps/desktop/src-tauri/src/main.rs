@@ -3,13 +3,13 @@ mod git;
 mod models;
 
 use crate::models::{
-    AgentRunSummary, AiConnectionCheckResult, AiModelRefreshResult, ApprovalSummary, CommandError,
-    CommandResult, CreateEpicInput, CreateTaskInput, EffectiveSettings, EpicSummary,
+    AgentRunSummary, AiConnectionCheckResult, AiModelRefreshResult, AppSettings, ApprovalSummary,
+    CommandError, CommandResult, CreateEpicInput, CreateTaskInput, EffectiveSettings, EpicSummary,
     GitBranchSummary, GitCommitSummary, GitFileStatus, GitRepositoryState, NodeRuntimeSummary,
-    PlannerConversationInput, PlannerConversationResult, ProjectContext, ProjectSettingsPatch,
-    ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult, RunnerTemplateSummary,
-    TaskSummary, TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult,
-    TerminalDirectoryEntry,
+    OrchestratorSettings, PlannerConversationInput, PlannerConversationResult, ProjectContext,
+    ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult,
+    RunnerTemplateSummary, TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
+    TerminalCommandResult, TerminalDirectoryEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -269,6 +269,18 @@ fn get_launch_state(state: State<'_, AppState>, app: AppHandle) -> CommandResult
 }
 
 #[tauri::command]
+fn get_app_settings(app: AppHandle) -> CommandResult<AppSettings> {
+    load_app_settings(&app)
+}
+
+#[tauri::command]
+fn update_app_settings(settings: AppSettings, app: AppHandle) -> CommandResult<AppSettings> {
+    let settings = normalize_app_settings(settings);
+    save_app_settings(&app, &settings)?;
+    Ok(settings)
+}
+
+#[tauri::command]
 fn get_project_snapshot(
     project_id: String,
     state: State<'_, AppState>,
@@ -463,12 +475,28 @@ fn check_ai_connection(
     state: State<'_, AppState>,
 ) -> CommandResult<AiConnectionCheckResult> {
     let context = project_context(&state, &project_id)?;
+    check_connection_with_cwd(connection, &context.root_path)
+}
+
+#[tauri::command]
+fn check_orchestrator_connection(
+    connection: Value,
+    app: AppHandle,
+) -> CommandResult<AiConnectionCheckResult> {
+    let cwd = app_settings_cwd(&app)?;
+    check_connection_with_cwd(connection, &cwd)
+}
+
+fn check_connection_with_cwd(
+    connection: Value,
+    cwd: &Path,
+) -> CommandResult<AiConnectionCheckResult> {
     let connection_id = connection
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
-    let command = connection_command_for_check(&connection, &context.root_path)?;
+    let command = connection_command_for_check(&connection, cwd)?;
     if command.is_empty() {
         return Ok(AiConnectionCheckResult {
             connection_id,
@@ -481,8 +509,7 @@ fn check_ai_connection(
     }
 
     let timeout = connection_check_timeout_seconds(&connection);
-    let check =
-        run_direct_command_with_timeout(&context.root_path, &command, Duration::from_secs(timeout));
+    let check = run_direct_command_with_timeout(cwd, &command, Duration::from_secs(timeout));
 
     match check {
         Ok(output) if output.exit_code == 0 && !output.timed_out => {
@@ -506,7 +533,7 @@ fn check_ai_connection(
                     model_refresh_message: None,
                 });
             }
-            let model_refresh = refresh_available_models(&connection, &context.root_path);
+            let model_refresh = refresh_available_models(&connection, cwd);
             Ok(AiConnectionCheckResult {
                 connection_id,
                 available: true,
@@ -559,12 +586,28 @@ fn refresh_ai_connection_models(
     state: State<'_, AppState>,
 ) -> CommandResult<AiModelRefreshResult> {
     let context = project_context(&state, &project_id)?;
+    refresh_connection_models_with_cwd(connection, &context.root_path)
+}
+
+#[tauri::command]
+fn refresh_orchestrator_connection_models(
+    connection: Value,
+    app: AppHandle,
+) -> CommandResult<AiModelRefreshResult> {
+    let cwd = app_settings_cwd(&app)?;
+    refresh_connection_models_with_cwd(connection, &cwd)
+}
+
+fn refresh_connection_models_with_cwd(
+    connection: Value,
+    cwd: &Path,
+) -> CommandResult<AiModelRefreshResult> {
     let connection_id = connection
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
-    let refresh = refresh_available_models(&connection, &context.root_path);
+    let refresh = refresh_available_models(&connection, cwd);
 
     Ok(AiModelRefreshResult {
         connection_id,
@@ -1296,24 +1339,12 @@ fn conductor_allows_queued_run_result(
 ) -> CommandResult<bool> {
     let mut conn = db::open_existing_db(&context.db_path)?;
     let settings = db::effective_settings(&conn, project_id)?;
-    let Some(config) = active_conductor_config(&settings) else {
+    let Some(orchestrator) = active_orchestrator_runtime(app, &settings)? else {
         return Ok(true);
     };
-    let Some(connection_id) = conductor_connection_id(config) else {
-        return Ok(true);
-    };
-    let Some(connection) = find_ai_connection(&settings, connection_id) else {
-        append_and_emit_system_run_event(
-            app,
-            &conn,
-            project_id,
-            &run.task_id,
-            &run.id,
-            "Conductor connection missing",
-            json!({ "connectionId": connection_id }),
-        );
-        return Ok(true);
-    };
+    let config = &orchestrator.config;
+    let connection = &orchestrator.connection;
+    let connection_id = orchestrator.connection_id.as_str();
     let connection_label = connection
         .get("label")
         .and_then(Value::as_str)
@@ -1331,6 +1362,7 @@ fn conductor_allows_queued_run_result(
             "connectionId": connection_id,
             "label": connection_label,
             "mode": mode,
+            "source": orchestrator.source,
             "roleId": run.role_id
         }),
     );
@@ -1422,6 +1454,78 @@ fn append_and_emit_system_run_event(
     }
 }
 
+struct OrchestratorRuntime {
+    config: Value,
+    connection: Value,
+    connection_id: String,
+    source: &'static str,
+}
+
+fn active_orchestrator_runtime(
+    app: &AppHandle,
+    project_settings: &EffectiveSettings,
+) -> CommandResult<Option<OrchestratorRuntime>> {
+    let app_settings = load_app_settings(app)?;
+    if let Some(runtime) = global_orchestrator_runtime(&app_settings) {
+        return Ok(Some(runtime));
+    }
+    if app_orchestrator_is_configured(&app_settings) {
+        return Ok(None);
+    }
+    Ok(legacy_project_conductor_runtime(project_settings))
+}
+
+fn global_orchestrator_runtime(settings: &AppSettings) -> Option<OrchestratorRuntime> {
+    let orchestrator = &settings.orchestrator;
+    if !orchestrator.enabled {
+        return None;
+    }
+    let connection = orchestrator.connection.as_ref()?.clone();
+    if connection.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let connection_id = connection
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("global-orchestrator")
+        .to_string();
+    Some(OrchestratorRuntime {
+        config: json!({
+            "enabled": true,
+            "connectionId": connection_id.clone(),
+            "model": orchestrator.model.clone(),
+            "mode": conductor_mode_from_raw(&orchestrator.mode)
+        }),
+        connection,
+        connection_id,
+        source: "global",
+    })
+}
+
+fn legacy_project_conductor_runtime(settings: &EffectiveSettings) -> Option<OrchestratorRuntime> {
+    let config = active_conductor_config(settings)?.clone();
+    let connection_id = conductor_connection_id(&config)?.to_string();
+    let connection = find_ai_connection(settings, &connection_id)?.clone();
+    Some(OrchestratorRuntime {
+        config,
+        connection,
+        connection_id,
+        source: "project-legacy",
+    })
+}
+
+fn app_orchestrator_is_configured(settings: &AppSettings) -> bool {
+    let orchestrator = &settings.orchestrator;
+    orchestrator.connection.is_some()
+        || orchestrator.enabled
+        || orchestrator
+            .model
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || conductor_mode_from_raw(&orchestrator.mode) != "observe"
+}
+
 fn active_conductor_config(settings: &EffectiveSettings) -> Option<&Value> {
     let config = settings.conductor_config.as_ref()?;
     if config.get("enabled").and_then(Value::as_bool) == Some(true) {
@@ -1439,8 +1543,17 @@ fn conductor_connection_id(config: &Value) -> Option<&str> {
 }
 
 fn conductor_mode(config: &Value) -> &str {
-    match config.get("mode").and_then(Value::as_str) {
-        Some("gate") => "gate",
+    conductor_mode_from_raw(
+        config
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("observe"),
+    )
+}
+
+fn conductor_mode_from_raw(mode: &str) -> &str {
+    match mode {
+        "gate" => "gate",
         _ => "observe",
     }
 }
@@ -1863,6 +1976,79 @@ fn launch_state_path(app: &AppHandle) -> CommandResult<PathBuf> {
     fs::create_dir_all(&dir)
         .map_err(|err| CommandError::io("Helm 전역 상태 폴더를 만들지 못했습니다.", err))?;
     Ok(dir.join("launch-state.json"))
+}
+
+fn load_app_settings(app: &AppHandle) -> CommandResult<AppSettings> {
+    let path = app_settings_path(app)?;
+    if !path.exists() {
+        return Ok(default_app_settings());
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| CommandError::io("Helm 전역 설정을 읽지 못했습니다.", err))?;
+    let parsed = serde_json::from_str(&raw).unwrap_or_else(|_| default_app_settings());
+    Ok(normalize_app_settings(parsed))
+}
+
+fn save_app_settings(app: &AppHandle, settings: &AppSettings) -> CommandResult<()> {
+    let path = app_settings_path(app)?;
+    let raw = serde_json::to_string_pretty(settings)
+        .map_err(|err| CommandError::io("Helm 전역 설정을 만들지 못했습니다.", err))?;
+    fs::write(path, format!("{raw}\n"))
+        .map_err(|err| CommandError::io("Helm 전역 설정을 저장하지 못했습니다.", err))
+}
+
+fn app_settings_path(app: &AppHandle) -> CommandResult<PathBuf> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| CommandError::io("Helm 전역 상태 경로를 찾지 못했습니다.", err))?;
+    fs::create_dir_all(&dir)
+        .map_err(|err| CommandError::io("Helm 전역 상태 폴더를 만들지 못했습니다.", err))?;
+    Ok(dir.join("app-settings.json"))
+}
+
+fn app_settings_cwd(app: &AppHandle) -> CommandResult<PathBuf> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| CommandError::io("Helm 전역 상태 경로를 찾지 못했습니다.", err))?;
+    fs::create_dir_all(&dir)
+        .map_err(|err| CommandError::io("Helm 전역 상태 폴더를 만들지 못했습니다.", err))?;
+    Ok(dir)
+}
+
+fn default_app_settings() -> AppSettings {
+    AppSettings {
+        version: 1,
+        orchestrator: OrchestratorSettings {
+            enabled: false,
+            mode: "observe".to_string(),
+            connection: None,
+            model: None,
+        },
+    }
+}
+
+fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
+    settings.version = 1;
+    settings.orchestrator.mode = match settings.orchestrator.mode.as_str() {
+        "gate" => "gate".to_string(),
+        _ => "observe".to_string(),
+    };
+    settings.orchestrator.model = settings
+        .orchestrator
+        .model
+        .and_then(|value| non_empty_string(&value));
+    settings
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 struct RunnerTemplate {
@@ -4178,6 +4364,8 @@ fn main() {
             open_project,
             open_project_by_id,
             forget_project,
+            get_app_settings,
+            update_app_settings,
             get_project_snapshot,
             get_effective_settings,
             update_project_settings,
@@ -4186,7 +4374,9 @@ fn main() {
             apply_runner_template,
             check_role_runner,
             check_ai_connection,
+            check_orchestrator_connection,
             refresh_ai_connection_models,
+            refresh_orchestrator_connection_models,
             list_epics,
             create_epic,
             list_tasks,

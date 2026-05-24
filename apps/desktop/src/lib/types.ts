@@ -40,6 +40,18 @@ export interface LaunchState {
   restoreError: CommandError | null;
 }
 
+export interface AppSettings {
+  version: number;
+  orchestrator: OrchestratorSettings;
+}
+
+export interface OrchestratorSettings {
+  enabled: boolean;
+  mode: "observe" | "gate" | string;
+  connection: AiConnection | null;
+  model?: string | null;
+}
+
 export interface EffectiveSettings {
   rolePresets: unknown;
   aiConnections: AiConnection[];

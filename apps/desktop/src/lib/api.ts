@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentRunSummary,
+  AppSettings,
   AiConnection,
   AiConnectionCheckResult,
   AiModelRefreshResult,
@@ -31,6 +32,12 @@ import type {
 export const api = {
   getLaunchState() {
     return invoke<LaunchState>("get_launch_state");
+  },
+  getAppSettings() {
+    return invoke<AppSettings>("get_app_settings");
+  },
+  updateAppSettings(settings: AppSettings) {
+    return invoke<AppSettings>("update_app_settings", { settings });
   },
   openProject(path: string, options: { reconcileStaleRuns?: boolean } = {}) {
     return invoke<ProjectSnapshot>("open_project", {
@@ -74,8 +81,14 @@ export const api = {
   checkAiConnection(projectId: string, connection: AiConnection) {
     return invoke<AiConnectionCheckResult>("check_ai_connection", { projectId, connection });
   },
+  checkOrchestratorConnection(connection: AiConnection) {
+    return invoke<AiConnectionCheckResult>("check_orchestrator_connection", { connection });
+  },
   refreshAiConnectionModels(projectId: string, connection: AiConnection) {
     return invoke<AiModelRefreshResult>("refresh_ai_connection_models", { projectId, connection });
+  },
+  refreshOrchestratorConnectionModels(connection: AiConnection) {
+    return invoke<AiModelRefreshResult>("refresh_orchestrator_connection_models", { connection });
   },
   updateTaskStatus(
     projectId: string,

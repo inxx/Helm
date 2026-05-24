@@ -1,4 +1,16 @@
-import { CheckCircle2, Download, FolderTree, Info, Layers, Loader2, Plug, RefreshCw, Workflow, Wrench } from "lucide-react";
+import {
+  BrainCircuit,
+  CheckCircle2,
+  Download,
+  FolderTree,
+  Info,
+  Layers,
+  Loader2,
+  Plug,
+  RefreshCw,
+  Workflow,
+  Wrench,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
@@ -7,8 +19,10 @@ import { checkForManualUpdate, type ManualUpdateInfo } from "../lib/updater";
 import type {
   AiConnection,
   AiConnectionCheckResult,
+  AppSettings,
   ConductorConfig,
   JiraConfig,
+  OrchestratorSettings,
   ProjectSnapshot,
   RoleAssignment,
   RunnerCheckResult,
@@ -21,7 +35,15 @@ interface SettingsScreenProps {
   onOpenProject: () => void;
 }
 
-type SettingsCategory = "templates" | "connections" | "assignments" | "jira" | "worktree" | "app" | "advanced";
+type SettingsCategory =
+  | "orchestrator"
+  | "templates"
+  | "connections"
+  | "assignments"
+  | "jira"
+  | "worktree"
+  | "app"
+  | "advanced";
 
 const CATEGORIES: Array<{
   id: SettingsCategory;
@@ -29,6 +51,7 @@ const CATEGORIES: Array<{
   hint: string;
   icon: typeof Layers;
 }> = [
+  { id: "orchestrator", label: "오케스트레이터", hint: "모든 프로젝트에 적용되는 지휘자 AI", icon: BrainCircuit },
   { id: "templates", label: "Runner Templates", hint: "역할 프리셋과 AI CLI 연결을 한 번에 적용", icon: Layers },
   { id: "connections", label: "AI CLI 연결", hint: "Codex · Claude Code · 기타 LLM 경로", icon: Plug },
   { id: "assignments", label: "작업별 CLI 선택", hint: "계획 · 구현 · 검수 · 테스트 매핑", icon: Workflow },
@@ -56,7 +79,13 @@ type ModelRefreshState = { busy: boolean; tone: MessageTone; message: string };
 
 export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsScreenProps) {
   const { showToast } = useToast();
-  const [activeCategory, setActiveCategory] = useState<SettingsCategory>("templates");
+  const [activeCategory, setActiveCategory] = useState<SettingsCategory>("orchestrator");
+  const [appSettings, setAppSettings] = useState<AppSettings>(() => emptyAppSettings());
+  const [appSettingsBusy, setAppSettingsBusy] = useState(false);
+  const [appSettingsLoaded, setAppSettingsLoaded] = useState(false);
+  const [orchestratorCheck, setOrchestratorCheck] = useState<AiConnectionCheckResult | null>(null);
+  const [orchestratorCheckBusy, setOrchestratorCheckBusy] = useState(false);
+  const [orchestratorModelRefresh, setOrchestratorModelRefresh] = useState<ModelRefreshState | null>(null);
   const [rolePresets, setRolePresets] = useState("");
   const [worktreeRoot, setWorktreeRoot] = useState("");
   const [templates, setTemplates] = useState<RunnerTemplateSummary[]>([]);
@@ -74,6 +103,35 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const [pendingUpdate, setPendingUpdate] = useState<ManualUpdateInfo | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+    async function loadAppSettings() {
+      try {
+        const settings = await api.getAppSettings();
+        if (!cancelled) {
+          setAppSettings(normalizeAppSettings(settings));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          showToast({
+            tone: "error",
+            title: "전역 설정 로드 실패",
+            description: errorMessage(error, "전역 설정을 읽지 못했습니다."),
+          });
+        }
+      } finally {
+        if (!cancelled) {
+          setAppSettingsLoaded(true);
+        }
+      }
+    }
+
+    void loadAppSettings();
+    return () => {
+      cancelled = true;
+    };
+  }, [showToast]);
+
+  useEffect(() => {
     if (!snapshot) return;
     setRolePresets(JSON.stringify(snapshot.settings.rolePresets, null, 2));
     setAiConnections(normalizeAiConnections(snapshot.settings.aiConnections));
@@ -88,13 +146,20 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     setModelRefreshes({});
   }, [snapshot]);
 
+  const visibleCategories = useMemo(
+    () => (snapshot ? CATEGORIES : CATEGORIES.filter((category) => category.id === "orchestrator" || category.id === "app")),
+    [snapshot],
+  );
+
+  useEffect(() => {
+    if (!visibleCategories.some((category) => category.id === activeCategory)) {
+      setActiveCategory("orchestrator");
+    }
+  }, [activeCategory, visibleCategories]);
+
   const enabledConnections = useMemo(
     () => aiConnections.filter((connection) => connection.enabled),
     [aiConnections],
-  );
-  const conductorConnection = useMemo(
-    () => aiConnections.find((connection) => connection.id === conductorConfig.connectionId) ?? null,
-    [aiConnections, conductorConfig.connectionId],
   );
   const parsedRolePresets = useMemo(() => parseRolePresets(rolePresets), [rolePresets]);
   const runnerOnboarding = useMemo(() => {
@@ -104,13 +169,12 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
       rolePresets: parsedRolePresets ?? snapshot.settings.rolePresets,
       aiConnections,
       roleAssignments: normalizeRoleAssignments(roleAssignments),
-      conductorConfig: normalizeConductorConfig(conductorConfig),
     };
     return ROLE_DEFINITIONS.map((role) => ({
       ...role,
       readiness: runnerReadinessFor(effectiveSettings, role.roleId),
     }));
-  }, [aiConnections, conductorConfig, parsedRolePresets, roleAssignments, snapshot]);
+  }, [aiConnections, parsedRolePresets, roleAssignments, snapshot]);
   const readyRunnerCount = runnerOnboarding.filter((item) => item.readiness.ready).length;
 
   async function save() {
@@ -122,7 +186,6 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         rolePresets: parsedRolePresets,
         aiConnections,
         roleAssignments: normalizeRoleAssignments(roleAssignments),
-        conductorConfig: normalizeConductorConfig(conductorConfig),
         worktreeRoot: worktreeRoot.trim() ? worktreeRoot.trim() : null,
         jiraConfig: normalizeJiraConfig(jiraConfig),
       });
@@ -141,6 +204,35 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     } finally {
       setBusy(false);
     }
+  }
+
+  async function saveAppSettings() {
+    setAppSettingsBusy(true);
+    try {
+      const saved = await api.updateAppSettings(normalizeAppSettings(appSettings));
+      setAppSettings(normalizeAppSettings(saved));
+      showToast({
+        tone: "success",
+        title: "전역 오케스트레이터 저장 완료",
+        description: "모든 프로젝트에 적용될 지휘자 AI 설정을 저장했습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "전역 설정 저장 실패",
+        description: errorMessage(error, "전역 설정 저장에 실패했습니다."),
+      });
+    } finally {
+      setAppSettingsBusy(false);
+    }
+  }
+
+  async function saveActiveSettings() {
+    if (activeCategory === "orchestrator") {
+      await saveAppSettings();
+      return;
+    }
+    await save();
   }
 
   async function applyTemplate(templateId: string) {
@@ -218,6 +310,40 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     }
   }
 
+  async function refreshOrchestratorModels(options: { silent?: boolean } = {}) {
+    const connection = appSettings.orchestrator.connection;
+    if (!connection || !canRefreshModels(connection.provider)) return;
+    setOrchestratorModelRefresh({ busy: true, tone: "info", message: "모델 목록 확인 중..." });
+    try {
+      const result = await api.refreshOrchestratorConnectionModels(connection);
+      const models = result.availableModels ?? [];
+      if (models.length) {
+        updateOrchestratorConnection({
+          availableModels: mergeModelLists(connection.provider, connection.availableModels ?? [], models),
+        });
+      }
+      const tone: MessageTone = models.length ? "success" : "info";
+      setOrchestratorModelRefresh({ busy: false, tone, message: result.message });
+      if (!options.silent) {
+        showToast({
+          tone,
+          title: models.length ? "모델 목록 확인 완료" : "모델 목록 확인 결과",
+          description: result.message,
+        });
+      }
+    } catch (error) {
+      const text = errorMessage(error, "모델 목록을 불러오지 못했습니다.");
+      setOrchestratorModelRefresh({ busy: false, tone: "error", message: text });
+      if (!options.silent) {
+        showToast({
+          tone: "error",
+          title: "모델 목록 확인 실패",
+          description: text,
+        });
+      }
+    }
+  }
+
   async function checkConnection(connection: AiConnection) {
     if (!snapshot) return;
     if (connectionCheckBusyId) return;
@@ -264,6 +390,45 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
       });
     } finally {
       setConnectionCheckBusyId(null);
+    }
+  }
+
+  async function checkOrchestratorConnection() {
+    const connection = appSettings.orchestrator.connection;
+    if (!connection || orchestratorCheckBusy) return;
+    setOrchestratorCheckBusy(true);
+    try {
+      const result = await api.checkOrchestratorConnection(connection);
+      setOrchestratorCheck(result);
+      if (result.availableModels?.length) {
+        updateOrchestratorConnection({
+          availableModels: mergeModelLists(
+            connection.provider,
+            connection.availableModels ?? [],
+            result.availableModels ?? [],
+          ),
+        });
+      }
+      if (result.modelRefreshMessage) {
+        setOrchestratorModelRefresh({
+          busy: false,
+          tone: result.availableModels?.length ? "success" : "info",
+          message: result.modelRefreshMessage,
+        });
+      }
+      showToast({
+        tone: result.available ? "success" : "error",
+        title: result.available ? "오케스트레이터 연동 확인 완료" : "오케스트레이터 연동 확인 실패",
+        description: result.available ? "AI CLI smoke 실행을 확인했습니다." : result.message || "AI CLI 실행 확인 실패",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "오케스트레이터 연동 확인 실패",
+        description: errorMessage(error, "AI CLI 확인에 실패했습니다."),
+      });
+    } finally {
+      setOrchestratorCheckBusy(false);
     }
   }
 
@@ -366,6 +531,91 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     });
   }
 
+  function setOrchestratorConnectionProvider(provider: "codex" | "claude" | "custom") {
+    const connection =
+      provider === "codex"
+        ? codexConnection()
+        : provider === "claude"
+          ? claudeConnection()
+          : customConnection("orchestrator-custom");
+    setAppSettings((current) =>
+      normalizeAppSettings({
+        ...current,
+        orchestrator: {
+          ...current.orchestrator,
+          enabled: true,
+          connection,
+          model: connection.defaultModel ?? null,
+        },
+      }),
+    );
+    setOrchestratorCheck(null);
+    setOrchestratorModelRefresh(null);
+  }
+
+  function updateOrchestrator(patch: Partial<OrchestratorSettings>) {
+    setAppSettings((current) =>
+      normalizeAppSettings({
+        ...current,
+        orchestrator: {
+          ...current.orchestrator,
+          ...patch,
+        },
+      }),
+    );
+  }
+
+  function updateOrchestratorConnection(patch: Partial<AiConnection>) {
+    setAppSettings((current) => {
+      const connection = current.orchestrator.connection;
+      if (!connection) return current;
+      return normalizeAppSettings({
+        ...current,
+        orchestrator: {
+          ...current.orchestrator,
+          connection: { ...connection, ...patch },
+        },
+      });
+    });
+  }
+
+  function updateOrchestratorCliPath(cliPath: string) {
+    const connection = appSettings.orchestrator.connection;
+    if (!connection) return;
+    updateOrchestratorConnection(connectionWithCliPath(connection, cliPath));
+  }
+
+  function clearOrchestratorConnection() {
+    updateOrchestrator({ enabled: false, mode: "observe", connection: null, model: null });
+    setOrchestratorCheck(null);
+    setOrchestratorModelRefresh(null);
+  }
+
+  function importLegacyConductor() {
+    const connectionId = conductorConfig.connectionId;
+    if (!connectionId) return;
+    const connection = aiConnections.find((item) => item.id === connectionId);
+    if (!connection) return;
+    setAppSettings((current) =>
+      normalizeAppSettings({
+        ...current,
+        orchestrator: {
+          enabled: true,
+          mode: conductorConfig.mode === "gate" ? "gate" : "observe",
+          connection,
+          model: conductorConfig.model ?? connection.defaultModel ?? null,
+        },
+      }),
+    );
+    setOrchestratorCheck(null);
+    setOrchestratorModelRefresh(null);
+    showToast({
+      tone: "success",
+      title: "프로젝트 지휘자 설정 가져옴",
+      description: "저장하면 이 설정이 모든 프로젝트에 적용됩니다.",
+    });
+  }
+
   function updateConnection(id: string, patch: Partial<AiConnection>) {
     setAiConnections((current) =>
       current.map((connection) => (connection.id === id ? { ...connection, ...patch } : connection)),
@@ -390,9 +640,6 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
           selections: assignment.selections.filter((selection) => selection.connectionId !== id),
         }),
       ),
-    );
-    setConductorConfig((current) =>
-      current.connectionId === id ? { ...current, enabled: false, connectionId: null, model: null } : current,
     );
   }
 
@@ -431,42 +678,25 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     );
   }
 
-  function updateConductorConfig(patch: Partial<ConductorConfig>) {
-    setConductorConfig((current) => normalizeConductorConfig({ ...current, ...patch }));
-  }
-
-  function setConductorConnection(connectionId: string) {
-    const connection = aiConnections.find((item) => item.id === connectionId);
-    updateConductorConfig({
-      enabled: Boolean(connectionId),
-      connectionId: connectionId || null,
-      model: connection?.defaultModel ?? null,
-    });
-  }
-
   function updateJiraConfig(patch: Partial<JiraConfig>) {
     setJiraConfig((current) => normalizeJiraConfig({ ...current, ...patch }));
   }
 
-  if (!snapshot) {
-    return (
-      <section className="empty-state">
-        <h2>설정</h2>
-        <p>프로젝트를 열면 runner, worktree, AI CLI 설정이 표시됩니다.</p>
-        <div className="settings-actions">
-          <button className="secondary-button" disabled={updaterBusy} onClick={checkUpdates} type="button">
-            <RefreshCw size={14} aria-hidden />
-            {updaterBusy ? "확인 중…" : "업데이트 확인"}
-          </button>
-        </div>
-        <button className="primary-button" onClick={onOpenProject} type="button">
-          프로젝트 열기
-        </button>
-      </section>
-    );
-  }
-
-  const activeMeta = CATEGORIES.find((category) => category.id === activeCategory) ?? CATEGORIES[0];
+  const activeMeta = visibleCategories.find((category) => category.id === activeCategory) ?? CATEGORIES[0];
+  const activeSaveBusy = activeCategory === "orchestrator" ? appSettingsBusy : busy;
+  const canSaveActiveSettings = activeCategory === "orchestrator" || (Boolean(snapshot) && activeCategory !== "app");
+  const orchestrator = appSettings.orchestrator;
+  const orchestratorConnection = orchestrator.connection;
+  const orchestratorModelList = orchestratorConnection?.availableModels ?? [];
+  const showOrchestratorModelSkeleton =
+    Boolean(orchestratorModelRefresh?.busy) && orchestratorModelList.length === 0;
+  const conductorConnection =
+    conductorConfig.connectionId ? aiConnections.find((connection) => connection.id === conductorConfig.connectionId) : null;
+  const canImportLegacyConductor =
+    Boolean(snapshot) &&
+    conductorConfig.enabled &&
+    Boolean(conductorConnection) &&
+    !orchestratorSettingsConfigured(orchestrator);
 
   return (
     <div className="settings-layout">
@@ -474,10 +704,10 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         <aside className="settings-nav">
           <div className="settings-nav-meta">
             <h3>설정</h3>
-            <p className="settings-nav-project">{snapshot.project.name}</p>
+            <p className="settings-nav-project">{snapshot ? snapshot.project.name : "전역 설정"}</p>
           </div>
           <ul className="settings-nav-list">
-            {CATEGORIES.map((category) => {
+            {visibleCategories.map((category) => {
               const isActive = category.id === activeCategory;
               const Icon = category.icon;
               return (
@@ -506,13 +736,248 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               <p>{activeMeta.hint}</p>
             </div>
             <div className="settings-canvas-actions">
-              <button className="primary-button" disabled={busy} onClick={save} type="button">
-                {busy ? "저장 중…" : "저장"}
-              </button>
+              {canSaveActiveSettings ? (
+                <button
+                  className="primary-button"
+                  disabled={activeSaveBusy}
+                  onClick={saveActiveSettings}
+                  type="button"
+                >
+                  {activeSaveBusy ? "저장 중…" : activeCategory === "orchestrator" ? "전역 저장" : "저장"}
+                </button>
+              ) : null}
             </div>
           </header>
 
           <div className="settings-canvas-body">
+            {activeCategory === "orchestrator" ? (
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3>전역 오케스트레이터</h3>
+                  <p className="muted">실행 대기 중인 role을 관찰하거나 실행 전에 한 번 확인하는 지휘자 AI입니다.</p>
+                </div>
+                {!appSettingsLoaded ? (
+                  <p className="settings-empty">전역 설정을 불러오는 중입니다.</p>
+                ) : (
+                  <>
+                    <div className="runner-onboarding-panel">
+                      <div className="runner-onboarding-summary">
+                        <div>
+                          <strong>적용 범위</strong>
+                          <span>이 설정은 현재 프로젝트가 아니라 Helm 앱 전체에 저장됩니다.</span>
+                        </div>
+                        <span className={orchestrator.enabled && orchestratorConnection ? "check-pass" : "check-info"}>
+                          {orchestrator.enabled && orchestratorConnection ? "전역 적용" : "꺼짐"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {canImportLegacyConductor ? (
+                      <div className="settings-empty">
+                        <strong>현재 프로젝트에 기존 지휘자 설정이 있습니다.</strong>
+                        <span>전역 오케스트레이터로 가져오면 다른 프로젝트에서도 같은 설정을 사용합니다.</span>
+                        <button className="secondary-button" onClick={importLegacyConductor} type="button">
+                          전역으로 가져오기
+                        </button>
+                      </div>
+                    ) : null}
+
+                    <label className="toggle-switch">
+                      <input
+                        checked={orchestrator.enabled}
+                        disabled={!orchestratorConnection}
+                        onChange={(event) => updateOrchestrator({ enabled: event.target.checked })}
+                        type="checkbox"
+                      />
+                      <span className="toggle-switch-track" aria-hidden />
+                      <span className="toggle-switch-label">오케스트레이터 사용</span>
+                    </label>
+
+                    <div className="settings-actions">
+                      <button
+                        className="secondary-button"
+                        disabled={appSettingsBusy}
+                        onClick={() => setOrchestratorConnectionProvider("codex")}
+                        type="button"
+                      >
+                        Codex 사용
+                      </button>
+                      <button
+                        className="secondary-button"
+                        disabled={appSettingsBusy}
+                        onClick={() => setOrchestratorConnectionProvider("claude")}
+                        type="button"
+                      >
+                        Claude Code 사용
+                      </button>
+                      <button
+                        className="secondary-button"
+                        disabled={appSettingsBusy}
+                        onClick={() => setOrchestratorConnectionProvider("custom")}
+                        type="button"
+                      >
+                        기타 CLI 사용
+                      </button>
+                    </div>
+
+                    {!orchestratorConnection ? (
+                      <p className="settings-empty">오케스트레이터에 사용할 AI CLI를 선택하세요.</p>
+                    ) : (
+                      <article
+                        aria-busy={orchestratorCheckBusy || orchestratorModelRefresh?.busy ? true : undefined}
+                        className={
+                          orchestratorCheckBusy || orchestratorModelRefresh?.busy
+                            ? "connection-card is-loading"
+                            : "connection-card"
+                        }
+                      >
+                        <div className="connection-card-header">
+                          <div>
+                            <strong>{orchestratorConnection.label}</strong>
+                            <p className="muted">전역 지휘자 AI 연결</p>
+                          </div>
+                          <div className="connection-card-meta">
+                            <span className="provider-pill">{providerLabel(orchestratorConnection.provider)}</span>
+                            {orchestratorCheck ? (
+                              <span className={orchestratorCheck.available ? "check-pass" : "check-fail"}>
+                                {orchestratorCheck.available ? "프롬프트 OK" : "확인 필요"}
+                              </span>
+                            ) : null}
+                            {orchestratorModelRefresh?.busy ? <span className="check-info">모델 확인 중</span> : null}
+                          </div>
+                        </div>
+                        <div className="connection-fields">
+                          <label>
+                            <span>이름</span>
+                            <input
+                              value={orchestratorConnection.label}
+                              onChange={(event) => updateOrchestratorConnection({ label: event.target.value })}
+                            />
+                          </label>
+                          <label>
+                            <span>LLM 경로</span>
+                            <input
+                              placeholder={cliPathPlaceholder(orchestratorConnection.provider)}
+                              value={connectionCliPath(orchestratorConnection)}
+                              onChange={(event) => updateOrchestratorCliPath(event.target.value)}
+                            />
+                          </label>
+                          <label>
+                            <span>기본 모델</span>
+                            <input
+                              placeholder={defaultModelPlaceholder(orchestratorConnection.provider)}
+                              value={orchestratorConnection.defaultModel ?? ""}
+                              onChange={(event) =>
+                                updateOrchestratorConnection({
+                                  defaultModel: event.target.value.trim() ? event.target.value.trim() : null,
+                                })
+                              }
+                            />
+                          </label>
+                          <label aria-busy={orchestratorModelRefresh?.busy ? true : undefined}>
+                            <span>모델 목록</span>
+                            {showOrchestratorModelSkeleton ? (
+                              <ModelListSkeleton />
+                            ) : (
+                              <input
+                                placeholder="쉼표로 구분"
+                                value={orchestratorModelList.join(", ")}
+                                onChange={(event) =>
+                                  updateOrchestratorConnection({
+                                    availableModels: splitModelList(event.target.value),
+                                  })
+                                }
+                              />
+                            )}
+                          </label>
+                          <label>
+                            <span>모드</span>
+                            <select
+                              value={orchestrator.mode}
+                              onChange={(event) => updateOrchestrator({ mode: event.target.value })}
+                            >
+                              <option value="observe">관찰만</option>
+                              <option value="gate">실행 전 확인</option>
+                            </select>
+                          </label>
+                          <label>
+                            <span>사용 모델</span>
+                            <select
+                              value={orchestrator.model ?? ""}
+                              onChange={(event) => updateOrchestrator({ model: event.target.value.trim() || null })}
+                            >
+                              <option value="">CLI 기본 모델</option>
+                              {modelOptions(orchestratorConnection, orchestrator.model ?? "").map((model) => (
+                                <option key={model} value={model}>
+                                  {model}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        <code className="command-preview">
+                          확인/계획: {(orchestratorConnection.planningCommandArgs ?? []).join(" ") || "command 없음"}
+                        </code>
+                        {orchestratorCheck?.message ? <p className="muted">{orchestratorCheck.message}</p> : null}
+                        {orchestratorCheck?.modelRefreshMessage ? (
+                          <p className="muted">{orchestratorCheck.modelRefreshMessage}</p>
+                        ) : null}
+                        {!orchestratorCheck?.modelRefreshMessage && orchestratorModelRefresh?.message ? (
+                          <p className={`model-refresh-message model-refresh-message-${orchestratorModelRefresh.tone}`}>
+                            {orchestratorModelRefresh.message}
+                          </p>
+                        ) : null}
+                        <div className="connection-card-actions">
+                          {canRefreshModels(orchestratorConnection.provider) ? (
+                            <button
+                              aria-busy={orchestratorModelRefresh?.busy ? true : undefined}
+                              className={
+                                orchestratorModelRefresh?.busy
+                                  ? "secondary-button loading-button is-loading"
+                                  : "secondary-button loading-button"
+                              }
+                              disabled={Boolean(orchestratorModelRefresh?.busy) || orchestratorCheckBusy}
+                              onClick={() => refreshOrchestratorModels()}
+                              type="button"
+                            >
+                              <RefreshCw
+                                className={orchestratorModelRefresh?.busy ? "loading-icon" : undefined}
+                                size={14}
+                                aria-hidden
+                              />
+                              {orchestratorModelRefresh?.busy ? "불러오는 중..." : "모델 불러오기"}
+                            </button>
+                          ) : null}
+                          <button
+                            aria-busy={orchestratorCheckBusy ? true : undefined}
+                            className={
+                              orchestratorCheckBusy
+                                ? "secondary-button loading-button is-loading"
+                                : "secondary-button loading-button"
+                            }
+                            disabled={orchestratorCheckBusy || Boolean(orchestratorModelRefresh?.busy)}
+                            onClick={checkOrchestratorConnection}
+                            type="button"
+                          >
+                            {orchestratorCheckBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+                            {orchestratorCheckBusy ? "확인 중..." : "연동 확인"}
+                          </button>
+                          <button
+                            className="secondary-button danger"
+                            disabled={appSettingsBusy || orchestratorCheckBusy || Boolean(orchestratorModelRefresh?.busy)}
+                            onClick={clearOrchestratorConnection}
+                            type="button"
+                          >
+                            연결 제거
+                          </button>
+                        </div>
+                      </article>
+                    )}
+                  </>
+                )}
+              </section>
+            ) : null}
+
             {activeCategory === "templates" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
@@ -775,79 +1240,6 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                   </p>
                 ) : (
                   <div className="role-assignment-list">
-                    <article className="role-assignment-row">
-                      <div>
-                        <strong>지휘자 AI</strong>
-                        <span>
-                          백그라운드 관제
-                          <span className="role-mode-pill">
-                            {conductorConfig.enabled ? (conductorConfig.mode === "gate" ? "실행 전 확인" : "관찰") : "꺼짐"}
-                          </span>
-                        </span>
-                      </div>
-                      <div className="role-connection-options">
-                        <label className="inline-check">
-                          <input
-                            checked={conductorConfig.enabled}
-                            onChange={(event) =>
-                              updateConductorConfig({
-                                enabled: event.target.checked,
-                                connectionId: event.target.checked
-                                  ? conductorConfig.connectionId ?? enabledConnections[0]?.id ?? null
-                                  : conductorConfig.connectionId,
-                              })
-                            }
-                            type="checkbox"
-                          />
-                          <span>사용</span>
-                        </label>
-                        <div className="role-runner-option">
-                          <select
-                            aria-label="지휘자 AI 연결"
-                            disabled={!conductorConfig.enabled}
-                            value={conductorConfig.connectionId ?? ""}
-                            onChange={(event) => setConductorConnection(event.target.value)}
-                          >
-                            <option value="">연결 선택</option>
-                            {enabledConnections.map((connection) => (
-                              <option key={connection.id} value={connection.id}>
-                                {connection.label}
-                              </option>
-                            ))}
-                          </select>
-                          {conductorConfig.enabled && conductorConfig.connectionId ? (
-                            <select
-                              aria-label="지휘자 AI 모델"
-                              value={conductorConfig.model ?? ""}
-                              onChange={(event) =>
-                                updateConductorConfig({ model: event.target.value.trim() || null })
-                              }
-                            >
-                              <option value="">CLI 기본 모델</option>
-                              {(conductorConnection ?? enabledConnections[0])
-                                ? modelOptions(conductorConnection ?? enabledConnections[0], conductorConfig.model ?? "").map(
-                                    (model) => (
-                                      <option key={model} value={model}>
-                                        {model}
-                                      </option>
-                                    ),
-                                  )
-                                : null}
-                            </select>
-                          ) : null}
-                          {conductorConfig.enabled ? (
-                            <select
-                              aria-label="지휘자 AI 모드"
-                              value={conductorConfig.mode}
-                              onChange={(event) => updateConductorConfig({ mode: event.target.value })}
-                            >
-                              <option value="observe">관찰만</option>
-                              <option value="gate">실행 전 확인</option>
-                            </select>
-                          ) : null}
-                        </div>
-                      </div>
-                    </article>
                     {ROLE_DEFINITIONS.map((role) => {
                       const assignment = normalizeRoleAssignments(roleAssignments).find(
                         (item) => item.roleId === role.roleId,
@@ -990,6 +1382,15 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                   <h3>앱 업데이트</h3>
                   <p className="muted">자동 확인 대신 필요할 때 Helm updater를 수동으로 실행합니다.</p>
                 </div>
+                {!snapshot ? (
+                  <div className="settings-empty">
+                    <strong>프로젝트별 설정은 프로젝트를 연 뒤 표시됩니다.</strong>
+                    <span>전역 오케스트레이터와 앱 업데이트는 프로젝트 없이도 관리할 수 있습니다.</span>
+                    <button className="secondary-button" onClick={onOpenProject} type="button">
+                      프로젝트 열기
+                    </button>
+                  </div>
+                ) : null}
                 <div className="update-check-panel">
                   <div>
                     <strong>Helm</strong>
@@ -1071,6 +1472,50 @@ function ModelListSkeleton() {
       <span className="settings-skeleton" />
     </div>
   );
+}
+
+function emptyAppSettings(): AppSettings {
+  return {
+    version: 1,
+    orchestrator: emptyOrchestratorSettings(),
+  };
+}
+
+function emptyOrchestratorSettings(): OrchestratorSettings {
+  return {
+    enabled: false,
+    mode: "observe",
+    connection: null,
+    model: null,
+  };
+}
+
+function normalizeAppSettings(value: unknown): AppSettings {
+  if (typeof value !== "object" || value === null) return emptyAppSettings();
+  const record = value as Partial<AppSettings>;
+  return {
+    version: 1,
+    orchestrator: normalizeOrchestratorSettings(record.orchestrator),
+  };
+}
+
+function normalizeOrchestratorSettings(value: unknown): OrchestratorSettings {
+  if (typeof value !== "object" || value === null) return emptyOrchestratorSettings();
+  const record = value as Partial<OrchestratorSettings>;
+  const connection =
+    typeof record.connection === "object" && record.connection !== null
+      ? normalizeAiConnections([record.connection])[0] ?? null
+      : null;
+  return {
+    enabled: Boolean(record.enabled) && Boolean(connection),
+    mode: record.mode === "gate" ? "gate" : "observe",
+    connection,
+    model: typeof record.model === "string" && record.model.trim() ? record.model.trim() : null,
+  };
+}
+
+function orchestratorSettingsConfigured(settings: OrchestratorSettings): boolean {
+  return Boolean(settings.connection || settings.enabled || settings.model || settings.mode === "gate");
 }
 
 function emptyJiraConfig(): JiraConfig {
