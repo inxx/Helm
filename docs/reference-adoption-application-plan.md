@@ -56,10 +56,17 @@ Helm backend가 상태, 승인, 다음 role, artifact, gate, audit의 source of 
 | Repair request status 확장 | 기존 `repair_requests.status`는 `Open`, `Resolved`, `Dismissed`만 허용한다. | P0 repair loop에서는 status는 기존 enum을 유지하고 `phase` 또는 `verification_run_id` 보조 column으로 `ResolvedPendingVerification` 의미를 표현한다. |
 | Artifact/DB atomicity | file write와 SQLite transaction은 한 transaction으로 묶이지 않는다. | artifact는 `.tmp`에 먼저 쓰고 DB commit 뒤 rename하거나, orphan cleanup을 허용한다. Planning draft는 처음부터 `.tmp -> rename`을 사용한다. |
 | Supervisor와 repair rerun 충돌 | supervisor reconciler는 "해당 role run 기록 없음"일 때만 자동 큐잉한다. repair 뒤 gate rerun은 이미 role run 기록이 있어 자동 생성되지 않는다. | repair/gate rerun은 supervisor가 아니라 explicit repair flow command가 생성한다. |
+| Auto-continuation 설정 누락 | backend에는 run 성공 후 다음 role을 큐잉하는 `queue_next_role_after_success()` 경로가 있다. 이 경로가 automation mode를 보지 않으면 `manual` 프로젝트에서도 다음 role이 생길 수 있다. | 모든 자동 handoff 경로는 `manual/record/repair/gate/full_auto` 정책을 공통 helper로 확인한다. `manual`에서는 approval/run 성공이 새 run을 만들지 않는다. |
+| Automation mode 저장 위치 혼동 | 기존 `ConductorConfig.mode`는 `observe/gate` 성격인데 여기에 `repair/full_auto/manual`까지 넣으면 Conductor AI 정책과 supervisor handoff 정책이 섞인다. | `ConductorConfig.mode`는 queued run gate/record 전용으로 두고, 자동 handoff는 별도 `automationPolicy` 또는 project setting key로 분리한다. |
+| Task 카드 클릭 side effect | 현재 UI 구조에서는 Task 카드 클릭이 상세 열기처럼 보이지만, `TaskDetail` mount 후 조건이 맞으면 `autoStartNextRole()`이 실행되어 run/context/worktree가 만들어질 수 있다. 관찰과 실행이 섞이면 사용자가 의도하지 않은 작업이 시작된다. | Task 클릭은 read-only selection으로 고정한다. 자동 handoff는 backend supervisor/queue worker만 담당하고, UI는 명시 버튼으로만 `worktree 준비`, `실행 준비`, `host 실행`을 호출한다. |
+| Approval-triggered handoff 경계 | `PlanningScreen.approvePlanDraft()`와 `approve_approval` backend는 명시 승인 후 `start_next_role_run`/`prepare_next_role_context`를 호출할 수 있다. 카드 클릭은 막아도 승인 버튼의 side effect가 불명확하면 같은 혼동이 남는다. | 승인 버튼은 side effect를 버튼 문구와 confirmation에 드러낸다. 기본 P0는 "승인/Task 생성"과 "다음 role 실행 준비"를 분리하고, 자동 준비는 명시 opt-in 또는 supervisor setting으로만 둔다. |
+| 실행 명령 의미 불명확 | `worktree 준비`, `실행 준비`, `host 실행`, `retry 준비`, `승인하고 계속`이 각각 어떤 파일/DB/run 변화를 만드는지 한 화면에서 바로 구분하기 어렵다. | Task Detail의 Next Action은 실행 전 effect summary와 command kind를 표시한다. 실제 agent/CLI 실행 가능 버튼은 `host 실행`처럼 파일 변경 가능성을 드러낸다. |
 | Planning DraftApproval과 Task PlanApproval 혼동 | 둘 다 "계획 승인"처럼 보이면 사용자가 왜 두 번 승인하는지 이해하기 어렵다. | UI 문구를 명확히 분리한다. DraftApproval은 "Task 생성 승인", PlanApproval은 "구현 시작 승인"이다. |
-| Planning materialization 중복 | 같은 draft에서 Task 생성 버튼이 두 번 실행되면 중복 Task가 생길 수 있다. | `planning_materializations.UNIQUE(draft_id)`를 두고, `materialize_plan_draft`는 기존 materialization을 반환하는 idempotent command로 만든다. |
+| Planning materialization 중복 | 하나의 draft가 여러 Task를 만들 수 있는데 단일 `task_id`만 저장하면 idempotency와 provenance가 깨진다. | `planning_materializations`는 draft별 batch row로 두고, `planning_materialization_items`에 생성된 Task 목록을 저장한다. batch는 `UNIQUE(draft_id)`, item은 `UNIQUE(materialization_id, source_index)`를 둔다. |
+| Materialized Task 누락/삭제 | materialized task가 삭제되거나 FK `SET NULL`이 된 뒤 같은 draft를 다시 materialize할 때 복구 정책이 애매하다. | batch/item row가 있는데 item의 `task_id`가 없거나 task lookup에 실패하면 새 Task를 조용히 만들지 않는다. `MaterializationBroken` error와 repair command로 명시 복구한다. |
 | `ProjectSnapshot` 비대화 | planning detail 전체를 snapshot에 넣으면 snapshot refresh가 무거워진다. | snapshot에는 session summary만 포함하거나 포함하지 않는다. 상세는 `get_planning_session` lazy load로 읽는다. |
 | Frontend stale local state | PlanningScreen이 local stub state를 유지하면 DB-backed 전환 후 이중 source of truth가 생긴다. | DB 전환 milestone에서 local session mutation을 제거하고 optimistic update도 command 결과 기준으로만 한다. |
+| Frontend 테스트 harness 부재 | 현재 desktop package에는 `typecheck/build`는 있지만 component/e2e test runner가 없다. 계획서에 click test만 적으면 구현자가 검증 단계에서 막힌다. | P0에서는 pure function/unit test가 필요한 로직을 분리하고, UI click 검증은 Playwright 또는 Vitest/RTL 중 하나를 먼저 선택한다. 선택 전에는 수동 QA checklist를 완료 기준에 포함한다. |
 
 ## 우선순위 요약
 
@@ -68,6 +75,7 @@ Helm backend가 상태, 승인, 다음 role, artifact, gate, audit의 source of 
 | P0 | Spec Kitty + AI Factory식 DB-backed planning artifact | 계획 근거 유실, Task 생성 근거 불명확 |
 | P0 | Multica식 run lifecycle/liveness taxonomy | stuck run, launch 실패, timeout 원인 혼동 |
 | P0 | AIF Handoff식 review/test repair loop | gate 실패 후 다음 행동 불명확 |
+| P0 | Task/Kanban command semantics hardening | 클릭만 했는데 실행 준비가 생기는 UX/책임 경계 혼동 |
 | P1 | Spec Kitty식 accept/merge 단계 | MergeWaiting 이후 결정 화면 부족 |
 | P1 | CAO/Harnss식 worker session visibility | 실행 중 agent 상태 불투명 |
 | P1 | Hermes Desktop식 direct source-of-truth/safe editing | 향후 remote/profile/파일 편집 안정성 |
@@ -116,7 +124,7 @@ Helm backend가 상태, 승인, 다음 role, artifact, gate, audit의 source of 
 3. Planning artifact 계약
    - DB가 canonical source of truth다.
    - markdown export는 `.helm/planning/{session_id}/draft-v{n}.md`에 artifact로 저장한다.
-   - Task 생성 시 `planning_materializations`에 `session_id`, `draft_id`, `task_id`를 남긴다.
+   - Task 생성 시 `planning_materializations` batch와 `planning_materialization_items`에 `session_id`, `draft_id`, 생성된 `task_id` 목록을 남긴다.
    - Task external ref에는 사람이 읽을 수 있는 `planning-session:{id}` reference를 추가한다.
 
 4. UI 전환
@@ -520,6 +528,92 @@ Conductor AI: record
 MergeApproval: human (stored in merge_approvals)
 ```
 
+설정 저장 원칙:
+
+- `ConductorConfig.mode`는 queued run을 시작하기 전 AI가 `record`만 할지 `gate`까지 할지에만 사용한다.
+- supervisor/automation 정책은 별도 `automationPolicy`로 저장한다. 기존 settings JSON에 additive field로 추가하고, 없으면 아래 default를 적용한다.
+
+```ts
+interface AutomationPolicy {
+  mode: "manual" | "record" | "repair" | "gate" | "full_auto";
+  autoPrepareAfterDraftApproval: boolean;
+  autoPrepareAfterPlanApproval: boolean;
+  autoContinueAfterRunSuccess: boolean;
+  supervisorReconcileEnabled: boolean;
+  requireExplicitHostRun: boolean;
+}
+```
+
+P0 default:
+
+```json
+{
+  "mode": "repair",
+  "autoPrepareAfterDraftApproval": false,
+  "autoPrepareAfterPlanApproval": true,
+  "autoContinueAfterRunSuccess": true,
+  "supervisorReconcileEnabled": true,
+  "requireExplicitHostRun": false
+}
+```
+
+`manual` override:
+
+```json
+{
+  "autoPrepareAfterDraftApproval": false,
+  "autoPrepareAfterPlanApproval": false,
+  "autoContinueAfterRunSuccess": false,
+  "supervisorReconcileEnabled": false,
+  "requireExplicitHostRun": true
+}
+```
+
+`full_auto`는 P0/P1 UI에서 선택지를 숨기고 backend validation에서도 거부한다.
+
+## Cross-Cutting UI Policy: Task Board Command Semantics
+
+Task/Kanban 화면의 기준은 아래처럼 고정한다.
+
+```text
+Task 카드 클릭 = 관찰/선택
+Next Action 버튼 = 명시적 준비/실행
+Supervisor reconciler = 누락된 handoff 복구
+Conductor AI = queued run 시작 전 기록 또는 gate
+```
+
+### 현재 확인한 문제
+
+- `TaskBoard`의 카드 클릭은 `selectedTaskId`만 바꾸지만, `TaskDetail`이 열리면 `useEffect`가 `autoStartNextRole()`을 호출할 수 있다.
+- 사용자는 "상세를 보려고 클릭"했는데 backend에는 `start_next_role_run -> prepare_next_role_context -> ensure_task_worktree/prepare_role_context`가 발생할 수 있다.
+- 이것은 관찰자/실행자 책임 분리와 맞지 않는다.
+
+### UI 결정
+
+- Task 카드 클릭은 run, worktree, context pack, approval, status transition을 만들지 않는다.
+- 자동 진행은 backend supervisor/queue worker에서만 발생한다.
+- backend 자동 진행도 automation mode helper를 통과해야 한다. `queue_next_role_after_success`, `reconcile_next_role_gap`, `spawn_next_role_run_after_approval`은 같은 정책을 사용한다.
+- Task Detail은 처음 열릴 때 `detailsLoaded` 전까지 "상태 확인 중"을 보여주고 destructive/side-effect 버튼을 숨긴다.
+- Planning 화면의 DraftApproval도 같은 원칙을 따른다. `승인/Task 생성` 버튼은 Task materialization까지만 수행하고, `planner 실행 준비`는 별도 버튼 또는 명시 opt-in으로 분리한다.
+- 실행 버튼은 다음처럼 효과를 명확히 구분한다.
+  - `worktree 준비`: task branch/worktree 생성 가능
+  - `실행 준비`: context-pack artifact와 queued run 생성
+  - `host 실행`: 실제 AI/CLI 실행, 파일 변경 가능
+  - `retry 준비`: 이전 terminal run을 근거로 새 queued run 생성
+  - `승인하고 계속`: approval decision 저장, supervisor handoff 대상이 될 수 있음
+- 수동 상태 변경 select는 P1에서 고급/개발용 영역으로 이동하거나 confirmation + reason 입력을 요구한다.
+
+### Kanban 결정
+
+- 보드는 status column만 보여주는 것이 아니라 task별 latest run/open repair/readiness summary를 최소한으로 보여준다.
+- 10개 status column은 작은 화면과 detail panel에서 가로 스크롤 부담이 크다. P1에서 Plan / Build / Verify / Merge / Closed phase grouping 또는 empty column collapse를 검토한다.
+- 카드의 `next` 문구는 정적 status mapping이 아니라 현재 run state를 반영한다.
+  - queued run 있음: `queued`
+  - running run 있음: `running`
+  - terminal failure: `needs inspection`
+  - open repair 있음: `repair required`
+  - next role 없음: `no action`
+
 ## 적용 로드맵
 
 ### Milestone A. Durable Planning
@@ -603,6 +697,30 @@ MergeApproval: human (stored in merge_approvals)
 
 - 장기 실행 중 Task Detail이 live하게 갱신된다.
 
+### Milestone F. Task Board Command UX Hardening
+
+순서상 F로 표기하지만 우선순위는 P0이다. Milestone A와 병행하거나 A 직후에 처리한다.
+
+목표: Task/Kanban에서 관찰, 준비, 실행이 헷갈리지 않게 한다.
+
+작업:
+
+1. `TaskDetail`의 click-triggered auto-start effect 제거
+2. `PlanningScreen.approvePlanDraft()`의 Task 생성과 planner 실행 준비 분리
+3. `approve_approval` 후 handoff가 발생하는 경우 버튼 문구/setting/audit에 명시
+4. Next Action 버튼별 side effect summary 표시
+5. `detailsLoaded` 전 action skeleton/disabled state 추가
+6. board 카드에 latest run/open repair/readiness 상태 표시
+7. 수동 상태 변경 UI를 advanced/manual override로 격리
+8. frontend click 검증 harness 선택
+
+완료 기준:
+
+- Task 카드를 클릭해도 새 run/worktree/context pack이 생기지 않는다.
+- DraftApproval을 승인해도 사용자가 동의하지 않은 planner run 준비가 생기지 않는다.
+- 사용자는 어떤 버튼이 DB만 바꾸는지, 어떤 버튼이 agent/CLI 실행을 시작하는지 클릭 전 알 수 있다.
+- 칸반 카드에서 queued/running/needs inspection/open repair를 구분할 수 있다.
+
 ## 기술 구현 분석
 
 이 섹션은 위 차용 계획을 현재 Helm 코드 구조에 맞춰 구현 가능한 단위로 내린다.
@@ -624,6 +742,8 @@ MergeApproval: human (stored in merge_approvals)
 - `0008_merge_readiness.sql`: `merge_approvals` table. `approvals`와 `gate_results` CHECK는 건드리지 않는다.
 - migration을 추가할 때마다 `SUPPORTED_SCHEMA_VERSION`, `include_str!`, `run_migrations` 순서를 같이 올린다.
 - column 추가 migration은 `apply_schema_patch`로 전체 SQL을 재실행하면 중복 column 오류가 날 수 있다. schema patch fallback이 필요하면 `column_exists(conn, table, column)` helper로 column별 보강을 한다.
+- 새 table/index migration에 schema patch fallback을 둘 경우 `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`를 사용한다. 이미 일부 table만 만들어진 partial migration 상태에서도 재실행이 실패하지 않아야 한다.
+- `IF NOT EXISTS`는 잘못 만들어진 기존 table shape를 고치지 못한다. fallback 뒤에는 `PRAGMA table_info`/`PRAGMA index_list`로 expected schema를 확인하고, shape가 다르면 `SchemaPatchMismatch`로 중단한다.
 
 ### A. Durable Planning 기술 설계
 
@@ -650,10 +770,14 @@ if current_version < 6 {
 
 `PHASE6_MIGRATION`은 새 table 생성만 포함하므로 이 fallback을 둘 수 있다. `0007_run_lifecycle_repair.sql`처럼 column을 추가하는 migration에는 같은 방식의 전체 `apply_schema_patch`를 쓰지 않는다.
 
+`PHASE6_MIGRATION`의 DDL은 `IF NOT EXISTS`를 사용한다. 이유는 table-only migration이라도 앱 종료/재시작 또는 수동 DB 조작 후 일부 table만 존재하는 partial 상태가 생기면 fallback이 다시 실행될 수 있기 때문이다.
+
+DDL 재실행 뒤에는 schema shape를 검증한다. 예를 들어 `planning_materializations`가 예전 단일-`task_id` 형태로 이미 존재하면 `IF NOT EXISTS`가 조용히 넘어가므로, `planning_materialization_items` 존재 여부와 expected indexes를 확인한 뒤 mismatch면 migration을 중단한다.
+
 권장 schema:
 
 ```sql
-CREATE TABLE planning_sessions (
+CREATE TABLE IF NOT EXISTS planning_sessions (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -671,7 +795,7 @@ CREATE TABLE planning_sessions (
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
-CREATE TABLE planning_messages (
+CREATE TABLE IF NOT EXISTS planning_messages (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
@@ -683,7 +807,7 @@ CREATE TABLE planning_messages (
   FOREIGN KEY (session_id) REFERENCES planning_sessions(id) ON DELETE CASCADE
 );
 
-CREATE TABLE plan_draft_revisions (
+CREATE TABLE IF NOT EXISTS plan_draft_revisions (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
@@ -707,28 +831,47 @@ CREATE TABLE plan_draft_revisions (
   FOREIGN KEY (session_id) REFERENCES planning_sessions(id) ON DELETE CASCADE
 );
 
-CREATE TABLE planning_materializations (
+CREATE TABLE IF NOT EXISTS planning_materializations (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   draft_id TEXT NOT NULL,
-  task_id TEXT,
   epic_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('Materialized', 'Broken', 'Repaired')),
   created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
   FOREIGN KEY (session_id) REFERENCES planning_sessions(id) ON DELETE CASCADE,
   FOREIGN KEY (draft_id) REFERENCES plan_draft_revisions(id) ON DELETE CASCADE,
-  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL,
   FOREIGN KEY (epic_id) REFERENCES epics(id) ON DELETE SET NULL,
   UNIQUE(draft_id)
 );
 
-CREATE INDEX idx_planning_sessions_project_updated
+CREATE TABLE IF NOT EXISTS planning_materialization_items (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  materialization_id TEXT NOT NULL,
+  draft_id TEXT NOT NULL,
+  source_index INTEGER NOT NULL,
+  source_key TEXT,
+  task_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  FOREIGN KEY (materialization_id) REFERENCES planning_materializations(id) ON DELETE CASCADE,
+  FOREIGN KEY (draft_id) REFERENCES plan_draft_revisions(id) ON DELETE CASCADE,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL,
+  UNIQUE(materialization_id, source_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_planning_sessions_project_updated
   ON planning_sessions(project_id, updated_at DESC);
-CREATE INDEX idx_planning_messages_session_created
+CREATE INDEX IF NOT EXISTS idx_planning_messages_session_created
   ON planning_messages(session_id, created_at ASC);
-CREATE INDEX idx_plan_drafts_session_version
+CREATE INDEX IF NOT EXISTS idx_plan_drafts_session_version
   ON plan_draft_revisions(session_id, version DESC);
+CREATE INDEX IF NOT EXISTS idx_planning_materialization_items_task
+  ON planning_materialization_items(task_id);
 ```
 
 `planning_approvals`:
@@ -736,7 +879,7 @@ CREATE INDEX idx_plan_drafts_session_version
 기존 `approvals` table은 CHECK 제약 때문에 P0에서 확장하지 않는다. DraftApproval은 planning 전용 테이블로 둔다.
 
 ```sql
-CREATE TABLE planning_approvals (
+CREATE TABLE IF NOT EXISTS planning_approvals (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
@@ -754,7 +897,7 @@ CREATE TABLE planning_approvals (
   UNIQUE(draft_id)
 );
 
-CREATE INDEX idx_planning_approvals_session_status
+CREATE INDEX IF NOT EXISTS idx_planning_approvals_session_status
   ON planning_approvals(session_id, status);
 ```
 
@@ -801,6 +944,18 @@ pub struct PlanDraftRevisionSummary {
     pub updated_at: String,
 }
 
+pub struct PlanningMaterializationSummary {
+    pub id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub draft_id: String,
+    pub epic_id: Option<String>,
+    pub status: String,
+    pub task_ids: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 pub struct PlanningApprovalSummary {
     pub id: String,
     pub project_id: String,
@@ -820,6 +975,7 @@ pub struct PlanningSessionDetail {
     pub messages: Vec<PlanningMessageSummary>,
     pub drafts: Vec<PlanDraftRevisionSummary>,
     pub approvals: Vec<PlanningApprovalSummary>,
+    pub materializations: Vec<PlanningMaterializationSummary>,
 }
 ```
 
@@ -831,6 +987,10 @@ pub struct PlanningSessionDetail {
 - `ApprovePlanningDraftInput { reason }`
 - `RejectPlanningDraftInput { reason }`
 - `MaterializePlanDraftInput { draft_id }`
+
+Command return:
+
+- `materialize_plan_draft`는 `PlanningMaterializationSummary`를 반환한다. 같은 draft를 다시 호출하면 기존 batch와 item task 목록을 반환한다.
 
 #### DB 함수
 
@@ -850,13 +1010,19 @@ pub struct PlanningSessionDetail {
 - `create_planning_session`: session + first user message + audit를 하나의 transaction으로 묶는다.
 - `save_plan_draft_revision`: artifact temp write 준비 후 next version 계산 + draft insert + session active_draft_id update를 DB transaction으로 묶고, commit 뒤 temp file을 final path로 rename한다.
 - `approve_plan_draft`: pending planning approval update + draft status update + session status update + audit를 묶는다.
-- `materialize_plan_draft`: draft status update + task/epic create + materialization rows + external refs + audit를 하나의 transaction으로 묶는다.
+- `materialize_plan_draft`: draft status update + task/epic create + materialization batch/items + external refs + audit를 하나의 transaction으로 묶는다.
 
 주의점:
 
 - artifact file write와 DB transaction은 완전 atomic하지 않다. Planning draft는 `.tmp` 파일을 쓰고 DB commit 후 rename한다. commit 실패 시 `.tmp`만 cleanup한다.
+- DB commit 후 final rename이 실패하면 DB에는 artifact path가 있는데 파일이 없는 상태가 된다. P0에서는 rename 실패 시 draft row를 `Draft`로 되돌리거나 `artifact_path=NULL`로 보정하는 recovery transaction을 실행하고, 사용자에게 `ArtifactFinalizeFailed` error를 보여준다.
 - draft artifact path는 `validate_relative_artifact_path`와 같은 방어를 재사용한다.
-- `materialize_plan_draft`는 idempotency를 가져야 한다. 같은 approved draft를 두 번 materialize하면 기존 `planning_materializations`와 Task 목록을 반환하고 새 Task를 만들지 않는다.
+- `save_plan_draft_revision`이 `ReadyForApproval` draft를 만들 때 pending `planning_approvals` row를 함께 만든다. 같은 draft에 이미 approval이 있으면 새 approval을 만들지 않는다.
+- `approve_plan_draft`는 draft status가 `ReadyForApproval`이고 pending planning approval이 있을 때만 성공한다.
+- `materialize_plan_draft`는 draft status가 `Approved`일 때만 성공한다.
+- draft JSON에서 task 후보가 0개면 `EmptyPlanDraft`를 반환하고 Task를 만들지 않는다.
+- `materialize_plan_draft`는 idempotency를 가져야 한다. 같은 approved/materialized draft를 두 번 materialize하면 기존 `planning_materializations` batch와 item Task 목록을 반환하고 새 Task를 만들지 않는다.
+- 기존 materialization batch/item row가 있는데 item의 `task_id`가 `NULL`이거나 task lookup에 실패하면 자동으로 새 Task를 만들지 않는다. `MaterializationBroken`을 반환하고, 별도 `repair_planning_materialization` command에서 사용자 확인 후 복구한다.
 
 #### Tauri command/API
 
@@ -885,6 +1051,8 @@ materializePlanDraft(projectId, draftId)
 ```
 
 `types.ts`에는 Rust DTO와 1:1 camelCase 타입을 둔다.
+
+`materializePlanDraft`의 반환 타입은 단일 Task가 아니라 materialization batch다. Planning UI에서 첫 Task를 열고 싶으면 반환된 `taskIds[0]`를 사용하되, UI에는 생성된 전체 Task 수와 목록을 보여준다.
 
 #### UI 전환
 
@@ -1356,7 +1524,206 @@ tool call payload:
 
 P1은 read-only observe만 제공한다. steering input은 P2로 둔다.
 
-### F. Safe Editing 기술 설계
+### F. Task Board Command UX 기술 설계
+
+#### 현재 코드 흐름
+
+관련 파일:
+
+- `apps/desktop/src/components/TaskBoard.tsx`
+- `apps/desktop/src/components/TaskDetail.tsx`
+- `apps/desktop/src/screens/TasksScreen.tsx`
+- `apps/desktop/src/App.tsx`
+- `apps/desktop/src-tauri/src/main.rs`
+- `apps/desktop/src-tauri/src/db.rs`
+
+현재 흐름:
+
+```text
+TaskBoard card click
+-> onSelectTask(task.id)
+-> App.selectedTaskId update
+-> TaskDetail mount/detail load
+-> TaskDetail autoStartNextRole effect
+-> api.startNextRoleRun(projectId, taskId)
+-> main.rs start_next_role_run
+-> db.prepare_next_role_context
+-> ensure_task_worktree + prepare_role_context
+-> queue worker may run host role
+```
+
+추가로 확인한 자동 handoff 경로:
+
+```text
+PlanningScreen approvePlanDraft
+-> createTask for draft tasks
+-> api.startNextRoleRun(firstTask.id)
+
+TaskDetail approvePendingPlan
+-> api.approveApproval
+-> main.rs approve_approval
+-> spawn_next_role_run_after_approval
+-> db.prepare_next_role_context
+
+run_host_role success
+-> queue_next_role_after_success
+-> db.prepare_next_role_context
+```
+
+문제:
+
+- 사용자가 한 행위는 "Task 상세 보기"인데, 결과는 worktree/context/queued run 생성일 수 있다.
+- UI 클릭이 backend supervisor와 같은 handoff 책임을 갖게 된다.
+- detail panel을 여러 task 사이에서 훑어볼 때 의도하지 않은 실행 준비가 생길 수 있다.
+- DraftApproval/PlanApproval 승인 버튼도 "승인만 하는지, 승인 후 실행 준비까지 하는지"가 불명확하면 같은 문제가 반복된다.
+
+#### 변경 원칙
+
+- `TaskBoard`와 `TasksScreen`은 selection/navigation만 담당한다.
+- `TaskDetail` mount/load effect는 read-only fetch만 한다.
+- 자동 role handoff는 `reconcile_next_role_gap` 또는 explicit supervisor path에서만 발생한다.
+- 사용자가 버튼을 누르는 경우에만 아래 command를 호출한다.
+
+| UI action | Tauri command | side effect |
+| --- | --- | --- |
+| `worktree 준비` | `ensure_task_worktree` | task branch/worktree 생성 |
+| `실행 준비` | `prepare_role_context` | context-pack artifact + queued run 생성 |
+| `host 실행` | `run_host_role` | 실제 runner/AI/CLI 실행, 파일 변경 가능 |
+| `retry 준비` | `retry_host_role` | terminal run 근거로 새 queued run 생성 |
+| `승인하고 계속` | `approve_approval` | approval decision 저장, supervisor handoff 대상 |
+
+#### P0 코드 변경
+
+`TaskDetail.tsx`:
+
+- `autoStartKeyRef`와 `autoStartNextRole`을 제거한다.
+- `useEffect`에서 `api.startNextRoleRun`을 호출하지 않는다.
+- `detailsLoaded === false`이면 `NextAction` 대신 loading/skeleton card를 렌더링한다.
+- `approvePendingPlan` toast는 "Coder 자동 실행을 시작합니다"가 아니라 "승인 완료. 다음 role handoff를 확인합니다"처럼 supervisor 중심 문구로 바꾼다.
+- `approvePendingPlan`이 `approve_approval`의 backend spawn을 유지한다면 버튼 label을 "승인하고 coder 실행 준비"로 바꾼다. 유지하지 않을 경우 backend spawn을 setting-gated로 바꾸고 UI는 별도 `Coder 실행 준비` 버튼을 보여준다.
+
+`PlanningScreen.tsx`:
+
+- `approvePlanDraft`는 기본적으로 Task materialization까지만 수행한다.
+- 첫 planner run을 바로 준비하려면 버튼/checkbox를 `Task 생성 후 planner 실행 준비`로 분리한다.
+- 이미 추적 중인 Task를 여는 path는 read-only navigation으로 유지한다.
+
+`main.rs`/`db.rs`:
+
+- `start_next_role_run` command는 남겨도 되지만 UI click path에서 호출하지 않는다.
+- command 이름이 계속 혼동되면 `supervisor_prepare_next_role_run` 또는 `queue_next_role_run`으로 rename하는 후속 작업을 둔다.
+- `approve_approval`의 `spawn_next_role_run_after_approval`은 automation mode/setting을 확인한다. `manual`이면 approval decision만 저장하고 run은 만들지 않는다.
+- `queue_next_role_after_success`도 같은 helper를 확인한다. `manual`이면 다음 role을 큐잉하지 않고, `repair/gate`에서는 정책에 맞는 queued run만 만든다.
+- 자동 handoff helper 후보:
+
+```rust
+enum AutoHandoffTrigger {
+    ApprovalApproved,
+    RunSucceeded,
+    SupervisorReconcile,
+}
+
+fn should_auto_prepare_next_role(
+    settings: &EffectiveSettings,
+    trigger: AutoHandoffTrigger,
+    task: &TaskSummary,
+) -> bool
+```
+
+helper mapping:
+
+| trigger | policy field |
+| --- | --- |
+| `ApprovalApproved` for DraftApproval | `autoPrepareAfterDraftApproval` |
+| `ApprovalApproved` for PlanApproval | `autoPrepareAfterPlanApproval` |
+| `RunSucceeded` | `autoContinueAfterRunSuccess` |
+| `SupervisorReconcile` | `supervisorReconcileEnabled` |
+
+`requireExplicitHostRun=true`이면 queued run은 만들 수 있지만 queue worker가 자동으로 `run_host_role`을 시작하지 않는다. 이 경우 Task Detail에서만 `host 실행` 버튼을 노출한다.
+
+#### P1 Board summary
+
+`TaskSummary`를 직접 비대화하지 않고 board용 lightweight summary를 추가한다.
+
+후보 DTO:
+
+```rust
+pub struct TaskBoardSignalSummary {
+    pub task_id: String,
+    pub latest_run_id: Option<String>,
+    pub latest_role_id: Option<String>,
+    pub latest_run_status: Option<String>,
+    pub latest_result_status: Option<String>,
+    pub has_open_repair: bool,
+    pub has_pending_approval: bool,
+    pub next_action_kind: String,
+}
+```
+
+`next_action_kind` 후보:
+
+- `none`
+- `pending_approval`
+- `worktree_required`
+- `context_required`
+- `queued`
+- `running`
+- `needs_inspection`
+- `repair_required`
+- `merge_readiness`
+- `manual_override`
+
+API 후보:
+
+- `list_task_board_signals(project_id)`
+
+Frontend:
+
+- `TasksScreen`이 `TaskBoardSignalSummary[]`를 lazy load해서 `taskId -> signal` map으로 `TaskBoard`에 넘긴다.
+- `agent-run://updated`, approval decision, repair update 이후 signal map을 refresh한다.
+- `TaskBoard` card `next`는 `STATUS_STAGE` 정적 mapping이 아니라 `TaskBoardSignalSummary.next_action_kind`에서 계산한다.
+- board signal이 아직 없으면 기존 status mapping을 fallback으로 쓴다.
+
+#### Layout 개선
+
+- `.tasks-layout.with-detail`의 detail width는 최소 420px 이상 또는 resizable split으로 바꾼다.
+- 10개 status column은 P1에서 phase grouping을 지원한다.
+  - Plan: `Planned`, `Ready`
+  - Build: `Coding`
+  - Verify: `PlanVerification`, `CodeReview`, `Testing`
+  - Merge: `MergeWaiting`, `Merged`
+  - Closed: `Done`, `Blocked`
+- empty column collapse는 board density option으로 둔다.
+
+#### 수동 상태 변경
+
+- 현재 `TaskDetail` 상단의 status select는 approval/gate flow를 우회할 수 있다.
+- P0에서는 label을 `수동 override`로 바꾸고 reason 입력을 요구한다. `update_task_status` 호출 시 빈 reason을 허용하지 않는다.
+- P1에서는 advanced disclosure 또는 devtools 영역으로 이동한다.
+
+#### Frontend 검증 harness
+
+현재 `apps/desktop/package.json`에는 frontend component/e2e test runner가 없다.
+
+P0 선택지:
+
+- 빠른 길: `TaskDetail` next-action decision을 pure function으로 분리하고 Vitest로 unit test를 추가한다.
+- UI 회귀까지 보는 길: Vite dev server + Playwright로 Task card click smoke를 추가한다.
+
+권장:
+
+- P0에서는 Vitest를 먼저 추가해 `Task card selection does not call startNextRoleRun`을 mock API로 검증한다.
+- Playwright는 Worker Visibility와 board layout 회귀가 커지는 P1에서 추가한다.
+
+수동 QA checklist:
+
+1. Task card를 클릭한다.
+2. 새 run이 생기지 않는지 `list_agent_runs`/UI runs count로 확인한다.
+3. `worktree 준비` 버튼을 눌렀을 때만 worktree가 생긴다.
+4. `실행 준비` 버튼을 눌렀을 때만 queued run/context-pack이 생긴다.
+5. `host 실행` 버튼을 눌렀을 때만 runner/AI/CLI가 실행된다.
+
+### G. Safe Editing 기술 설계
 
 #### Helper 위치
 
@@ -1414,20 +1781,27 @@ Atomic write 순서:
 7. best-effort fsync parent directory
 8. return new sha256
 
-### G. 테스트 전략
+### H. 테스트 전략
 
 #### Rust unit tests
 
 Planning:
 
 - migration idempotent
+- phase6 table/index DDL uses `IF NOT EXISTS` where schema patch fallback can rerun
+- phase6 schema shape validation catches old single-task materialization table
 - planning migration does not touch existing approvals CHECK
 - create/list/get planning session
 - append messages order
 - draft version unique
+- ReadyForApproval draft creates one pending planning approval
+- approve draft without pending approval fails
+- materialize draft with zero tasks returns `EmptyPlanDraft`
 - planning approval approve/reject
-- materialize same draft twice is idempotent
-- `planning_materializations.UNIQUE(draft_id)` prevents duplicate Task creation
+- materialize same multi-task draft twice is idempotent
+- `planning_materializations.UNIQUE(draft_id)` and `planning_materialization_items.UNIQUE(materialization_id, source_index)` prevent duplicate Task creation
+- broken materialization with missing task returns `MaterializationBroken`
+- artifact final rename failure leaves no DB row pointing at a missing file
 - materialize draft creates task and relation
 - draft artifact path validation
 
@@ -1464,6 +1838,13 @@ Merge:
 
 - `npm run typecheck`
 - PlanningScreen session reload smoke
+- Task card click does not call `startNextRoleRun`
+- PlanningScreen DraftApproval does not call `startNextRoleRun` unless explicit opt-in is selected
+- PlanApproval auto handoff follows automation mode/setting
+- run success auto-continuation follows automation mode/setting
+- `ConductorConfig.mode` remains record/gate only; supervisor automation policy is stored separately
+- TaskDetail initial loading does not show side-effect actions before detail fetch completes
+- NextAction button labels distinguish worktree/context/host execution side effects
 - TaskDetail retry button visibility by failureKind
 - MergeWaiting panel renders pass/fail blockers
 - Run event stream renders stdout/tool/artifact rows
@@ -1486,7 +1867,7 @@ planning session
 -> merge readiness pass
 ```
 
-### H. 구현 리스크와 순서 제약
+### I. 구현 리스크와 순서 제약
 
 1. Planning DB를 먼저 해야 한다.
    - 이유: Task provenance와 approval basis가 planning artifact에 의존한다.
@@ -1494,37 +1875,49 @@ planning session
 2. Run lifecycle metadata는 repair loop보다 먼저 해야 한다.
    - 이유: repair loop가 어떤 실패를 수리해야 하는지 failure_kind를 봐야 한다.
 
-3. Repair loop는 merge readiness보다 먼저 해야 한다.
+3. Task Board command UX hardening은 lifecycle 작업과 병행하거나 그 전에 처리한다.
+   - 이유: Task 클릭이 실행 준비를 만들 수 있으면 관찰/실행 책임 분리가 계속 흐려진다.
+   - P0 기준: 클릭은 read-only, 명시 버튼만 side effect를 만든다.
+
+4. Repair loop는 merge readiness보다 먼저 해야 한다.
    - 이유: merge readiness의 핵심 blocker가 open repair request다.
 
-4. Worker visibility는 P1로 미뤄도 되지만 event schema는 lifecycle 작업 때 같이 정해야 한다.
+5. Worker visibility는 P1로 미뤄도 되지만 event schema는 lifecycle 작업 때 같이 정해야 한다.
    - 이유: 나중에 schema를 바꾸면 run timeline migration이 어려워진다.
 
-5. Automation mode는 UI label부터 정리한다.
+6. Automation mode는 UI label부터 정리한다.
    - `observe`는 내부 enum으로 남겨도 되지만 사용자 label은 `기록만` 또는 `record`로 고정한다.
    - `repair`는 supervisor reconciler 설정으로 분리한다.
    - `gate`는 Conductor AI 설정이다.
+   - approval 후 자동 handoff도 이 설정을 따른다. `manual`에서는 approval이 run을 만들지 않는다.
+   - `ConductorConfig.mode`와 `automationPolicy.mode`를 섞지 않는다.
 
-6. 기존 CHECK 제약은 기능 milestone 안에서 즉흥적으로 바꾸지 않는다.
+7. 기존 CHECK 제약은 기능 milestone 안에서 즉흥적으로 바꾸지 않는다.
    - 이유: SQLite table rebuild는 데이터 보존/foreign key/index 재생성이 필요해 위험하다.
    - 원칙: P0/P1은 보조 column/table로 우회하고, enum 통합은 별도 migration PR로 한다.
 
-7. 새 command는 snapshot을 무조건 비대화하지 않는다.
+8. 새 command는 snapshot을 무조건 비대화하지 않는다.
    - Planning detail, run event stream, merge readiness는 lazy command로 읽는다.
    - 이유: `ProjectSnapshot`이 커지면 앱 시작/refresh가 느려진다.
+
+9. Frontend 자동 검증은 harness부터 결정한다.
+   - 현재 desktop package에는 UI test runner가 없다.
+   - P0에서 Vitest를 추가하거나, 아니면 수동 QA checklist를 release blocker로 남긴다.
 
 ## 구현 순서 추천
 
 가장 먼저 할 일:
 
 1. `docs/ai-plan-conversation-approval-feature.md`를 기준으로 Planning DB migration부터 구현한다.
-2. 동시에 `agent_runs` lifecycle metadata를 설계만 확정한다.
-3. Planning이 durable해지면 liveness-aware runner를 구현한다.
-4. 그 다음 repair loop와 merge readiness를 붙인다.
+2. 동시에 Task 클릭 side effect 제거와 Next Action command wording을 고친다.
+3. `agent_runs` lifecycle metadata를 설계/구현한다.
+4. Planning이 durable해지면 liveness-aware runner를 구현한다.
+5. 그 다음 repair loop와 merge readiness를 붙인다.
 
 이 순서가 좋은 이유:
 
 - Planning이 durable하지 않으면 Task provenance가 계속 흔들린다.
+- Task 클릭이 실행 준비를 만들면 사용자가 board를 탐색하는 것만으로 상태가 바뀔 수 있다.
 - Run lifecycle이 약하면 repair loop가 실패 원인을 잘못 해석한다.
 - Repair loop가 없으면 reviewer/tester chain이 사용자에게 부담만 준다.
 - Merge readiness는 앞 단계의 gate/repair/evidence가 있어야 제대로 닫힌다.
