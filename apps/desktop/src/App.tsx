@@ -31,6 +31,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
+  const [terminalMounted, setTerminalMounted] = useState(false);
 
   const selectedTask = useMemo<TaskSummary | null>(() => {
     if (!snapshot || !selectedTaskId) return null;
@@ -96,6 +97,12 @@ export function App() {
       cleanup?.();
     };
   }, [snapshot?.project.id]);
+
+  useEffect(() => {
+    if (screen === "terminal") {
+      setTerminalMounted(true);
+    }
+  }, [screen]);
 
   function hydrateSnapshot(next: ProjectSnapshot) {
     setSnapshot(next);
@@ -240,12 +247,18 @@ export function App() {
           {screen === "git" ? (
             <GitScreen snapshot={snapshot} onOpenProject={openProject} />
           ) : null}
-          {screen === "terminal" ? (
-            <TerminalScreen
-              snapshot={snapshot}
-              onOpenProject={openProject}
-              onSnapshotUpdated={applySnapshotUpdate}
-            />
+          {terminalMounted ? (
+            <div
+              className={screen === "terminal" ? "screen-host" : "screen-host inactive"}
+              aria-hidden={screen !== "terminal"}
+            >
+              <TerminalScreen
+                snapshot={snapshot}
+                isActive={screen === "terminal"}
+                onOpenProject={openProject}
+                onSnapshotUpdated={applySnapshotUpdate}
+              />
+            </div>
           ) : null}
           {screen === "settings" ? (
             <SettingsScreen snapshot={snapshot} onRefresh={refresh} onOpenProject={openProject} />

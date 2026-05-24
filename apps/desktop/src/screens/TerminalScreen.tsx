@@ -24,6 +24,7 @@ import type {
 
 interface TerminalScreenProps {
   snapshot: ProjectSnapshot | null;
+  isActive: boolean;
   onOpenProject: () => void;
   onSnapshotUpdated: (snapshot: ProjectSnapshot) => void;
 }
@@ -58,7 +59,12 @@ function createPane(cwd: string, nodeBinPath: string | null): TerminalPaneState 
   };
 }
 
-export function TerminalScreen({ snapshot, onOpenProject, onSnapshotUpdated }: TerminalScreenProps) {
+export function TerminalScreen({
+  snapshot,
+  isActive,
+  onOpenProject,
+  onSnapshotUpdated,
+}: TerminalScreenProps) {
   const [selectedNodeBinPath, setSelectedNodeBinPath] = useState<string | null>(null);
   const [panes, setPanes] = useState<TerminalPaneState[]>(() =>
     snapshot ? [createPane(snapshot.project.rootPath, null)] : [],
@@ -74,10 +80,15 @@ export function TerminalScreen({ snapshot, onOpenProject, onSnapshotUpdated }: T
   const xtermRefs = useRef(new Map<string, XTerm>());
   const inputDisposers = useRef(new Map<string, { dispose: () => void }>());
   const resizeObservers = useRef(new Map<string, ResizeObserver>());
+  const isActiveRef = useRef(isActive);
 
   const selectedPaneId = activePaneId ?? panes[0]?.id ?? null;
   const activePane = panes.find((pane) => pane.id === selectedPaneId) ?? panes[0] ?? null;
   const usesSplitScroll = panes.length >= 5;
+
+  useEffect(() => {
+    isActiveRef.current = isActive;
+  }, [isActive]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -186,21 +197,33 @@ export function TerminalScreen({ snapshot, onOpenProject, onSnapshotUpdated }: T
   }, []);
 
   useEffect(() => {
-    if (!snapshot) return;
+    if (!snapshot || !isActive) return;
     for (const pane of panes) {
       ensureTerminal(pane);
     }
-  }, [panes, snapshot?.project.id]);
+  }, [panes, snapshot?.project.id, isActive]);
 
   useEffect(() => {
-    if (!selectedPaneId) return;
+    if (!isActive) return;
+    requestAnimationFrame(() => {
+      for (const pane of panes) {
+        resizePane(pane.id);
+      }
+      if (selectedPaneId) {
+        xtermRefs.current.get(selectedPaneId)?.focus();
+      }
+    });
+  }, [isActive, panes.length, selectedPaneId]);
+
+  useEffect(() => {
+    if (!isActive || !selectedPaneId) return;
     paneRefs.current.get(selectedPaneId)?.scrollIntoView({
       behavior: "smooth",
       block: "nearest",
       inline: "start",
     });
     xtermRefs.current.get(selectedPaneId)?.focus();
-  }, [selectedPaneId, panes.length]);
+  }, [selectedPaneId, panes.length, isActive]);
 
   useEffect(() => {
     return () => disposeAllPanes();
@@ -330,7 +353,7 @@ export function TerminalScreen({ snapshot, onOpenProject, onSnapshotUpdated }: T
   }
 
   function ensureTerminal(pane: TerminalPaneState) {
-    if (!snapshot || xtermRefs.current.has(pane.id)) return;
+    if (!snapshot || !isActiveRef.current || xtermRefs.current.has(pane.id)) return;
     const container = terminalRefs.current.get(pane.id);
     if (!container) return;
 
@@ -377,19 +400,12 @@ export function TerminalScreen({ snapshot, onOpenProject, onSnapshotUpdated }: T
       }),
     );
 
-    const resize = () => {
-      const size = terminalSize(container);
-      terminal.resize(size.cols, size.rows);
-      void api.resizeTerminalPty(pane.id, size).catch(() => {
-        // 세션 시작 전 resize가 먼저 발생할 수 있어 무시한다.
-      });
-      return size;
-    };
+    const resize = () => resizePane(pane.id);
     const observer = new ResizeObserver(resize);
     observer.observe(container);
     resizeObservers.current.set(pane.id, observer);
 
-    const size = resize();
+    const size = resize() ?? terminalSize(container);
     updatePane(pane.id, { running: true, error: null, exitCode: null });
     void api
       .startTerminalPty(snapshot.project.id, pane.id, pane.cwd, size, pane.nodeBinPath)
@@ -401,6 +417,21 @@ export function TerminalScreen({ snapshot, onOpenProject, onSnapshotUpdated }: T
         updatePane(pane.id, { running: false, error: errorMessage(err) });
         terminal.writeln(`\r\nPTY start failed: ${errorMessage(err)}`);
       });
+  }
+
+  function resizePane(id: string): { cols: number; rows: number } | null {
+    if (!isActiveRef.current) return null;
+    const terminal = xtermRefs.current.get(id);
+    const container = terminalRefs.current.get(id);
+    if (!terminal || !container) return null;
+    const rect = container.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return null;
+    const size = terminalSize(container);
+    terminal.resize(size.cols, size.rows);
+    void api.resizeTerminalPty(id, size).catch(() => {
+      // 세션 시작 전 resize가 먼저 발생할 수 있어 무시한다.
+    });
+    return size;
   }
 
   function disposePane(id: string, options: { stopPty: boolean }) {
