@@ -1301,9 +1301,25 @@ fn run_project_queue_worker(
                 }
                 std::thread::sleep(Duration::from_millis(250));
             }
-            Ok(None) => {
-                std::thread::sleep(Duration::from_millis(800));
-            }
+            Ok(None) => match reconcile_project_next_role_gap(&app, &context, &project_id) {
+                Ok(Some(_run)) => {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Ok(None) => {
+                    std::thread::sleep(Duration::from_millis(800));
+                }
+                Err(error) => {
+                    let _ = app.emit(
+                        "agent-run://updated",
+                        json!({
+                            "projectId": project_id,
+                            "status": "SupervisorReconcileFailed",
+                            "error": command_error_summary(&error)
+                        }),
+                    );
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            },
             Err(error) => {
                 let _ = app.emit(
                     "agent-run://updated",
@@ -1317,6 +1333,29 @@ fn run_project_queue_worker(
             }
         }
     }
+}
+
+fn reconcile_project_next_role_gap(
+    app: &AppHandle,
+    context: &ProjectContext,
+    project_id: &str,
+) -> CommandResult<Option<AgentRunSummary>> {
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    let run = db::reconcile_next_role_gap(&mut conn, &context.root_path, project_id)?;
+    if let Some(run) = &run {
+        let _ = app.emit(
+            "agent-run://updated",
+            json!({
+                "projectId": project_id,
+                "taskId": run.task_id,
+                "runId": run.id,
+                "status": "Queued",
+                "source": "supervisor-reconcile",
+                "roleId": run.role_id
+            }),
+        );
+    }
+    Ok(run)
 }
 
 fn conductor_allows_queued_run(

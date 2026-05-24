@@ -758,7 +758,9 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               <section className="settings-section">
                 <div className="settings-section-head">
                   <h3>전역 오케스트레이터</h3>
-                  <p className="muted">실행 대기 중인 role을 관찰하거나 실행 전에 한 번 확인하는 지휘자 AI입니다.</p>
+                  <p className="muted">
+                    다음 단계 복구는 Helm supervisor가 맡고, 지휘자 AI는 queued run 시작 전 기록 또는 확인만 맡습니다.
+                  </p>
                 </div>
                 {!appSettingsLoaded ? (
                   <p className="settings-empty">전역 설정을 불러오는 중입니다.</p>
@@ -900,7 +902,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                               value={orchestrator.mode}
                               onChange={(event) => updateOrchestrator({ mode: event.target.value })}
                             >
-                              <option value="observe">관찰만</option>
+                              <option value="observe">기록만</option>
                               <option value="gate">실행 전 확인</option>
                             </select>
                           </label>

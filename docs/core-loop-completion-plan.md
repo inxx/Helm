@@ -145,8 +145,26 @@ Task 생성
 
 - Hive는 PTY lifecycle, CLI agent bootstrap, session resume, local runtime guard, workspace/task protocol, dispatch/report ledger, terminal streaming 문제에서 우선 참고한다.
 - MagesticAI는 spec/task lifecycle, worktree isolation, planner/coder/QA 흐름, test discovery, security scan, QA signoff, merge readiness, multi-provider 설정 문제에서 우선 참고한다.
+- Multica는 `Queued -> Dispatched -> Running -> Completed/Failed` task lifecycle, daemon claim, timeout/retry 분리, issue 상태 rollback 기준에서 참고한다.
+- CLI Agent Orchestrator(CAO)는 supervisor-worker 분리, worker session isolation, handoff/assign/message primitive, observer-only plugin 경계를 참고한다.
+- Spec Kitty는 repo-native `spec -> plan -> tasks -> next -> review -> accept -> merge` 흐름과 `next` 명령처럼 다음 작업을 결정론적으로 선택하는 방식에서 참고한다.
 - 라이선스가 다른 저장소의 코드는 복사하지 않는다. 필요한 경우 문제 정의, 데이터 계약, failure mode, UX 흐름, 테스트 전략만 차용한다.
 - 참고 후에는 "어떤 문제로 막혔는지", "어느 프로젝트의 어떤 방식을 확인했는지", "Helm에는 왜 다르게 적용했는지"를 구현 PR 또는 작업 노트에 남긴다.
+
+### 2026-05-24 오케스트레이션 블로커 결정
+
+블로커:
+
+- `observe`라는 이름이 passive event 기록인지, pipeline watchdog인지 불명확했다.
+- planner 이후 coder/reviewer/tester로 넘어가는 책임이 planner agent, conductor AI, backend worker 사이에서 섞여 보였다.
+
+결정:
+
+- Helm의 다음 role 결정과 큐 생성은 Helm backend의 deterministic supervisor reconciler가 맡는다.
+- planner는 계획과 `PlanApproval` 생성까지만 담당한다.
+- `PlanApproval` 승인 후 task가 `Ready`인데 coder run이 없거나, `PlanVerification`/`CodeReview`/`Testing` 상태에서 해당 gate role run이 없으면 supervisor가 한 번 큐잉한다.
+- 이미 해당 role run record가 있으면 자동 retry하지 않는다. 실패/취소/NeedsInspection은 사용자의 명시 retry나 후속 repair 흐름으로 처리한다.
+- 전역 Conductor AI는 queued run이 시작되기 전 `run`/`hold`를 판단하는 optional gate로 둔다. 상태 전이와 queue repair의 source of truth가 아니다.
 
 ## 기능 갭 인벤토리
 

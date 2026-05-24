@@ -1054,6 +1054,32 @@ pub fn prepare_next_role_context(
     prepare_role_context(conn, root, project_id, task_id, role_id)
 }
 
+pub fn reconcile_next_role_gap(
+    conn: &mut Connection,
+    root: &Path,
+    project_id: &str,
+) -> CommandResult<Option<AgentRunSummary>> {
+    for task in list_tasks(conn, project_id)? {
+        if !matches!(
+            task.status.as_str(),
+            "Ready" | "PlanVerification" | "CodeReview" | "Testing"
+        ) {
+            continue;
+        }
+        let Some(role_id) = next_role_for_task_status(&task.status) else {
+            continue;
+        };
+        if has_active_run(conn, project_id, &task.id)? {
+            continue;
+        }
+        if has_role_run(conn, project_id, &task.id, role_id)? {
+            continue;
+        }
+        return prepare_next_role_context(conn, root, project_id, &task.id).map(Some);
+    }
+    Ok(None)
+}
+
 pub fn claim_host_run(
     conn: &Connection,
     project_id: &str,
@@ -2832,6 +2858,25 @@ fn has_active_run(conn: &Connection, project_id: &str, task_id: &str) -> Command
         )
         .optional()
         .map_err(|err| CommandError::database("실행 상태를 확인하지 못했습니다.", err))?;
+    Ok(exists.is_some())
+}
+
+fn has_role_run(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    role_id: &str,
+) -> CommandResult<bool> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM agent_runs
+             WHERE project_id = ?1 AND task_id = ?2 AND role_id = ?3
+             LIMIT 1",
+            params![project_id, task_id, role_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| CommandError::database("role 실행 이력을 확인하지 못했습니다.", err))?;
     Ok(exists.is_some())
 }
 
@@ -5770,6 +5815,40 @@ mod tests {
 
         assert_eq!(run.role_id, "coder");
         assert_eq!(run.status, "Queued");
+    }
+
+    #[test]
+    fn reconcile_next_role_gap_queues_missing_coder_after_approval() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+
+        run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "planner").expect("planner");
+        let approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("approvals")
+            .remove(0);
+        decide_approval(&mut conn, &project.id, &approval.id, "Approved", "승인").expect("approve");
+
+        let run = reconcile_next_role_gap(&mut conn, &repo.root, &project.id)
+            .expect("reconcile")
+            .expect("queued run");
+
+        assert_eq!(run.role_id, "coder");
+        assert_eq!(run.status, "Queued");
+        let second =
+            reconcile_next_role_gap(&mut conn, &repo.root, &project.id).expect("reconcile again");
+        assert!(second.is_none());
+    }
+
+    #[test]
+    fn reconcile_next_role_gap_does_not_start_planner() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        create_test_task(&mut conn, &project.id);
+
+        let run = reconcile_next_role_gap(&mut conn, &repo.root, &project.id).expect("reconcile");
+
+        assert!(run.is_none());
     }
 
     #[test]
