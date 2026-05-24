@@ -60,7 +60,7 @@ Helm backend가 상태, 승인, 다음 role, artifact, gate, audit의 source of 
 | Automation mode 저장 위치 혼동 | 기존 `ConductorConfig.mode`는 `observe/gate` 성격인데 여기에 `repair/full_auto/manual`까지 넣으면 Conductor AI 정책과 supervisor handoff 정책이 섞인다. | `ConductorConfig.mode`는 queued run gate/record 전용으로 두고, 자동 handoff는 별도 `automationPolicy` 또는 project setting key로 분리한다. |
 | Task 카드 클릭 side effect | 현재 UI 구조에서는 Task 카드 클릭이 상세 열기처럼 보이지만, `TaskDetail` mount 후 조건이 맞으면 `autoStartNextRole()`이 실행되어 run/context/worktree가 만들어질 수 있다. 관찰과 실행이 섞이면 사용자가 의도하지 않은 작업이 시작된다. | Task 클릭은 read-only selection으로 고정한다. 자동 handoff는 backend supervisor/queue worker만 담당하고, UI는 명시 버튼으로만 `worktree 준비`, `실행 준비`, `host 실행`을 호출한다. |
 | Approval-triggered handoff 경계 | `PlanningScreen.approvePlanDraft()`와 `approve_approval` backend는 명시 승인 후 `start_next_role_run`/`prepare_next_role_context`를 호출할 수 있다. 카드 클릭은 막아도 승인 버튼의 side effect가 불명확하면 같은 혼동이 남는다. | 승인 버튼은 side effect를 버튼 문구와 confirmation에 드러낸다. 기본 P0는 "승인/Task 생성"과 "다음 role 실행 준비"를 분리하고, 자동 준비는 명시 opt-in 또는 supervisor setting으로만 둔다. |
-| 실행 명령 의미 불명확 | `worktree 준비`, `실행 준비`, `host 실행`, `retry 준비`, `승인하고 계속`이 각각 어떤 파일/DB/run 변화를 만드는지 한 화면에서 바로 구분하기 어렵다. | Task Detail의 Next Action은 실행 전 effect summary와 command kind를 표시한다. 실제 agent/CLI 실행 가능 버튼은 `host 실행`처럼 파일 변경 가능성을 드러낸다. |
+| 실행 명령 의미 불명확 | `worktree 준비`, `실행 준비`, `host 실행`, `retry 준비`, `계획 승인`이 각각 어떤 파일/DB/run 변화를 만드는지 한 화면에서 바로 구분하기 어렵다. | Task Detail의 Next Action은 실행 전 effect summary와 command kind를 표시한다. 실제 agent/CLI 실행 가능 버튼은 `host 실행`처럼 파일 변경 가능성을 드러낸다. |
 | Planning DraftApproval과 Task PlanApproval 혼동 | 둘 다 "계획 승인"처럼 보이면 사용자가 왜 두 번 승인하는지 이해하기 어렵다. | UI 문구를 명확히 분리한다. DraftApproval은 "Task 생성 승인", PlanApproval은 "구현 시작 승인"이다. |
 | Planning materialization 중복 | 하나의 draft가 여러 Task를 만들 수 있는데 단일 `task_id`만 저장하면 idempotency와 provenance가 깨진다. | `planning_materializations`는 draft별 batch row로 두고, `planning_materialization_items`에 생성된 Task 목록을 저장한다. batch는 `UNIQUE(draft_id)`, item은 `UNIQUE(materialization_id, source_index)`를 둔다. |
 | Materialized Task 누락/삭제 | materialized task가 삭제되거나 FK `SET NULL`이 된 뒤 같은 draft를 다시 materialize할 때 복구 정책이 애매하다. | batch/item row가 있는데 item의 `task_id`가 없거나 task lookup에 실패하면 새 Task를 조용히 만들지 않는다. `MaterializationBroken` error와 repair command로 명시 복구한다. |
@@ -578,9 +578,11 @@ Task/Kanban 화면의 기준은 아래처럼 고정한다.
 ```text
 Task 카드 클릭 = 관찰/선택
 Next Action 버튼 = 명시적 준비/실행
-Supervisor reconciler = 누락된 handoff 복구
+Supervisor reconciler = automation policy가 허용할 때만 누락된 handoff 복구
 Conductor AI = queued run 시작 전 기록 또는 gate
 ```
+
+2026-05-25 P0 적용 상태: 기본 automation policy는 manual이다. queue worker, supervisor reconciler, run-success auto handoff는 모두 off이고, 사용자가 `실행 준비`와 `host 실행`을 분리해 눌러야 한다.
 
 ### 현재 확인한 문제
 
@@ -591,8 +593,8 @@ Conductor AI = queued run 시작 전 기록 또는 gate
 ### UI 결정
 
 - Task 카드 클릭은 run, worktree, context pack, approval, status transition을 만들지 않는다.
-- 자동 진행은 backend supervisor/queue worker에서만 발생한다.
-- backend 자동 진행도 automation mode helper를 통과해야 한다. `queue_next_role_after_success`, `reconcile_next_role_gap`, `spawn_next_role_run_after_approval`은 같은 정책을 사용한다.
+- P0 기본값에서는 자동 진행이 발생하지 않는다. 후속 automation mode가 켜진 경우에만 backend supervisor/queue worker가 handoff를 맡는다.
+- backend 자동 진행은 automation mode helper를 통과해야 한다. `queue_next_role_after_success`, `reconcile_next_role_gap`은 같은 정책을 사용한다.
 - Task Detail은 처음 열릴 때 `detailsLoaded` 전까지 "상태 확인 중"을 보여주고 destructive/side-effect 버튼을 숨긴다.
 - Planning 화면의 DraftApproval도 같은 원칙을 따른다. `승인/Task 생성` 버튼은 Task materialization까지만 수행하고, `planner 실행 준비`는 별도 버튼 또는 명시 opt-in으로 분리한다.
 - 실행 버튼은 다음처럼 효과를 명확히 구분한다.
@@ -600,7 +602,7 @@ Conductor AI = queued run 시작 전 기록 또는 gate
   - `실행 준비`: context-pack artifact와 queued run 생성
   - `host 실행`: 실제 AI/CLI 실행, 파일 변경 가능
   - `retry 준비`: 이전 terminal run을 근거로 새 queued run 생성
-  - `승인하고 계속`: approval decision 저장, supervisor handoff 대상이 될 수 있음
+  - `계획 승인`: approval decision 저장과 TaskStatus 전이만 수행
 - 수동 상태 변경 select는 P1에서 고급/개발용 영역으로 이동하거나 confirmation + reason 입력을 요구한다.
 
 ### Kanban 결정
@@ -1537,7 +1539,7 @@ P1은 read-only observe만 제공한다. steering input은 P2로 둔다.
 - `apps/desktop/src-tauri/src/main.rs`
 - `apps/desktop/src-tauri/src/db.rs`
 
-현재 흐름:
+2026-05-25 수정 전 발견된 흐름:
 
 ```text
 TaskBoard card click
@@ -1590,21 +1592,21 @@ run_host_role success
 | `실행 준비` | `prepare_role_context` | context-pack artifact + queued run 생성 |
 | `host 실행` | `run_host_role` | 실제 runner/AI/CLI 실행, 파일 변경 가능 |
 | `retry 준비` | `retry_host_role` | terminal run 근거로 새 queued run 생성 |
-| `승인하고 계속` | `approve_approval` | approval decision 저장, supervisor handoff 대상 |
+| `계획 승인` | `approve_approval` | approval decision 저장, PlanApproval이면 TaskStatus `Ready` 전이 |
 
 #### P0 코드 변경
 
 `TaskDetail.tsx`:
 
-- `autoStartKeyRef`와 `autoStartNextRole`을 제거한다.
-- `useEffect`에서 `api.startNextRoleRun`을 호출하지 않는다.
-- `detailsLoaded === false`이면 `NextAction` 대신 loading/skeleton card를 렌더링한다.
-- `approvePendingPlan` toast는 "Coder 자동 실행을 시작합니다"가 아니라 "승인 완료. 다음 role handoff를 확인합니다"처럼 supervisor 중심 문구로 바꾼다.
-- `approvePendingPlan`이 `approve_approval`의 backend spawn을 유지한다면 버튼 label을 "승인하고 coder 실행 준비"로 바꾼다. 유지하지 않을 경우 backend spawn을 setting-gated로 바꾸고 UI는 별도 `Coder 실행 준비` 버튼을 보여준다.
+- 완료: `autoStartKeyRef`와 `autoStartNextRole`을 제거했다.
+- 완료: `useEffect`에서 `api.startNextRoleRun`을 호출하지 않는다.
+- 완료: `detailsLoaded === false`이면 `NextAction` 대신 상태 확인 card를 렌더링한다.
+- 완료: `approvePendingPlan` toast는 승인 후 다음 role 준비를 사용자가 시작하도록 안내한다.
+- 완료: PlanApproval 버튼 label을 `계획 승인`으로 바꿨고, backend spawn은 제거했다.
 
 `PlanningScreen.tsx`:
 
-- `approvePlanDraft`는 기본적으로 Task materialization까지만 수행한다.
+- 완료: `approvePlanDraft`는 기본적으로 Task materialization까지만 수행한다.
 - 첫 planner run을 바로 준비하려면 버튼/checkbox를 `Task 생성 후 planner 실행 준비`로 분리한다.
 - 이미 추적 중인 Task를 여는 path는 read-only navigation으로 유지한다.
 
@@ -1612,8 +1614,9 @@ run_host_role success
 
 - `start_next_role_run` command는 남겨도 되지만 UI click path에서 호출하지 않는다.
 - command 이름이 계속 혼동되면 `supervisor_prepare_next_role_run` 또는 `queue_next_role_run`으로 rename하는 후속 작업을 둔다.
-- `approve_approval`의 `spawn_next_role_run_after_approval`은 automation mode/setting을 확인한다. `manual`이면 approval decision만 저장하고 run은 만들지 않는다.
-- `queue_next_role_after_success`도 같은 helper를 확인한다. `manual`이면 다음 role을 큐잉하지 않고, `repair/gate`에서는 정책에 맞는 queued run만 만든다.
+- 완료: `approve_approval`은 approval decision만 저장하고 run을 만들지 않는다.
+- 완료: `queue_next_role_after_success`는 `auto_handoff_enabled=false` 기본 정책에서는 다음 role을 큐잉하지 않는다.
+- 완료: queue worker와 supervisor reconciler는 P0 manual policy에서 off다.
 - 자동 handoff helper 후보:
 
 ```rust
@@ -1839,9 +1842,9 @@ Merge:
 - `npm run typecheck`
 - PlanningScreen session reload smoke
 - Task card click does not call `startNextRoleRun`
-- PlanningScreen DraftApproval does not call `startNextRoleRun` unless explicit opt-in is selected
-- PlanApproval auto handoff follows automation mode/setting
-- run success auto-continuation follows automation mode/setting
+- PlanningScreen DraftApproval does not call `startNextRoleRun`
+- PlanApproval approval does not create a next agent run in manual mode
+- run success does not auto-continue in manual mode
 - `ConductorConfig.mode` remains record/gate only; supervisor automation policy is stored separately
 - TaskDetail initial loading does not show side-effect actions before detail fetch completes
 - NextAction button labels distinguish worktree/context/host execution side effects

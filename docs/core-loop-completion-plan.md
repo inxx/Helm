@@ -162,7 +162,8 @@ Task 생성
 
 - Helm의 다음 role 결정과 큐 생성은 Helm backend의 deterministic supervisor reconciler가 맡는다.
 - planner는 계획과 `PlanApproval` 생성까지만 담당한다.
-- `PlanApproval` 승인 후 task가 `Ready`인데 coder run이 없거나, `PlanVerification`/`CodeReview`/`Testing` 상태에서 해당 gate role run이 없으면 supervisor가 한 번 큐잉한다.
+- 2026-05-25 P0 기준 기본 automation policy는 manual이다. `PlanApproval` 승인, Task 카드 클릭, Planning Task 생성, run 성공은 다음 run을 자동 생성하지 않는다.
+- 후속 automation mode가 명시적으로 켜진 경우에만 `PlanApproval` 승인 후 task가 `Ready`인데 coder run이 없거나, `PlanVerification`/`CodeReview`/`Testing` 상태에서 해당 gate role run이 없을 때 supervisor가 한 번 큐잉한다.
 - 이미 해당 role run record가 있으면 자동 retry하지 않는다. 실패/취소/NeedsInspection은 사용자의 명시 retry나 후속 repair 흐름으로 처리한다.
 - 전역 Conductor AI는 queued run이 시작되기 전 `run`/`hold`를 판단하는 optional gate로 둔다. 상태 전이와 queue repair의 source of truth가 아니다.
 

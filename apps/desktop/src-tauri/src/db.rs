@@ -1129,6 +1129,35 @@ pub fn claim_host_run(
             "runner": runner_payload.clone()
         }),
     )?;
+    if run.role_id == "coder" {
+        let task = get_task(conn, &run.task_id)?;
+        if task.status == "Ready" {
+            conn.execute(
+                "UPDATE tasks
+                 SET status = 'Coding', status_reason = ?1, updated_at = ?2, last_transition_at = ?2
+                 WHERE id = ?3 AND project_id = ?4",
+                params!["구현자 실행 중", started_at, task.id, project_id],
+            )
+            .map_err(|err| {
+                CommandError::database("태스크 실행 상태를 저장하지 못했습니다.", err)
+            })?;
+            insert_audit(
+                conn,
+                project_id,
+                "Task",
+                Some(&task.id),
+                "task.status_changed",
+                json!({
+                    "taskId": task.id,
+                    "from": task.status,
+                    "to": "Coding",
+                    "runId": run_id,
+                    "reason": "coder host run claimed",
+                    "source": "host_runner"
+                }),
+            )?;
+        }
+    }
     append_and_emit_run_event(
         conn,
         project_id,
@@ -1175,7 +1204,8 @@ pub fn run_host_role(
     let settings = effective_settings(conn, project_id)?;
     let placeholders = host_runner_placeholders(root, &worktree, &run);
     let runner_command = resolve_host_runner_command(&settings, &run.role_id, &placeholders)?;
-    let command_args = runner_command.args.clone();
+    let command_args =
+        resolve_command_args(Path::new(&worktree.worktree_path), &runner_command.args);
     let timeout_seconds = runner_command.timeout_seconds;
     if command_args.is_empty() {
         return Err(CommandError::validation(
@@ -1456,6 +1486,37 @@ pub fn run_host_role(
 
         if final_status == "Succeeded" && result_status.as_deref() == Some("pass") {
             apply_successful_role_result(&tx, project_id, &task, &run.role_id, run_id)?;
+        } else if run.role_id == "coder" {
+            let changed = tx
+                .execute(
+                    "UPDATE tasks
+                     SET status = 'Ready', status_reason = ?1, updated_at = ?2, last_transition_at = ?2
+                     WHERE id = ?3 AND project_id = ?4 AND status = 'Coding'",
+                    params![
+                        format!("구현자 실행 점검 필요: {final_status}"),
+                        finished_at,
+                        run.task_id,
+                        project_id
+                    ],
+                )
+                .map_err(|err| CommandError::database("태스크 실행 상태를 저장하지 못했습니다.", err))?;
+            if changed > 0 {
+                insert_audit(
+                    &tx,
+                    project_id,
+                    "Task",
+                    Some(&run.task_id),
+                    "task.status_changed",
+                    json!({
+                        "taskId": run.task_id,
+                        "from": "Coding",
+                        "to": "Ready",
+                        "runId": run_id,
+                        "reason": format!("coder host run ended with {final_status}"),
+                        "source": "host_runner"
+                    }),
+                )?;
+            }
         }
 
         tx.commit()
@@ -1631,6 +1692,20 @@ pub fn next_queued_agent_run(
     )
     .optional()
     .map_err(|err| CommandError::database("대기 중인 실행을 읽지 못했습니다.", err))
+}
+
+pub fn has_running_agent_run(conn: &Connection, project_id: &str) -> CommandResult<bool> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM agent_runs
+             WHERE project_id = ?1 AND status = 'Running'
+             LIMIT 1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| CommandError::database("실행 중인 role run을 확인하지 못했습니다.", err))?;
+    Ok(exists.is_some())
 }
 
 pub fn list_task_timeline(
@@ -1915,6 +1990,7 @@ pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> Comman
         .execute(
             "UPDATE agent_runs
              SET status = 'NeedsInspection',
+                 result_status = COALESCE(result_status, 'needs_changes'),
                  finished_at = COALESCE(finished_at, ?1),
                  updated_at = ?1
              WHERE project_id = ?2 AND status = 'Running'",
@@ -2827,7 +2903,23 @@ fn task_slug(title: &str, task_id: &str) -> String {
     }
     let slug = slug.trim_matches('-');
     let prefix = if slug.is_empty() { "task" } else { slug };
-    let short_id = task_id.chars().take(8).collect::<String>();
+    let compact_id = task_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>();
+    let short_id = compact_id
+        .chars()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let short_id = if short_id.is_empty() {
+        task_id.chars().take(8).collect::<String>()
+    } else {
+        short_id
+    };
     format!("{prefix}-{short_id}")
 }
 
@@ -3162,6 +3254,66 @@ fn runner_adapter_label(kind: RunnerAdapterKind) -> &'static str {
         RunnerAdapterKind::Process => "process",
         RunnerAdapterKind::CodexAppServer => "codex_app_server",
     }
+}
+
+fn resolve_command_args(cwd: &Path, args: &[String]) -> Vec<String> {
+    let Some(program) = args.first() else {
+        return Vec::new();
+    };
+    let mut resolved = args.to_vec();
+    if let Some(path) = resolve_command_program(cwd, program) {
+        resolved[0] = path.to_string_lossy().to_string();
+    }
+    resolved
+}
+
+fn resolve_command_program(cwd: &Path, program: &str) -> Option<PathBuf> {
+    let program_path = Path::new(program);
+    if program_path.is_absolute() {
+        return program_path.is_file().then(|| program_path.to_path_buf());
+    }
+    if program.contains('/') {
+        let candidate = cwd.join(program_path);
+        return candidate.is_file().then(|| candidate);
+    }
+    command_search_dirs()
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+        .or_else(|| resolve_cli_binary_from_login_shell(program))
+}
+
+fn command_search_dirs() -> impl Iterator<Item = PathBuf> {
+    let mut dirs = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    dirs.extend([
+        PathBuf::from("/Applications/Codex.app/Contents/Resources"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/sbin"),
+        PathBuf::from("/sbin"),
+    ]);
+    dirs.into_iter()
+}
+
+fn resolve_cli_binary_from_login_shell(binary: &str) -> Option<PathBuf> {
+    let output = Command::new("/bin/zsh")
+        .args(["-lc", "command -v -- \"$HELM_CLI_BINARY\""])
+        .env("HELM_CLI_BINARY", binary)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
 }
 
 fn write_runner_request(
@@ -5194,6 +5346,34 @@ mod tests {
         .expect("approve");
         let updated = get_task(&conn, &task.id).expect("task");
         assert_eq!(updated.status, "Ready");
+    }
+
+    #[test]
+    fn plan_approval_does_not_create_next_run_without_explicit_prepare() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+
+        run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "planner").expect("planner");
+        let approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("approvals")
+            .remove(0);
+
+        decide_approval(&mut conn, &project.id, &approval.id, "Approved", "승인").expect("approve");
+
+        let run_count_after_approval: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_runs WHERE task_id = ?1",
+                params![&task.id],
+                |row| row.get(0),
+            )
+            .expect("run count");
+        assert_eq!(run_count_after_approval, 1);
+
+        let next =
+            prepare_next_role_context(&mut conn, &repo.root, &project.id, &task.id).expect("next");
+        assert_eq!(next.role_id, "coder");
+        assert_eq!(next.status, "Queued");
     }
 
     #[test]

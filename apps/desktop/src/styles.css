@@ -751,7 +751,8 @@ textarea {
 }
 
 .tasks-layout.with-detail {
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) clamp(420px, 36vw, 560px);
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .task-workspace {
@@ -1115,6 +1116,8 @@ textarea {
   display: grid;
   align-content: start;
   gap: 14px;
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   border-left: 1px solid var(--line);
   background: var(--surface);
@@ -1182,10 +1185,13 @@ textarea {
 }
 
 .task-console {
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   align-content: stretch;
   gap: 0;
-  overflow: hidden;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 0;
 }
 
@@ -1198,6 +1204,7 @@ textarea {
 .task-console-summary > p {
   color: var(--soft);
   font-size: 12.5px;
+  overflow-wrap: anywhere;
 }
 
 .task-status-control {
@@ -1345,8 +1352,8 @@ textarea {
   display: grid;
   align-content: start;
   gap: 14px;
-  min-height: 0;
-  overflow-y: auto;
+  min-height: max-content;
+  overflow: visible;
   padding: 14px 16px 20px;
 }
 
@@ -1641,12 +1648,14 @@ textarea {
   overflow: hidden;
   color: var(--text-2);
   text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .artifact-viewer {
   max-height: 240px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface-sunken);
@@ -1655,6 +1664,7 @@ textarea {
   font-size: 11.5px;
   line-height: 1.55;
   padding: 10px 12px;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
@@ -1759,6 +1769,24 @@ textarea {
   color: var(--text-muted);
   font-family: var(--mono);
   font-size: 11.5px;
+}
+
+.task-console .plain-list li,
+.task-console .file-list li,
+.task-console .commit-list li,
+.task-console .plain-list strong,
+.task-console .file-list strong,
+.task-console .commit-list strong,
+.task-console .plain-list span,
+.task-console .file-list span,
+.task-console .commit-list span {
+  min-width: 0;
+}
+
+.task-console .plain-list span,
+.task-console .file-list span,
+.task-console .commit-list span {
+  overflow-wrap: anywhere;
 }
 
 /* File list — status code badge */
@@ -4391,6 +4419,50 @@ textarea {
   line-height: 1.5;
 }
 
+.planner-copy-changes {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 10px;
+  min-width: 0;
+}
+
+.planner-copy-changes h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.planner-copy-change {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.planner-copy-change span {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.planner-copy-change p {
+  display: grid;
+  gap: 2px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.planner-copy-change strong {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
 .planner-task-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -4614,9 +4686,8 @@ textarea {
 .plan-document-tasks {
   display: grid;
   gap: 8px;
-  max-height: 260px;
-  overflow-y: auto;
-  padding-right: 4px;
+  min-height: 0;
+  padding-bottom: 16px;
 }
 
 .plan-preview-task-counts {

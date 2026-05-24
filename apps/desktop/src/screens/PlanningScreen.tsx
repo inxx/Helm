@@ -47,9 +47,17 @@ interface PlannerDraftTask {
   title: string;
   description: string;
   subtasks: string[];
+  copyChanges: PlannerCopyChange[];
   acceptanceCriteria: string[];
   risks: string[];
   testPlan: string[];
+}
+
+interface PlannerCopyChange {
+  location: string;
+  currentText: string | null;
+  proposedText: string;
+  reason: string;
 }
 
 interface PlannerDraftParseResult {
@@ -57,7 +65,7 @@ interface PlannerDraftParseResult {
   note: string | null;
 }
 
-const PLANNER_UI_TIMEOUT_MS = 12_000;
+const PLANNER_SOFT_NOTICE_MS = 12_000;
 const PLANNER_REFINE_DELAY_MS = 2_000;
 
 export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask }: PlanningScreenProps) {
@@ -209,7 +217,13 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       if (!shouldRunPlannerRefinement(sessionId, pendingMessageId)) return;
       await waitForNextPaint();
       if (!shouldRunPlannerRefinement(sessionId, pendingMessageId)) return;
-      const plannerResult = await runPlannerPlanMode(goalText, goalText, null, fallbackDraft);
+      const plannerResult = await runPlannerPlanMode(goalText, goalText, null, fallbackDraft, () => {
+        markPlannerStillWorking(
+          sessionId,
+          pendingMessageId,
+          "AI planner가 아직 계획을 다듬는 중입니다. 로컬 초안으로 계속 진행할 수 있고, 응답이 도착하면 이 문서가 갱신됩니다.",
+        );
+      });
       const draft = plannerResult.draft;
       const responseMessage = plannerResult.message ?? plannerOpeningMessage(draft, jiraState);
       setSessions((current) =>
@@ -342,6 +356,13 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         goalText,
         currentDraft,
         fallbackDraft,
+        () => {
+          markPlannerStillWorking(
+            sessionId,
+            pendingMessageId,
+            "AI planner가 아직 수정 요청을 반영하는 중입니다. 현재 로컬 수정안으로 계속 진행할 수 있습니다.",
+          );
+        },
       );
       const revisedDraft = plannerResult.draft;
       const responseMessage = plannerResult.message ?? plannerRevisionMessage(revisedDraft, nextRevision);
@@ -404,12 +425,36 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     }
   }
 
+  function markPlannerStillWorking(sessionId: string, messageId: string, content: string) {
+    if (!shouldRunPlannerRefinement(sessionId, messageId)) return;
+    setSessions((current) =>
+      current.map((item) =>
+        item.id === sessionId && item.status !== "Approved"
+          ? {
+              ...item,
+              messages: item.messages.map((message) =>
+                message.id === messageId
+                  ? {
+                      ...message,
+                      content,
+                      createdLabel: "진행 중",
+                      pending: true,
+                    }
+                  : message,
+              ),
+            }
+          : item,
+      ),
+    );
+  }
+
   function reportPlannerWarning(warning: string | null) {
-    setError(warning);
     if (!warning) return;
+    const fallback = isPlannerFallbackWarning(warning);
+    setError(fallback ? null : warning);
     showToast({
-      tone: "error",
-      title: "planner 실행 실패",
+      tone: fallback ? "info" : "error",
+      title: fallback ? "AI planner 응답 지연" : "planner 실행 확인 필요",
       description: warning,
     });
   }
@@ -419,14 +464,16 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     goalText: string,
     currentDraft: PlannerDraft | null,
     fallbackDraft: PlannerDraft,
+    onSoftTimeout?: () => void,
   ): Promise<{ draft: PlannerDraft; message: string | null; warning: string | null }> {
     try {
-      const result = await withPlannerUiTimeout(
+      const result = await withPlannerSoftNotice(
         api.runPlannerConversation(projectSnapshot.project.id, {
           message,
           goalText,
           currentDraftJson: currentDraft,
         }),
+        onSoftTimeout,
       );
       const parsedDraft = parsePlannerDraft(result.responseText, fallbackDraft);
       const warning = plannerResultWarning(result);
@@ -443,10 +490,14 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         warning,
       };
     } catch (err) {
+      const message = errorMessage(err);
+      const fallback = isPlannerFallbackWarning(message);
       return {
         draft: fallbackDraft,
         message: null,
-        warning: `planner plan mode 실행 실패: ${errorMessage(err)}`,
+        warning: fallback
+          ? "AI planner가 오래 걸려 로컬 초안을 유지했습니다. 현재 초안으로 계속 진행할 수 있고, 응답이 돌아오면 문서를 갱신합니다."
+          : `planner 실행 실패: ${message}`,
       };
     }
   }
@@ -487,12 +538,6 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
 
       const firstTask = createdTasks[0];
       if (!firstTask) return;
-      let autoStartWarning: string | null = null;
-      try {
-        await api.startNextRoleRun(projectSnapshot.project.id, firstTask.id);
-      } catch (err) {
-        autoStartWarning = `Task는 생성됐지만 첫 planner 자동 실행을 시작하지 못했습니다: ${errorMessage(err)}`;
-      }
 
       setSessions((current) =>
         current.map((item) =>
@@ -508,20 +553,12 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         ),
       );
       await onRefresh();
-      setError(autoStartWarning);
-      if (autoStartWarning) {
-        showToast({
-          tone: "error",
-          title: "planner 자동 실행 실패",
-          description: autoStartWarning,
-        });
-      } else {
-        showToast({
-          tone: "success",
-          title: "Plan Document 저장 완료",
-          description: `${createdTasks.length}개의 Task를 생성했습니다.`,
-        });
-      }
+      setError(null);
+      showToast({
+        tone: "success",
+        title: "Task 생성 완료",
+        description: `${createdTasks.length}개의 Task를 생성했습니다. 첫 Task에서 Planner 준비를 시작하세요.`,
+      });
       onOpenTask(firstTask.id);
     } catch (err) {
       const message = errorMessage(err);
@@ -735,6 +772,30 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                         <strong>{task.title}</strong>
                       </div>
                       <p>{task.description}</p>
+                      {task.copyChanges.length > 0 ? (
+                        <div className="planner-copy-changes">
+                          <h4>Proposed Copy</h4>
+                          {task.copyChanges.map((change) => (
+                            <div className="planner-copy-change" key={`${change.location}-${change.proposedText}`}>
+                              <span>{change.location}</span>
+                              {change.currentText ? (
+                                <p>
+                                  <strong>현재</strong>
+                                  {change.currentText}
+                                </p>
+                              ) : null}
+                              <p>
+                                <strong>제안</strong>
+                                {change.proposedText}
+                              </p>
+                              <p>
+                                <strong>이유</strong>
+                                {change.reason}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                       <div className="planner-task-grid">
                         <div>
                           <h4>Subtasks</h4>
@@ -808,22 +869,37 @@ function buildPlannerDraft(goal: string, linkedTaskTitle: string | null): Planne
   const title = titleFromGoal(goal);
   const normalizedGoal = goal.replace(/\s+/g, " ").trim();
   const hasLinkedTask = Boolean(linkedTaskTitle);
+  const copyPlan = hasLinkedTask ? null : copyChangePlanFromGoal(normalizedGoal, title);
   const tasks: PlannerDraftTask[] = hasLinkedTask
     ? [
         {
           title: linkedTaskTitle ?? title,
           description: "이미 연결된 Helm Task를 기준으로 계획 문서를 보강하고 실행 조건을 확인합니다.",
           subtasks: ["기존 Task 설명 확인", "누락된 acceptance criteria 정리", "실행 전 blocker 확인"],
+          copyChanges: [],
           acceptanceCriteria: ["기존 Task와 Jira 참조가 같은 작업을 가리킨다.", "실행 전 확인해야 할 blocker가 Plan Draft에 남는다."],
           risks: ["기존 Task의 범위가 현재 목표보다 넓거나 좁을 수 있다."],
           testPlan: ["기존 Task external ref와 입력한 Jira 참조가 일치하는지 확인한다."],
         },
       ]
+    : copyPlan
+      ? [
+          {
+            title: copyPlan.taskTitle,
+            description: copyPlan.description,
+            subtasks: copyPlan.subtasks,
+            copyChanges: copyPlan.copyChanges,
+            acceptanceCriteria: copyPlan.acceptanceCriteria,
+            risks: copyPlan.risks,
+            testPlan: copyPlan.testPlan,
+          },
+        ]
     : [
         {
           title: `${title} 계획 모델 정리`,
           description: "목표를 구현 가능한 범위로 고정하고 화면, 데이터, 승인 경계를 확정합니다.",
           subtasks: ["현재 화면 동작 확인", "필요한 상태와 draft 구조 정의", "승인 전후 경계 정리"],
+          copyChanges: [],
           acceptanceCriteria: [
             "승인 전에는 Helm Task가 생성되지 않는다.",
             "계획 draft에서 생성될 Task 목록을 확인할 수 있다.",
@@ -835,6 +911,7 @@ function buildPlannerDraft(goal: string, linkedTaskTitle: string | null): Planne
           title: `${title} 화면 흐름 구현`,
           description: "planner 대화, Task breakdown preview, 승인 액션을 Planning 탭에서 연결합니다.",
           subtasks: ["planner 메시지 영역 추가", "Task/Subtask breakdown 카드 추가", "승인 후 Task 생성 액션 연결"],
+          copyChanges: [],
           acceptanceCriteria: [
             "planner가 제안한 Task와 Subtask가 화면에 표시된다.",
             "사용자는 승인 버튼을 눌러야 Helm Task를 생성할 수 있다.",
@@ -846,6 +923,7 @@ function buildPlannerDraft(goal: string, linkedTaskTitle: string | null): Planne
           title: `${title} 검증과 후속 연결`,
           description: "생성된 Task가 기존 Task Detail core loop로 자연스럽게 이어지는지 확인합니다.",
           subtasks: ["생성 Task description 확인", "external ref 저장 확인", "첫 Task Detail 이동 확인"],
+          copyChanges: [],
           acceptanceCriteria: [
             "승인 후 생성된 첫 Task Detail로 이동한다.",
             "생성된 Task description에 acceptance criteria와 test plan이 포함된다.",
@@ -859,15 +937,122 @@ function buildPlannerDraft(goal: string, linkedTaskTitle: string | null): Planne
     title,
     summary: hasLinkedTask
       ? "planner가 기존 Helm Task를 기준으로 실행 전 계획 확인 항목을 만들었습니다."
+      : copyPlan
+        ? copyPlan.summary
       : `planner가 "${normalizedGoal}" 목표를 계획 문서 초안으로 정리하고 ${tasks.length}개의 실행 Task 후보로 나눴습니다.`,
     scope: hasLinkedTask
       ? ["기존 Task 범위 확인", "누락된 승인 조건 보강", "실행 전 blocker 정리"]
+      : copyPlan
+        ? copyPlan.scope
       : ["Planning 탭의 대화형 계획 수립", "계획 문서 draft versioning", "승인된 계획의 Task materialize"],
     tasks,
     openQuestions: hasLinkedTask
       ? ["기존 Task 설명이 현재 목표를 충분히 포함하는지 확인이 필요합니다."]
+      : copyPlan
+        ? copyPlan.openQuestions
       : ["계획 세션과 draft를 backend DB에 언제 영속화할지 결정해야 합니다."],
     risks: Array.from(new Set(tasks.flatMap((task) => task.risks))),
+  };
+}
+
+function copyChangePlanFromGoal(goal: string, title: string): {
+  taskTitle: string;
+  summary: string;
+  description: string;
+  scope: string[];
+  subtasks: string[];
+  copyChanges: PlannerCopyChange[];
+  acceptanceCriteria: string[];
+  risks: string[];
+  testPlan: string[];
+  openQuestions: string[];
+} | null {
+  const normalized = goal.toLowerCase();
+  const asksForCopy = /문구|텍스트|copy|empty state|빈 상태/.test(goal);
+  if (!asksForCopy) return null;
+
+  if (goal.includes("Task 상세") && goal.includes("실행 기록")) {
+    return {
+      taskTitle: "Task 상세 실행 기록 빈 상태 문구 수정",
+      summary:
+        "Task 상세 패널의 실행 기록 빈 상태에서 보일 문구를 더 자연스럽게 바꾸는 UI 텍스트 전용 계획입니다. 레이아웃과 로직은 변경하지 않습니다.",
+      description:
+        "TaskDetail 실행 기록 섹션에서 runs가 비어 있을 때의 안내 문구만 교체합니다. 승인 전에 변경될 실제 문구 후보를 Plan Document에 고정합니다.",
+      scope: [
+        "TaskDetail 실행 기록 빈 상태 문구",
+        "UI 텍스트만 수정",
+        "레이아웃, 상태 전이, 실행 로직 변경 제외",
+      ],
+      subtasks: [
+        "TaskDetail 실행 기록 빈 상태 위치 확인",
+        "현재 문구와 제안 문구를 대조해 적용",
+        "텍스트 외 diff가 없는지 확인",
+      ],
+      copyChanges: [
+        {
+          location: "Task 상세 패널 > 실행 탭 > 실행 기록 empty state",
+          currentText: "아직 실행 기록이 없습니다.",
+          proposedText: "아직 실행된 기록이 없습니다. 실행을 시작하면 이곳에 진행 상황이 표시됩니다.",
+          reason: "빈 상태의 의미와 다음에 무엇이 보일지 함께 알려줘서 덜 딱딱하고 덜 막힌 느낌을 줍니다.",
+        },
+      ],
+      acceptanceCriteria: [
+        "실행 기록이 없을 때 제안 문구가 표시된다.",
+        "TaskDetail의 레이아웃, 탭 구조, 데이터 로딩, 실행 로직은 바뀌지 않는다.",
+        "변경 diff가 UI 텍스트 수정 범위를 벗어나지 않는다.",
+      ],
+      risks: ["문구가 너무 길면 좁은 상세 패널에서 줄바꿈이 늘어날 수 있다."],
+      testPlan: [
+        "실행 기록이 없는 Task 상세 패널을 열어 제안 문구가 보이는지 확인한다.",
+        "typecheck를 실행해 텍스트 변경 외 타입 오류가 없는지 확인한다.",
+      ],
+      openQuestions: [],
+    };
+  }
+
+  if (goal.includes("Task board") || goal.includes("task board") || normalized.includes("kanban")) {
+    return {
+      taskTitle: "Task board 빈 상태 문구 수정",
+      summary: "Task board가 비어 있을 때 보일 안내 문구를 더 명확하게 바꾸는 UI 텍스트 전용 계획입니다.",
+      description: "TasksScreen 또는 Task board 빈 상태에서 보이는 안내 문구만 교체합니다.",
+      scope: ["Task board empty state 문구", "UI 텍스트만 수정", "동작 로직 변경 제외"],
+      subtasks: ["빈 Task board 문구 위치 확인", "현재 문구와 제안 문구를 대조해 적용", "텍스트 외 diff 확인"],
+      copyChanges: [
+        {
+          location: "Task board empty state",
+          currentText: null,
+          proposedText: "아직 Task가 없습니다. 계획을 승인하면 실행할 Task가 여기에 표시됩니다.",
+          reason: "빈 보드가 정상 상태인지, 다음에 무엇을 하면 채워지는지 바로 이해할 수 있게 합니다.",
+        },
+      ],
+      acceptanceCriteria: [
+        "Task board가 비어 있을 때 제안 문구가 표시된다.",
+        "Task 생성, 상태 전이, 칸반 정렬 로직은 바뀌지 않는다.",
+      ],
+      risks: ["실제 현재 문구가 다르면 적용 전 파일에서 정확한 원문을 다시 확인해야 한다."],
+      testPlan: ["Task가 없는 프로젝트에서 Task board empty state를 확인한다.", "typecheck를 통과시킨다."],
+      openQuestions: [],
+    };
+  }
+
+  return {
+    taskTitle: `${title} 문구 수정`,
+    summary: "요청한 UI 문구를 구체적인 제안 문구와 함께 고정하는 UI 텍스트 전용 계획입니다.",
+    description: "대상 화면의 현재 문구를 확인한 뒤 제안 문구만 적용합니다.",
+    scope: ["대상 UI 문구", "텍스트 변경", "동작/레이아웃 변경 제외"],
+    subtasks: ["대상 문구 위치 확인", "현재 문구와 제안 문구 확정", "텍스트 외 diff 확인"],
+    copyChanges: [
+      {
+        location: "요청한 UI 위치",
+        currentText: null,
+        proposedText: "대상 화면의 현재 문맥을 확인한 뒤 더 자연스러운 안내 문구로 교체합니다.",
+        reason: "정확한 원문은 구현 단계에서 파일을 확인해 고정합니다.",
+      },
+    ],
+    acceptanceCriteria: ["변경될 문구 후보가 Plan Document에 표시된다.", "UI 텍스트 외 로직과 레이아웃은 바뀌지 않는다."],
+    risks: ["현재 문구를 확인하기 전에는 최종 제안 문구가 달라질 수 있다."],
+    testPlan: ["대상 화면에서 제안 문구가 보이는지 확인한다.", "typecheck를 통과시킨다."],
+    openQuestions: ["현재 문구 원문을 구현 단계에서 확인해야 합니다."],
   };
 }
 
@@ -1001,10 +1186,33 @@ function normalizePlannerTask(value: unknown): PlannerDraftTask | null {
     title,
     description: stringField(value, ["description"]) ?? "planner가 제안한 실행 Task입니다.",
     subtasks: stringArrayField(value, ["subtasks", "subTasks", "sub_tasks"]),
+    copyChanges: copyChangesField(value),
     acceptanceCriteria: stringArrayField(value, ["acceptanceCriteria", "acceptance_criteria"]),
     risks: stringArrayField(value, ["risks"]),
     testPlan: stringArrayField(value, ["testPlan", "test_plan"]),
   };
+}
+
+function copyChangesField(value: Record<string, unknown>): PlannerCopyChange[] {
+  for (const key of ["copyChanges", "copy_changes", "proposedCopy", "proposed_copy"]) {
+    const field = value[key];
+    if (!Array.isArray(field)) continue;
+    const changes = field
+      .map((item) => {
+        if (!isRecord(item)) return null;
+        const proposedText = stringField(item, ["proposedText", "proposed_text", "to", "text"]);
+        if (!proposedText) return null;
+        return {
+          location: stringField(item, ["location", "target", "where"]) ?? "대상 UI 문구",
+          currentText: stringField(item, ["currentText", "current_text", "from", "before"]),
+          proposedText,
+          reason: stringField(item, ["reason", "why"]) ?? "문맥을 더 자연스럽게 전달하기 위해 수정합니다.",
+        } satisfies PlannerCopyChange;
+      })
+      .filter((item): item is PlannerCopyChange => Boolean(item));
+    if (changes.length > 0) return changes;
+  }
+  return [];
 }
 
 function stringField(value: Record<string, unknown>, keys: string[]): string | null {
@@ -1044,11 +1252,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function plannerResultWarning(result: PlannerConversationResult): string | null {
-  if (result.timedOut) return "planner plan mode가 timeout 되어 local draft를 유지했습니다.";
+  if (result.timedOut) {
+    return "AI planner가 제한 시간 안에 끝나지 않아 로컬 초안을 유지했습니다. 현재 초안으로 계속 진행하거나 다시 요청할 수 있습니다.";
+  }
   if (result.exitCode !== 0) {
     return plannerFailureMessage(result);
   }
   return null;
+}
+
+function isPlannerFallbackWarning(message: string): boolean {
+  return (
+    message.includes("로컬 초안") ||
+    message.includes("local draft") ||
+    message.includes("제한 시간") ||
+    message.includes("응답이 오래 걸려") ||
+    message.toLowerCase().includes("timeout")
+  );
 }
 
 function plannerFailureMessage(result: PlannerConversationResult): string {
@@ -1153,6 +1373,18 @@ function createTaskInputFromDraft(
       "Description",
       draftTask.description,
       "",
+      ...(draftTask.copyChanges.length > 0
+        ? [
+            "Proposed Copy",
+            ...draftTask.copyChanges.flatMap((change) => [
+              `- Location: ${change.location}`,
+              ...(change.currentText ? [`  Current: ${change.currentText}`] : []),
+              `  Proposed: ${change.proposedText}`,
+              `  Reason: ${change.reason}`,
+            ]),
+            "",
+          ]
+        : []),
       "Subtasks",
       ...draftTask.subtasks.map((item) => `- ${item}`),
       "",
@@ -1264,26 +1496,17 @@ function refTypeForJiraRef(value: string): NonNullable<CreateTaskInput["external
   return value.includes("browse/") || value.startsWith("http") ? "Url" : "JiraTask";
 }
 
-function withPlannerUiTimeout<T>(promise: Promise<T>): Promise<T> {
+function withPlannerSoftNotice<T>(promise: Promise<T>, onSoftTimeout?: () => void): Promise<T> {
   let timeoutId: number | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = window.setTimeout(() => {
-      reject(
-        new Error(
-          "AI planner 응답이 오래 걸려 로컬 초안을 유지했습니다. 응답이 도착하지 않아도 계속 진행할 수 있습니다.",
-        ),
-      );
-    }, PLANNER_UI_TIMEOUT_MS);
-  });
+  timeoutId = window.setTimeout(() => {
+    onSoftTimeout?.();
+  }, PLANNER_SOFT_NOTICE_MS);
 
-  return Promise.race([
-    promise.finally(() => {
-      if (timeoutId !== undefined) {
-        window.clearTimeout(timeoutId);
-      }
-    }),
-    timeoutPromise,
-  ]);
+  return promise.finally(() => {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  });
 }
 
 function normalizeJiraRef(value: string): string {

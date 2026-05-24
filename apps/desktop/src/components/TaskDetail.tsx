@@ -1,6 +1,6 @@
 import { Loader2, X } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useToast } from "./ToastProvider";
 import { api } from "../lib/api";
 import { runnerReadinessFor, roleLabel, type RoleId } from "../lib/runnerReadiness";
@@ -50,7 +50,6 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
   const [artifact, setArtifact] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const [detailsLoaded, setDetailsLoaded] = useState(false);
-  const autoStartKeyRef = useRef<string | null>(null);
   const pendingPlanApproval = task
     ? snapshot.approvals.find(
         (approval) =>
@@ -71,7 +70,6 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     setArtifact(null);
     setRunEvents({});
     setDetailsLoaded(false);
-    autoStartKeyRef.current = null;
   }, [task?.id]);
 
   useEffect(() => {
@@ -163,22 +161,6 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     };
   }, [onRefresh, snapshot.project.id, task?.id]);
 
-  useEffect(() => {
-    if (!task || !detailsLoaded || pendingPlanApproval) return;
-    const roleId = roleForTaskStatus(task.status);
-    if (!roleId) return;
-    const readiness = runnerReadinessFor(snapshot.settings, roleId);
-    if (!readiness.ready) return;
-    if (runs.some((run) => run.status === "Queued" || run.status === "Running")) return;
-    if (runs.some((run) => run.roleId === roleId && !isRetryableRunStatus(run.status))) return;
-
-    const key = `${task.id}:${task.status}:${roleId}`;
-    if (autoStartKeyRef.current === key) return;
-    autoStartKeyRef.current = key;
-
-    void autoStartNextRole(roleId, key);
-  }, [detailsLoaded, pendingPlanApproval, runs, snapshot.settings, task?.id, task?.status]);
-
   if (!task) {
     return (
       <aside className="detail-panel empty-detail">
@@ -186,36 +168,6 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
         <p>보드에서 태스크를 선택하면 상세 정보가 표시됩니다.</p>
       </aside>
     );
-  }
-
-  async function autoStartNextRole(roleId: RoleId, key: string) {
-    if (!task) return;
-    setActiveTab("runs");
-    try {
-      const run = await api.startNextRoleRun(snapshot.project.id, task.id);
-      setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
-      const nextWorktree = await api.getTaskWorktree(snapshot.project.id, task.id);
-      setWorktree(nextWorktree);
-      await refreshWorktreeFiles(nextWorktree);
-      const events = await api.listRunEvents(snapshot.project.id, run.id);
-      setRunEvents((current) => ({ ...current, [run.id]: events }));
-      showToast({
-        tone: "success",
-        title: `${roleLabel(roleId)} 자동 실행 시작`,
-        description: "Context Pack을 만들고 worker queue에 올렸습니다.",
-      });
-      await onRefresh();
-    } catch (error) {
-      const message = messageFromError(error, "");
-      if (!message.includes("이미 준비 중") && !message.includes("실행 중")) {
-        showToast({
-          tone: "error",
-          title: `${roleLabel(roleId)} 자동 실행 실패`,
-          description: message || "다음 role 실행을 자동으로 시작하지 못했습니다.",
-        });
-      }
-      autoStartKeyRef.current = key;
-    }
   }
 
   async function updateStatus() {
@@ -462,7 +414,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
       showToast({
         tone: "success",
         title: "계획 승인 완료",
-        description: "Coder 자동 실행을 시작합니다.",
+        description: "Task가 준비됨 상태로 전환되었습니다. 다음 액션에서 Coder 실행 준비를 시작하세요.",
       });
     } catch (error) {
       showToast({
@@ -563,26 +515,35 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
 
       <section className="detail-section next-action-panel">
         <h3>다음 액션</h3>
-        <NextAction
-          busy={busy}
-          pendingPlanApproval={pendingPlanApproval}
-          task={task}
-          worktree={worktree}
-          runnerReadiness={activeRunnerReadiness}
-          queuedRun={activeQueuedRun}
-          runningRun={activeRunningRun}
-          retryableRun={activeRetryableRun}
-          busyAction={busyAction}
-          onApprovePlan={approvePendingPlan}
-          onRequestPlanRevision={requestPlanRevision}
-          onPrepareWorktree={prepareWorktree}
-          onPrepareContext={prepareContext}
-          onRunHost={runHost}
-          onCancelHost={cancelHost}
-          onRetryHost={retryHost}
-          onGoSettings={onGoSettings}
-          onGoGit={onGoGit}
-        />
+        {!detailsLoaded ? (
+          <div className="next-action-card">
+            <div>
+              <strong>상태 확인 중</strong>
+              <p>실행 기록과 worktree 상태를 불러온 뒤 가능한 액션을 표시합니다.</p>
+            </div>
+          </div>
+        ) : (
+          <NextAction
+            busy={busy}
+            pendingPlanApproval={pendingPlanApproval}
+            task={task}
+            worktree={worktree}
+            runnerReadiness={activeRunnerReadiness}
+            queuedRun={activeQueuedRun}
+            runningRun={activeRunningRun}
+            retryableRun={activeRetryableRun}
+            busyAction={busyAction}
+            onApprovePlan={approvePendingPlan}
+            onRequestPlanRevision={requestPlanRevision}
+            onPrepareWorktree={prepareWorktree}
+            onPrepareContext={prepareContext}
+            onRunHost={runHost}
+            onCancelHost={cancelHost}
+            onRetryHost={retryHost}
+            onGoSettings={onGoSettings}
+            onGoGit={onGoGit}
+          />
+        )}
       </section>
 
       {visibleRun ? (
@@ -1018,7 +979,7 @@ function NextAction({
       <div className="next-action-card waiting">
         <div>
           <strong>계획 승인 대기</strong>
-          <p>승인하면 coder가 자동 실행되고, 수정 요청을 보내면 Task가 Blocked로 돌아갑니다.</p>
+          <p>승인하면 Task가 준비됨 상태가 됩니다. Coder 실행 준비와 host 실행은 다음 액션에서 명시적으로 시작합니다.</p>
         </div>
         <div className="artifact-actions">
           <button
@@ -1029,7 +990,7 @@ function NextAction({
             type="button"
           >
             {approvalBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
-            승인하고 계속
+            계획 승인
           </button>
           <button disabled={busy} onClick={() => void onRequestPlanRevision(pendingPlanApproval)} type="button">
             계획 수정 요청
@@ -1058,7 +1019,7 @@ function NextAction({
     return (
       <div className="next-action-card">
         <strong>대기 중</strong>
-        <p>현재 상태에서 자동으로 제안할 다음 액션이 없습니다.</p>
+        <p>현재 상태에서 제안할 다음 액션이 없습니다.</p>
       </div>
     );
   }
@@ -1095,20 +1056,6 @@ function NextAction({
         >
           {worktreeBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
           {worktreeBusy ? "준비 중..." : "worktree 준비"}
-        </button>
-      </div>
-    );
-  }
-
-  if (retryableRun) {
-    return (
-      <div className="next-action-card waiting">
-        <div>
-          <strong>{roleLabel(retryableRun.roleId)} 점검 필요</strong>
-          <p>최근 실행이 {retryableRun.status} 상태입니다. 타임라인의 gate와 repair 근거를 확인한 뒤 재시도합니다.</p>
-        </div>
-        <button className="primary-button" disabled={busy} onClick={() => void onRetryHost(retryableRun.id)} type="button">
-          retry 준비
         </button>
       </div>
     );
@@ -1158,6 +1105,20 @@ function NextAction({
     );
   }
 
+  if (retryableRun) {
+    return (
+      <div className="next-action-card waiting">
+        <div>
+          <strong>{roleLabel(retryableRun.roleId)} 점검 필요</strong>
+          <p>최근 실행이 {retryableRun.status} 상태입니다. 타임라인의 gate와 repair 근거를 확인한 뒤 재시도합니다.</p>
+        </div>
+        <button className="primary-button" disabled={busy} onClick={() => void onRetryHost(retryableRun.id)} type="button">
+          retry 준비
+        </button>
+      </div>
+    );
+  }
+
   const prepareBusy = busyAction?.key === `prepare:${action.roleId}`;
 
   return (
@@ -1202,6 +1163,14 @@ function contextActionFor(status: TaskStatus): {
       button: "Coder 준비",
     };
   }
+  if (status === "Coding") {
+    return {
+      roleId: "coder",
+      title: "구현 실행",
+      description: "Coder가 현재 Task 변경을 진행합니다.",
+      button: "Coder 준비",
+    };
+  }
   if (status === "PlanVerification") {
     return {
       roleId: "plan_verifier",
@@ -1231,7 +1200,7 @@ function contextActionFor(status: TaskStatus): {
 
 function roleForTaskStatus(status: TaskStatus): RoleId | null {
   if (status === "Planned" || status === "Blocked") return "planner";
-  if (status === "Ready") return "coder";
+  if (status === "Ready" || status === "Coding") return "coder";
   if (status === "PlanVerification") return "plan_verifier";
   if (status === "CodeReview") return "code_reviewer";
   if (status === "Testing") return "tester";

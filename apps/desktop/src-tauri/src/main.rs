@@ -147,7 +147,6 @@ fn open_project(
         reconcile_stale_runs.unwrap_or(false),
     )?;
     remember_project(&app, &snapshot.project)?;
-    ensure_project_queue_worker(&app, &state, &snapshot.project.id)?;
     Ok(snapshot)
 }
 
@@ -182,7 +181,6 @@ fn open_project_by_id(
         reconcile_stale_runs.unwrap_or(false),
     )?;
     remember_project(&app, &snapshot.project)?;
-    ensure_project_queue_worker(&app, &state, &snapshot.project.id)?;
     Ok(snapshot)
 }
 
@@ -249,7 +247,6 @@ fn get_launch_state(state: State<'_, AppState>, app: AppHandle) -> CommandResult
         match open_project_from_path(Path::new(&root_path), &state, true) {
             Ok(next) => {
                 remember_project(&app, &next.project)?;
-                ensure_project_queue_worker(&app, &state, &next.project.id)?;
                 stored = load_stored_launch_state(&app)?;
                 snapshot = Some(next);
             }
@@ -435,35 +432,36 @@ fn check_role_runner(
         });
     }
 
-    let check = if command
+    let resolved_command = resolve_command_args(&context.root_path, &command);
+    let check = if resolved_command
         .iter()
         .any(|part| part.contains("fixture-runner.mjs"))
     {
-        Command::new(&command[0])
-            .args(&command[1..])
+        Command::new(&resolved_command[0])
+            .args(&resolved_command[1..])
             .arg("--health")
             .output()
     } else {
-        Command::new(&command[0]).arg("--version").output()
+        Command::new(&resolved_command[0]).arg("--version").output()
     };
 
     match check {
         Ok(output) if output.status.success() => Ok(RunnerCheckResult {
             role_id,
             available: true,
-            command,
+            command: resolved_command,
             message: "runner command를 실행할 수 있습니다.".to_string(),
         }),
         Ok(output) => Ok(RunnerCheckResult {
             role_id,
             available: false,
-            command,
+            command: resolved_command,
             message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         }),
         Err(err) => Ok(RunnerCheckResult {
             role_id,
             available: false,
-            command,
+            command: resolved_command,
             message: err.to_string(),
         }),
     }
@@ -1054,14 +1052,14 @@ fn run_host_role(
 
 fn emit_run_event(app: &AppHandle, event: &RunEventSummary) {
     let _ = app.emit("agent-run://event", event);
-    if event.kind == "approval" {
+    if event.kind == "approval" || event.kind == "status" || event.kind == "result" {
         let _ = app.emit(
             "agent-run://updated",
             json!({
                 "projectId": event.project_id,
                 "taskId": event.task_id,
                 "runId": event.run_id,
-                "status": "ApprovalPending"
+                "status": if event.kind == "approval" { "ApprovalPending" } else { event.message.as_str() }
             }),
         );
     }
@@ -1097,7 +1095,12 @@ fn queue_next_role_after_success(
     project_id: &str,
     run: &AgentRunSummary,
 ) {
-    if run.status != "Succeeded" || run.role_id == "planner" {
+    if run.status != "Succeeded" {
+        return;
+    }
+
+    let policy = project_automation_policy(context, project_id);
+    if !policy.auto_handoff_enabled {
         return;
     }
 
@@ -1253,6 +1256,10 @@ fn ensure_project_queue_worker(
     project_id: &str,
 ) -> CommandResult<()> {
     let context = project_context(state, project_id)?;
+    let policy = project_automation_policy(&context, project_id);
+    if !policy.background_queue_worker_enabled {
+        return Ok(());
+    }
     let stop = Arc::new(AtomicBool::new(false));
     {
         let mut workers = state
@@ -1271,6 +1278,26 @@ fn ensure_project_queue_worker(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct AutomationPolicy {
+    background_queue_worker_enabled: bool,
+    supervisor_reconcile_enabled: bool,
+    require_explicit_host_run: bool,
+    auto_handoff_enabled: bool,
+}
+
+fn project_automation_policy(_context: &ProjectContext, _project_id: &str) -> AutomationPolicy {
+    // P0 keeps observation, approval, context preparation, and host execution as
+    // separate user actions. A later setting can opt projects into supervisor
+    // handoff once the UI explains that operating mode.
+    AutomationPolicy {
+        background_queue_worker_enabled: false,
+        supervisor_reconcile_enabled: false,
+        require_explicit_host_run: true,
+        auto_handoff_enabled: false,
+    }
+}
+
 fn stop_project_queue_worker(state: &State<'_, AppState>, project_id: &str) {
     if let Ok(mut workers) = state.queue_workers.lock() {
         if let Some(stop) = workers.remove(project_id) {
@@ -1286,11 +1313,17 @@ fn run_project_queue_worker(
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::SeqCst) {
-        let queued = db::open_existing_db(&context.db_path)
-            .and_then(|conn| db::next_queued_agent_run(&conn, &project_id));
+        let queued = db::open_existing_db(&context.db_path).and_then(|conn| {
+            if db::has_running_agent_run(&conn, &project_id)? {
+                return Ok(None);
+            }
+            db::next_queued_agent_run(&conn, &project_id)
+        });
         match queued {
             Ok(Some(run)) => {
-                if conductor_allows_queued_run(&app, &context, &project_id, &run) {
+                if !project_automation_policy(&context, &project_id).require_explicit_host_run
+                    && conductor_allows_queued_run(&app, &context, &project_id, &run)
+                {
                     spawn_background_host_run(
                         app.clone(),
                         context.clone(),
@@ -1301,23 +1334,30 @@ fn run_project_queue_worker(
                 }
                 std::thread::sleep(Duration::from_millis(250));
             }
-            Ok(None) => match reconcile_project_next_role_gap(&app, &context, &project_id) {
-                Ok(Some(_run)) => {
-                    std::thread::sleep(Duration::from_millis(250));
-                }
-                Ok(None) => {
+            Ok(None) => match project_automation_policy(&context, &project_id)
+                .supervisor_reconcile_enabled
+            {
+                true => match reconcile_project_next_role_gap(&app, &context, &project_id) {
+                    Ok(Some(_run)) => {
+                        std::thread::sleep(Duration::from_millis(250));
+                    }
+                    Ok(None) => {
+                        std::thread::sleep(Duration::from_millis(800));
+                    }
+                    Err(error) => {
+                        let _ = app.emit(
+                            "agent-run://updated",
+                            json!({
+                                "projectId": project_id,
+                                "status": "SupervisorReconcileFailed",
+                                "error": command_error_summary(&error)
+                            }),
+                        );
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                },
+                false => {
                     std::thread::sleep(Duration::from_millis(800));
-                }
-                Err(error) => {
-                    let _ = app.emit(
-                        "agent-run://updated",
-                        json!({
-                            "projectId": project_id,
-                            "status": "SupervisorReconcileFailed",
-                            "error": command_error_summary(&error)
-                        }),
-                    );
-                    std::thread::sleep(Duration::from_secs(2));
                 }
             },
             Err(error) => {
@@ -1883,15 +1923,10 @@ fn approve_approval(
     approval_id: String,
     reason: String,
     state: State<'_, AppState>,
-    app: AppHandle,
 ) -> CommandResult<ApprovalSummary> {
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
-    let approval = db::decide_approval(&mut conn, &project_id, &approval_id, "Approved", &reason)?;
-    if approval.approval_type == "PlanApproval" && approval.entity_type == "Task" {
-        spawn_next_role_run_after_approval(app, context, project_id, approval.entity_id.clone());
-    }
-    Ok(approval)
+    db::decide_approval(&mut conn, &project_id, &approval_id, "Approved", &reason)
 }
 
 #[tauri::command]
@@ -1904,46 +1939,6 @@ fn reject_approval(
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
     db::decide_approval(&mut conn, &project_id, &approval_id, "Rejected", &reason)
-}
-
-fn spawn_next_role_run_after_approval(
-    app: AppHandle,
-    context: ProjectContext,
-    project_id: String,
-    task_id: String,
-) {
-    std::thread::spawn(move || {
-        let prepared = db::open_existing_db(&context.db_path).and_then(|mut conn| {
-            db::prepare_next_role_context(&mut conn, &context.root_path, &project_id, &task_id)
-        });
-
-        match prepared {
-            Ok(run) => {
-                let _ = app.emit(
-                    "agent-run://updated",
-                    json!({
-                        "projectId": project_id,
-                        "taskId": run.task_id,
-                        "runId": run.id,
-                        "status": run.status
-                    }),
-                );
-                let state = app.state::<AppState>();
-                let _ = ensure_project_queue_worker(&app, &state, &project_id);
-            }
-            Err(error) => {
-                let _ = app.emit(
-                    "agent-run://updated",
-                    json!({
-                        "projectId": project_id,
-                        "taskId": task_id,
-                        "status": "AutoStartFailed",
-                        "error": command_error_summary(&error)
-                    }),
-                );
-            }
-        }
-    });
 }
 
 fn open_project_from_path(
@@ -2243,7 +2238,7 @@ fn codex_ai_connections() -> Value {
             "planningMode": "prompt_guarded",
             "healthCheckArgs": ["codex", "--version"],
             "timeoutSeconds": 1800,
-            "planningTimeoutSeconds": 120,
+            "planningTimeoutSeconds": 600,
             "planningModel": null,
             "enabled": true,
             "defaultModel": "gpt-5.2",
@@ -2297,7 +2292,7 @@ fn claude_ai_connections() -> Value {
             "planningMode": "native_plan",
             "healthCheckArgs": ["claude", "--version"],
             "timeoutSeconds": 1800,
-            "planningTimeoutSeconds": 120,
+            "planningTimeoutSeconds": 600,
             "planningModel": null,
             "enabled": true,
             "defaultModel": "sonnet",
@@ -2511,7 +2506,7 @@ fn resolve_planning_command_for_connection(
     let timeout_seconds = connection
         .get("planningTimeoutSeconds")
         .and_then(Value::as_u64)
-        .unwrap_or(120)
+        .unwrap_or(600)
         .clamp(1, 600);
 
     let command_args = inject_planning_provider_options(args, provider.as_deref(), model, effort);
@@ -2693,6 +2688,8 @@ fn build_planner_prompt(project_root: &Path, input: &PlannerConversationInput) -
 - 정보가 부족해도 질문만 따로 쓰지 말고 아래 JSON 형태만 반환한다.
 - 질문은 openQuestions 배열에 넣고, tasks에는 현재 확정 가능한 최소 실행 후보를 넣는다.
 - tasks 배열은 절대 비우지 않는다. 범위가 모호하면 "범위 확정" 같은 작은 확인 Task를 1개 이상 넣는다.
+- UI 문구/카피 수정 목표라면 각 관련 task에 copyChanges를 넣어 사용자가 승인 전 "현재 문구 -> 제안 문구 -> 이유"를 볼 수 있게 한다.
+- 문구만 수정하라는 목표는 구현 범위를 파일/화면/문구로 좁히고, 레이아웃/로직 변경을 acceptanceCriteria와 risks에서 명시적으로 제외한다.
 - Markdown fence, 설명 문장, 머리말 없이 JSON만 반환한다.
 
 JSON schema:
@@ -2705,6 +2702,14 @@ JSON schema:
       "title": "string",
       "description": "string",
       "subtasks": ["string"],
+      "copyChanges": [
+        {{
+          "location": "string",
+          "currentText": "string or null",
+          "proposedText": "string",
+          "reason": "string"
+        }}
+      ],
       "acceptanceCriteria": ["string"],
       "risks": ["string"],
       "testPlan": ["string"]
@@ -3455,10 +3460,67 @@ fn resolve_cli_binary_path(binary: &str) -> Option<PathBuf> {
         return binary_path.is_file().then(|| binary_path.to_path_buf());
     }
 
-    let path_env = std::env::var_os("PATH")?;
-    std::env::split_paths(&path_env)
+    command_search_dirs()
         .map(|dir| dir.join(binary))
         .find(|candidate| candidate.is_file())
+        .or_else(|| resolve_cli_binary_from_login_shell(binary))
+}
+
+fn resolve_command_args(cwd: &Path, command: &[String]) -> Vec<String> {
+    let Some(program) = command.first() else {
+        return Vec::new();
+    };
+    let mut resolved = command.to_vec();
+    if let Some(path) = resolve_command_program(cwd, program) {
+        resolved[0] = path.to_string_lossy().to_string();
+    }
+    resolved
+}
+
+fn resolve_command_program(cwd: &Path, program: &str) -> Option<PathBuf> {
+    let program_path = Path::new(program);
+    if program_path.is_absolute() {
+        return program_path.is_file().then(|| program_path.to_path_buf());
+    }
+    if program.contains('/') {
+        let candidate = cwd.join(program_path);
+        return candidate.is_file().then(|| candidate);
+    }
+    resolve_cli_binary_path(program)
+}
+
+fn command_search_dirs() -> impl Iterator<Item = PathBuf> {
+    let mut dirs = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    dirs.extend([
+        PathBuf::from("/Applications/Codex.app/Contents/Resources"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/sbin"),
+        PathBuf::from("/sbin"),
+    ]);
+    dirs.into_iter()
+}
+
+fn resolve_cli_binary_from_login_shell(binary: &str) -> Option<PathBuf> {
+    let output = Command::new("/bin/zsh")
+        .args(["-lc", "command -v -- \"$HELM_CLI_BINARY\""])
+        .env("HELM_CLI_BINARY", binary)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
 }
 
 fn sorted_model_ids(value: &Value, keep: fn(&str) -> bool) -> Vec<String> {
@@ -3691,6 +3753,7 @@ fn run_pty_command_with_input(
     if command.is_empty() {
         return Err(CommandError::validation("실행할 CLI command가 없습니다."));
     }
+    let command = resolve_command_args(cwd, command);
     let started_at = Instant::now();
 
     let mut master_fd: libc::c_int = -1;
@@ -4370,6 +4433,7 @@ fn run_direct_command_with_timeout(
             "실행할 planning command가 없습니다.",
         ));
     }
+    let command = resolve_command_args(cwd, command);
     let started_at = Instant::now();
     let mut child = Command::new(&command[0])
         .args(&command[1..])
