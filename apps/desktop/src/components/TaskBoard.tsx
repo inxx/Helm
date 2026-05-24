@@ -85,7 +85,7 @@ const EMPTY_COLUMN_COPY: Record<TaskStatus, string> = {
 interface TaskBoardProps {
   tasks: TaskSummary[];
   selectedTaskId: string | null;
-  onSelectTask: (taskId: string) => void;
+  onSelectTask: (taskId: string | null) => void;
 }
 
 export function TaskBoard({ tasks, selectedTaskId, onSelectTask }: TaskBoardProps) {
@@ -119,7 +119,7 @@ export function TaskBoard({ tasks, selectedTaskId, onSelectTask }: TaskBoardProp
                     aria-pressed={task.id === selectedTaskId}
                     className={task.id === selectedTaskId ? "task-card selected" : "task-card"}
                     key={task.id}
-                    onClick={() => onSelectTask(task.id)}
+                    onClick={() => onSelectTask(task.id === selectedTaskId ? null : task.id)}
                     type="button"
                   >
                     <div className="task-card-topline">

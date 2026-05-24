@@ -1,4 +1,4 @@
-import { Loader2 } from "lucide-react";
+import { Loader2, X } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { useToast } from "./ToastProvider";
@@ -35,9 +35,10 @@ interface TaskDetailProps {
   onRefresh: () => Promise<void>;
   onGoGit: () => void;
   onGoSettings: () => void;
+  onClose: () => void;
 }
 
-export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }: TaskDetailProps) {
+export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, onClose }: TaskDetailProps) {
   const { showToast } = useToast();
   const [status, setStatus] = useState<TaskStatus>("Planned");
   const [busyAction, setBusyAction] = useState<{ key: string; label: string } | null>(null);
@@ -516,7 +517,18 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings }:
     <aside className="detail-panel task-console">
       <div className="task-console-summary">
         <div className="detail-header">
-          <span className="status-pill">{TASK_STATUS_LABEL[task.status]}</span>
+          <div className="detail-header-row">
+            <span className="status-pill">{TASK_STATUS_LABEL[task.status]}</span>
+            <button
+              type="button"
+              className="detail-close-button"
+              onClick={onClose}
+              title="상세 닫기"
+              aria-label="태스크 상세 닫기"
+            >
+              <X size={14} aria-hidden />
+            </button>
+          </div>
           <h2>{task.title}</h2>
         </div>
         {task.description ? <p>{task.description}</p> : <p className="muted">설명 없음</p>}

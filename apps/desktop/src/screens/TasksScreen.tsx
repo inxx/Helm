@@ -66,16 +66,15 @@ export function TasksScreen({
     };
     setBusy(true);
     try {
-      const task = await api.createTask(snapshot.project.id, input);
+      await api.createTask(snapshot.project.id, input);
       await onRefresh();
-      onSelectTask((task as TaskSummary).id);
       setTitle("");
       setDescription("");
       setExternalRef("");
       showToast({
         tone: "success",
         title: "태스크 생성 완료",
-        description: "상태가 계획됨으로 시작되었습니다.",
+        description: "보드에서 선택하면 상세를 볼 수 있습니다.",
       });
     } catch (error) {
       showToast({
@@ -89,7 +88,7 @@ export function TasksScreen({
   }
 
   return (
-    <div className="tasks-layout">
+    <div className={selectedTask ? "tasks-layout with-detail" : "tasks-layout"}>
       <section className="task-workspace">
         <div className="section-header">
           <div>
@@ -143,13 +142,16 @@ export function TasksScreen({
         <AgentUsageBar snapshot={snapshot} />
         <ApprovalInbox snapshot={snapshot} onRefresh={onRefresh} />
       </section>
-      <TaskDetail
-        snapshot={snapshot}
-        task={selectedTask}
-        onRefresh={onRefresh}
-        onGoGit={onGoGit}
-        onGoSettings={onGoSettings}
-      />
+      {selectedTask ? (
+        <TaskDetail
+          snapshot={snapshot}
+          task={selectedTask}
+          onRefresh={onRefresh}
+          onGoGit={onGoGit}
+          onGoSettings={onGoSettings}
+          onClose={() => onSelectTask(null)}
+        />
+      ) : null}
     </div>
   );
 }

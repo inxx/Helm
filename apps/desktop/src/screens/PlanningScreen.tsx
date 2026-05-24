@@ -1,5 +1,6 @@
 import { CheckCircle2, Loader2, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
 import type { CreateTaskInput, PlannerConversationResult, ProjectSnapshot, TaskSummary } from "../lib/types";
 
@@ -60,6 +61,7 @@ const PLANNER_UI_TIMEOUT_MS = 12_000;
 const PLANNER_REFINE_DELAY_MS = 2_000;
 
 export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask }: PlanningScreenProps) {
+  const { showToast } = useToast();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [goal, setGoal] = useState("");
   const [plannerRequest, setPlannerRequest] = useState("");
@@ -236,8 +238,9 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
             : item,
         ),
       );
-      setError(plannerResult.warning ?? null);
+      reportPlannerWarning(plannerResult.warning);
     } catch (err) {
+      const message = errorMessage(err);
       setSessions((current) =>
         current.map((item) =>
           item.id === sessionId
@@ -257,7 +260,12 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
             : item,
         ),
       );
-      setError(errorMessage(err));
+      setError(message);
+      showToast({
+        tone: "error",
+        title: "planner 실행 실패",
+        description: message,
+      });
     }
   }
 
@@ -365,8 +373,9 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
             : item,
         ),
       );
-      setError(plannerResult.warning ?? null);
+      reportPlannerWarning(plannerResult.warning);
     } catch (err) {
+      const message = errorMessage(err);
       setSessions((current) =>
         current.map((item) =>
           item.id === sessionId
@@ -386,8 +395,23 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
             : item,
         ),
       );
-      setError(errorMessage(err));
+      setError(message);
+      showToast({
+        tone: "error",
+        title: "planner 실행 실패",
+        description: message,
+      });
     }
+  }
+
+  function reportPlannerWarning(warning: string | null) {
+    setError(warning);
+    if (!warning) return;
+    showToast({
+      tone: "error",
+      title: "planner 실행 실패",
+      description: warning,
+    });
   }
 
   async function runPlannerPlanMode(
@@ -445,6 +469,11 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
               : item,
           ),
         );
+        showToast({
+          tone: "info",
+          title: "기존 Task 연결",
+          description: "이미 추적 중인 Task를 열었습니다.",
+        });
         onOpenTask(activeSession.taskId);
         return;
       }
@@ -480,9 +509,28 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       );
       await onRefresh();
       setError(autoStartWarning);
+      if (autoStartWarning) {
+        showToast({
+          tone: "error",
+          title: "planner 자동 실행 실패",
+          description: autoStartWarning,
+        });
+      } else {
+        showToast({
+          tone: "success",
+          title: "Plan Document 저장 완료",
+          description: `${createdTasks.length}개의 Task를 생성했습니다.`,
+        });
+      }
       onOpenTask(firstTask.id);
     } catch (err) {
-      setError(errorMessage(err));
+      const message = errorMessage(err);
+      setError(message);
+      showToast({
+        tone: "error",
+        title: "Plan Document 저장 실패",
+        description: message,
+      });
     } finally {
       setPlannerOperation(null);
     }
@@ -1253,7 +1301,13 @@ function waitForNextPaint(): Promise<void> {
 function errorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (typeof error === "object" && error !== null && "message" in error) {
-    return String((error as { message: unknown }).message);
+    const message = String((error as { message: unknown }).message);
+    const details =
+      "details" in error && typeof (error as { details?: unknown }).details === "string"
+        ? (error as { details: string }).details.trim()
+        : "";
+    if (details && !message.includes(details)) return `${message}: ${details}`;
+    return message;
   }
   if (error instanceof Error) return error.message;
   return "알 수 없는 오류가 발생했습니다.";

@@ -2,7 +2,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Compass, GitBranch, ListChecks, Settings, SquareTerminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
-import { StatusBar } from "./components/StatusBar";
 import { api } from "./lib/api";
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
@@ -74,7 +73,7 @@ export function App() {
 
   function hydrateSnapshot(next: ProjectSnapshot) {
     setSnapshot(next);
-    setSelectedTaskId(next.tasks[0]?.id ?? null);
+    setSelectedTaskId(null);
     setScreen("tasks");
     setError(null);
   }
@@ -163,7 +162,7 @@ export function App() {
   function applySnapshotUpdate(next: ProjectSnapshot) {
     setSnapshot(next);
     if (selectedTaskId && !next.tasks.some((task) => task.id === selectedTaskId)) {
-      setSelectedTaskId(next.tasks[0]?.id ?? null);
+      setSelectedTaskId(null);
     }
   }
 
@@ -184,7 +183,6 @@ export function App() {
       onForgetProject={forgetProject}
       busy={busy}
     >
-      {snapshot && screen !== "terminal" ? <StatusBar snapshot={snapshot} /> : null}
       {error ? <div className="error-banner">{error}</div> : null}
       {bootStatus === "restoring" ? (
         <section className="empty-state">
