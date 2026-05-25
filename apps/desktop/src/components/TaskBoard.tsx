@@ -189,7 +189,7 @@ function runHint(run: AgentRunSummary): string {
 
 function runStatusLabel(run: AgentRunSummary): string {
   const status = runStatusKoreanLabel(run.status);
-  return run.lifecyclePhase ? `${status} · ${run.lifecyclePhase}` : status;
+  return run.lifecyclePhase ? `${status} · ${lifecyclePhaseKoreanLabel(run.lifecyclePhase)}` : status;
 }
 
 function runTone(run: AgentRunSummary): "running" | "queued" | "attention" {
@@ -222,6 +222,19 @@ function failureKindLabel(kind: string): string {
   if (kind === "exit_failed") return "실행 실패";
   if (kind === "canceled") return "취소됨";
   return kind;
+}
+
+function lifecyclePhaseKoreanLabel(phase: string): string {
+  if (phase === "queued") return "대기";
+  if (phase === "running") return "실행 중";
+  if (phase === "completed") return "완료";
+  if (phase === "succeeded") return "성공";
+  if (phase === "failed") return "실패";
+  if (phase === "timed_out") return "시간 초과";
+  if (phase === "canceled") return "취소됨";
+  if (phase === "needs_inspection") return "점검 필요";
+  if (phase === "blocked") return "막힘";
+  return phase;
 }
 
 function humanizedFailureReason(run: AgentRunSummary): string | null {
