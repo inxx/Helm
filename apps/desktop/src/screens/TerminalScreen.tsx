@@ -524,7 +524,9 @@ export function TerminalScreen({
 
   function restoreTerminalSnapshot(terminal: XTerm, snapshot: TerminalPtySnapshot) {
     if (snapshot.history) {
-      terminal.write(snapshot.history);
+      terminal.write(snapshot.history, () => {
+        terminal.scrollToBottom();
+      });
     }
     lastOutputSeqRefs.current.set(snapshot.terminalId, snapshot.seq);
   }
@@ -541,7 +543,10 @@ export function TerminalScreen({
   function writeTerminalOutput(output: TerminalPtyOutput) {
     const lastSeq = lastOutputSeqRefs.current.get(output.terminalId) ?? 0;
     if (output.seq <= lastSeq) return;
-    xtermRefs.current.get(output.terminalId)?.write(output.data);
+    const terminal = xtermRefs.current.get(output.terminalId);
+    terminal?.write(output.data, () => {
+      terminal.scrollToBottom();
+    });
     lastOutputSeqRefs.current.set(output.terminalId, output.seq);
   }
 

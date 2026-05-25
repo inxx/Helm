@@ -174,7 +174,7 @@ function activeRunForTask(runs: AgentRunSummary[]): AgentRunSummary | null {
 function runFlowLabel(run: AgentRunSummary): string {
   if (run.status === "Running") return `${roleLabel(run.roleId)} 진행 중`;
   if (run.status === "Queued") return `${roleLabel(run.roleId)} 대기`;
-  if (run.failureKind) return `${roleLabel(run.roleId)} · ${run.failureKind}`;
+  if (run.failureKind) return `${roleLabel(run.roleId)} · ${failureKindLabel(run.failureKind)}`;
   return `${roleLabel(run.roleId)} 점검`;
 }
 
@@ -183,12 +183,13 @@ function runHint(run: AgentRunSummary): string {
     return run.heartbeatAt ? `heartbeat ${relativeTime(run.heartbeatAt)}` : "report가 올 때까지 실행 중";
   }
   if (run.status === "Queued") return "worker queue 대기";
-  if (run.failureKind) return run.failureReason ?? `${run.failureKind} · retry 가능`;
-  return run.resultStatus ? `${run.resultStatus} · retry 가능` : "상세에서 근거 확인";
+  if (run.failureKind) return humanizedFailureReason(run) ?? `${failureKindLabel(run.failureKind)} · 재시도 가능`;
+  return run.resultStatus ? `${run.resultStatus} · 재시도 가능` : "상세에서 근거 확인";
 }
 
 function runStatusLabel(run: AgentRunSummary): string {
-  return run.lifecyclePhase ? `${run.status} · ${run.lifecyclePhase}` : run.status;
+  const status = runStatusKoreanLabel(run.status);
+  return run.lifecyclePhase ? `${status} · ${run.lifecyclePhase}` : status;
 }
 
 function runTone(run: AgentRunSummary): "running" | "queued" | "attention" {
@@ -199,6 +200,39 @@ function runTone(run: AgentRunSummary): "running" | "queued" | "attention" {
 
 function isAttentionRun(status: string): boolean {
   return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
+}
+
+function runStatusKoreanLabel(status: string): string {
+  if (status === "NeedsInspection") return "점검 필요";
+  if (status === "Failed") return "실패";
+  if (status === "TimedOut") return "시간 초과";
+  if (status === "Canceled") return "취소됨";
+  if (status === "Running") return "실행 중";
+  if (status === "Queued") return "대기 중";
+  if (status === "Succeeded") return "성공";
+  return status;
+}
+
+function failureKindLabel(kind: string): string {
+  if (kind === "needs_inspection") return "점검 필요";
+  if (kind === "blocking_gate") return "게이트 차단";
+  if (kind === "diff_mismatch") return "diff 불일치";
+  if (kind === "schema_invalid") return "결과 포맷 불일치";
+  if (kind === "timeout") return "시간 초과";
+  if (kind === "exit_failed") return "실행 실패";
+  if (kind === "canceled") return "취소됨";
+  return kind;
+}
+
+function humanizedFailureReason(run: AgentRunSummary): string | null {
+  if (!run.failureReason) return null;
+  if (run.failureKind === "needs_inspection") {
+    return "자동 판정에 필요한 근거가 부족해 수동 점검이 필요합니다.";
+  }
+  if (run.failureKind === "blocking_gate") {
+    return "차단 이슈가 감지되어 다음 단계로 진행되지 않았습니다.";
+  }
+  return run.failureReason;
 }
 
 function groupTasksByStatus(tasks: TaskSummary[]): Record<TaskStatus, TaskSummary[]> {
