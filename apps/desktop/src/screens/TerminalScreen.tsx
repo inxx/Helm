@@ -341,8 +341,14 @@ export function TerminalScreen({
 
   async function restartPane(pane: TerminalPaneState, patch: Partial<TerminalPaneState> = {}) {
     const nextPane = { ...pane, ...patch };
-    disposePane(pane.id, { stopPty: true });
+    disposePane(pane.id, { stopPty: false });
     updatePane(pane.id, { ...patch, running: false, error: null, exitCode: null });
+    try {
+      await api.stopTerminalPty(pane.id);
+    } catch (err) {
+      updatePane(pane.id, { running: false, error: errorMessage(err) });
+      return;
+    }
     requestAnimationFrame(() => ensureTerminal(nextPane));
   }
 
@@ -353,13 +359,6 @@ export function TerminalScreen({
 
     if (!activePane) return;
     updatePane(activePane.id, { nodeBinPath: nextNodeBinPath });
-
-    if (nextNodeBinPath && activePane.running) {
-      void api.writeTerminalPty(activePane.id, nodeRuntimeExportCommand(nextNodeBinPath)).catch((err) => {
-        updatePane(activePane.id, { error: errorMessage(err) });
-      });
-      return;
-    }
 
     await restartPane(activePane, { nodeBinPath: nextNodeBinPath });
   }
@@ -959,24 +958,6 @@ function nodeRuntimeLabel(nodeBinPath: string | null, runtimes: NodeRuntimeSumma
     runtimes.find((runtime) => runtime.binPath === nodeBinPath)?.label ??
     `node ${shortPath(nodeBinPath)}`
   );
-}
-
-function nodeRuntimeExportCommand(nodeBinPath: string): string {
-  const quotedBin = shellQuote(nodeBinPath);
-  const nvmDir = nvmDirFromNodeBin(nodeBinPath);
-  const nvmExport = nvmDir ? `export NVM_DIR=${shellQuote(nvmDir)}; ` : "";
-  return `${nvmExport}export NVM_BIN=${quotedBin}; export PATH=${quotedBin}:$PATH; hash -r\n`;
-}
-
-function nvmDirFromNodeBin(nodeBinPath: string): string | null {
-  const parts = nodeBinPath.split("/").filter(Boolean);
-  const versionsIndex = parts.lastIndexOf("versions");
-  if (versionsIndex <= 0 || parts[versionsIndex + 1] !== "node") return null;
-  return `/${parts.slice(0, versionsIndex).join("/")}`;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function loadTerminalNodeSelection(projectId: string): string | null {
