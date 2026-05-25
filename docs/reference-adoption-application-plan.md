@@ -24,6 +24,8 @@ Helm backend가 상태, 승인, 다음 role, artifact, gate, audit의 source of 
 - worker session visibility
 - direct source-of-truth와 safe file editing 원칙
 
+제품 품질 향상 관점의 통합 구현 순서와 기술 blocker matrix는 [Reference Product Quality Upgrade Plan](reference-product-quality-upgrade-plan.md)를 함께 따른다.
+
 ## 현재 Helm 기준선
 
 최근 반영된 상태:
@@ -98,9 +100,9 @@ Helm backend가 상태, 승인, 다음 role, artifact, gate, audit의 source of 
 
 ### 현재 Helm 상태
 
-- `PlanningScreen`은 `PlanningSessionStub` local state에 강하게 의존한다.
+- `PlanningScreen`은 DB-backed planning session list/revision/materialization을 사용하기 시작했다. 단, 컴포넌트 내부 이름과 일부 optimistic local mutation은 아직 `PlanningSessionStub`로 남아 있다.
 - `docs/ai-plan-conversation-approval-feature.md`에 DB-backed planning session 설계가 이미 있다.
-- 생성된 Task는 external ref로 일부 planning draft 정보를 남길 수 있지만, 정식 relation은 없다.
+- 생성된 Task는 `planning_materializations`/`planning_materialization_items` relation과 external ref로 draft provenance를 남긴다.
 
 ### 적용 단계
 
@@ -729,7 +731,7 @@ Conductor AI = queued run 시작 전 기록 또는 gate
 
 현재 구현 경계:
 
-- DB migration: `apps/desktop/src-tauri/migrations/0001_phase1.sql` ~ `0005_run_events.sql`
+- DB migration: `apps/desktop/src-tauri/migrations/0001_phase1.sql` ~ `0008_planning_workspace.sql`
 - migration loader: `apps/desktop/src-tauri/src/db.rs`의 `SUPPORTED_SCHEMA_VERSION`, `*_MIGRATION`, `run_migrations`
 - Rust DTO: `apps/desktop/src-tauri/src/models.rs`
 - DB/service 함수: `apps/desktop/src-tauri/src/db.rs`
@@ -739,9 +741,10 @@ Conductor AI = queued run 시작 전 기록 또는 gate
 
 마이그레이션 순서 결정:
 
-- `0006_planning_workspace.sql`: planning tables/indexes only. 기존 CHECK 제약을 건드리지 않는다.
-- `0007_run_lifecycle_repair.sql`: `agent_runs` lifecycle column과 `repair_requests` phase/iteration column. table rebuild 없이 `ALTER TABLE ADD COLUMN`만 사용한다.
-- `0008_merge_readiness.sql`: `merge_approvals` table. `approvals`와 `gate_results` CHECK는 건드리지 않는다.
+- `0006_run_lifecycle.sql`: `agent_runs` lifecycle column. table rebuild 없이 `ALTER TABLE ADD COLUMN`만 사용한다.
+- `0007_repair_run_links.sql`: repair/run link 보강. 기존 CHECK 제약을 건드리지 않는다.
+- `0008_planning_workspace.sql`: planning tables/indexes only. 기존 `approvals` CHECK 제약을 건드리지 않는다.
+- 다음 migration 후보: `0009_merge_readiness.sql` 또는 `0009_planning_approvals.sql`. 둘 중 먼저 구현되는 기능이 번호를 점유한다.
 - migration을 추가할 때마다 `SUPPORTED_SCHEMA_VERSION`, `include_str!`, `run_migrations` 순서를 같이 올린다.
 - column 추가 migration은 `apply_schema_patch`로 전체 SQL을 재실행하면 중복 column 오류가 날 수 있다. schema patch fallback이 필요하면 `column_exists(conn, table, column)` helper로 column별 보강을 한다.
 - 새 table/index migration에 schema patch fallback을 둘 경우 `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`를 사용한다. 이미 일부 table만 만들어진 partial migration 상태에서도 재실행이 실패하지 않아야 한다.
@@ -751,28 +754,28 @@ Conductor AI = queued run 시작 전 기록 또는 gate
 
 #### Migration
 
-새 migration은 `0006_planning_workspace.sql`로 추가한다.
+실제 적용된 planning migration은 `0008_planning_workspace.sql`이다.
 
 `db.rs` 변경:
 
 ```rust
-const SUPPORTED_SCHEMA_VERSION: i64 = 6;
-const PHASE6_MIGRATION: &str = include_str!("../migrations/0006_planning_workspace.sql");
+const SUPPORTED_SCHEMA_VERSION: i64 = 8;
+const PHASE8_MIGRATION: &str = include_str!("../migrations/0008_planning_workspace.sql");
 ```
 
 `run_migrations`에는 아래 순서로 추가한다.
 
 ```rust
-if current_version < 6 {
-    apply_migration(conn, 6, "planning_workspace", PHASE6_MIGRATION)?;
+if current_version < 8 {
+    apply_migration(conn, 8, "phase8_planning_workspace", PHASE8_MIGRATION)?;
 } else if !table_exists(conn, "planning_sessions")? {
-    apply_schema_patch(conn, PHASE6_MIGRATION)?;
+    apply_schema_patch(conn, PHASE8_MIGRATION)?;
 }
 ```
 
-`PHASE6_MIGRATION`은 새 table 생성만 포함하므로 이 fallback을 둘 수 있다. `0007_run_lifecycle_repair.sql`처럼 column을 추가하는 migration에는 같은 방식의 전체 `apply_schema_patch`를 쓰지 않는다.
+`PHASE8_MIGRATION`은 새 table 생성만 포함하므로 이 fallback을 둘 수 있다. `0006_run_lifecycle.sql`처럼 column을 추가하는 migration에는 같은 방식의 전체 `apply_schema_patch`를 쓰지 않는다.
 
-`PHASE6_MIGRATION`의 DDL은 `IF NOT EXISTS`를 사용한다. 이유는 table-only migration이라도 앱 종료/재시작 또는 수동 DB 조작 후 일부 table만 존재하는 partial 상태가 생기면 fallback이 다시 실행될 수 있기 때문이다.
+`PHASE8_MIGRATION`의 DDL은 `IF NOT EXISTS`를 사용한다. 이유는 table-only migration이라도 앱 종료/재시작 또는 수동 DB 조작 후 일부 table만 존재하는 partial 상태가 생기면 fallback이 다시 실행될 수 있기 때문이다.
 
 DDL 재실행 뒤에는 schema shape를 검증한다. 예를 들어 `planning_materializations`가 예전 단일-`task_id` 형태로 이미 존재하면 `IF NOT EXISTS`가 조용히 넘어가므로, `planning_materialization_items` 존재 여부와 expected indexes를 확인한 뒤 mismatch면 migration을 중단한다.
 

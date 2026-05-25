@@ -4,12 +4,14 @@ mod models;
 
 use crate::models::{
     AgentRunSummary, AiConnectionCheckResult, AiModelRefreshResult, AppSettings, ApprovalSummary,
-    CommandError, CommandResult, CreateEpicInput, CreateTaskInput, EffectiveSettings, EpicSummary,
-    GitBranchSummary, GitCommitSummary, GitFileStatus, GitRepositoryState, NodeRuntimeSummary,
-    OrchestratorSettings, PlannerConversationInput, PlannerConversationResult, ProjectContext,
-    ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult,
-    RunnerTemplateSummary, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
-    TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
+    CommandError, CommandResult, CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput,
+    EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary, GitFileStatus,
+    GitRepositoryState, NodeRuntimeSummary, OrchestratorSettings, PlannerConversationInput,
+    PlannerConversationResult, PlanningMaterializationSummary, PlanningSessionDetail,
+    PlanningSessionSummary, ProjectContext, ProjectSettingsPatch, ProjectSnapshot, ProjectSummary,
+    RunEventSummary, RunnerCheckResult, RunnerTemplateSummary, SavePlanDraftRevisionInput,
+    TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary, TaskTimelineEntry,
+    TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -418,6 +420,61 @@ fn run_planner_conversation_blocking(
         "planner command를 실행하지 못했습니다.",
         failures.join("\n"),
     ))
+}
+
+#[tauri::command]
+fn list_planning_sessions(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<PlanningSessionSummary>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::list_planning_sessions(&conn, &project_id)
+}
+
+#[tauri::command]
+fn create_planning_session(
+    project_id: String,
+    input: CreatePlanningSessionInput,
+    state: State<'_, AppState>,
+) -> CommandResult<PlanningSessionDetail> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::create_planning_session(&mut conn, &project_id, input)
+}
+
+#[tauri::command]
+fn get_planning_session(
+    project_id: String,
+    session_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<PlanningSessionDetail> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::get_planning_session(&conn, &project_id, &session_id)
+}
+
+#[tauri::command]
+fn save_plan_draft_revision(
+    project_id: String,
+    session_id: String,
+    input: SavePlanDraftRevisionInput,
+    state: State<'_, AppState>,
+) -> CommandResult<PlanningSessionDetail> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::save_plan_draft_revision(&mut conn, &project_id, &session_id, input)
+}
+
+#[tauri::command]
+fn materialize_plan_draft(
+    project_id: String,
+    draft_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<PlanningMaterializationSummary> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::materialize_plan_draft(&mut conn, &project_id, &draft_id)
 }
 
 #[tauri::command]
@@ -2915,6 +2972,9 @@ fn build_planner_prompt(project_root: &Path, input: &PlannerConversationInput) -
 - 정보가 부족해도 질문만 따로 쓰지 말고 아래 JSON 형태만 반환한다.
 - 질문은 openQuestions 배열에 넣고, tasks에는 현재 확정 가능한 최소 실행 후보를 넣는다.
 - tasks 배열은 절대 비우지 않는다. 범위가 모호하면 "범위 확정" 같은 작은 확인 Task를 1개 이상 넣는다.
+- executablePlan은 반드시 채운다. taskGraph, taskCards, ownershipMap, barriers, verificationGates는 Helm이 실제 실행 가능한 계획으로 검증한다.
+- 병렬 가능한 작업은 taskGraph.dependsOn을 비워 같은 batch에 놓고, 직렬 작업은 dependsOn으로 선행 Task id를 명시한다.
+- barriers에는 blocker/approval/manual decision을, verificationGates에는 실행할 명령 또는 수동 검증 기준과 필요한 evidence를 넣는다.
 - UI 문구/카피 수정 목표라면 각 관련 task에 copyChanges를 넣어 사용자가 승인 전 "현재 문구 -> 제안 문구 -> 이유"를 볼 수 있게 한다.
 - 문구만 수정하라는 목표는 구현 범위를 파일/화면/문구로 좁히고, 레이아웃/로직 변경을 acceptanceCriteria와 risks에서 명시적으로 제외한다.
 - Markdown fence, 설명 문장, 머리말 없이 JSON만 반환한다.
@@ -2943,7 +3003,56 @@ JSON schema:
     }}
   ],
   "openQuestions": ["string"],
-  "risks": ["string"]
+  "risks": ["string"],
+  "executablePlan": {{
+    "taskGraph": [
+      {{
+        "id": "task-1",
+        "title": "string",
+        "dependsOn": ["task-id"],
+        "parallelizable": true,
+        "batch": "string"
+      }}
+    ],
+    "taskCards": [
+      {{
+        "id": "task-1",
+        "title": "string",
+        "ownerRole": "planner|coder|plan_verifier|code_reviewer|tester|human",
+        "goal": "string",
+        "inputs": ["string"],
+        "outputs": ["string"],
+        "acceptanceCriteria": ["string"],
+        "verificationGates": ["gate-id"]
+      }}
+    ],
+    "ownershipMap": [
+      {{
+        "ownerRole": "string",
+        "responsibilities": ["string"],
+        "artifacts": ["string"],
+        "approver": "string"
+      }}
+    ],
+    "barriers": [
+      {{
+        "id": "barrier-1",
+        "title": "string",
+        "blocks": ["task-id"],
+        "condition": "string",
+        "ownerRole": "string"
+      }}
+    ],
+    "verificationGates": [
+      {{
+        "id": "gate-1",
+        "title": "string",
+        "type": "command|manual|browser|review",
+        "command": "string or null",
+        "requiredEvidence": ["string"]
+      }}
+    ]
+  }}
 }}
 
 Project:
@@ -5235,6 +5344,11 @@ fn main() {
             get_effective_settings,
             update_project_settings,
             run_planner_conversation,
+            list_planning_sessions,
+            create_planning_session,
+            get_planning_session,
+            save_plan_draft_revision,
+            materialize_plan_draft,
             list_runner_templates,
             apply_runner_template,
             check_role_runner,

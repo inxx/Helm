@@ -157,6 +157,8 @@ Planner
 
 ## 데이터 모델 후보
 
+2026-05-25 기준 첫 DB-backed vertical slice는 `0008_planning_workspace.sql`로 들어갔다. 실제 구현 table은 `planning_sessions`, `planning_messages`, `plan_draft_revisions`, `planning_materializations`, `planning_materialization_items`이며, 아래 후보 모델은 이후 `planning_approvals`, artifact export/hash, 부분 승인 모델을 보강할 때의 설계 맥락으로 유지한다.
+
 ### planning_sessions
 
 ```text

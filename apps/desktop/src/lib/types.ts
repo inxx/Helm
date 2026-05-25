@@ -152,6 +152,78 @@ export interface PlannerConversationResult {
   elapsedMs: number;
 }
 
+export interface CreatePlanningSessionInput {
+  title?: string | null;
+  goalText: string;
+  jiraRef?: string | null;
+  jiraState?: "Linked" | "Missing" | "AlreadyTracked" | string | null;
+}
+
+export interface SavePlanDraftRevisionInput {
+  draftJson: unknown;
+  planMarkdown?: string | null;
+  plannerMessage?: string | null;
+}
+
+export interface PlanningMessageSummary {
+  id: string;
+  projectId: string;
+  sessionId: string;
+  role: "user" | "planner" | "system" | string;
+  content: string;
+  draftRevisionId: string | null;
+  createdAt: string;
+}
+
+export interface PlanDraftRevisionSummary {
+  id: string;
+  projectId: string;
+  sessionId: string;
+  revision: number;
+  title: string;
+  summary: string;
+  planMarkdown: string | null;
+  draftJson: unknown;
+  validation: unknown;
+  taskCount: number;
+  taskGraphCount: number;
+  barrierCount: number;
+  verificationGateCount: number;
+  createdAt: string;
+}
+
+export interface PlanningMaterializationSummary {
+  id: string;
+  projectId: string;
+  sessionId: string;
+  draftId: string;
+  status: "Succeeded" | "Failed" | string;
+  taskIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlanningSessionSummary {
+  id: string;
+  projectId: string;
+  title: string;
+  goalText: string;
+  status: "Drafting" | "ReadyForApproval" | "Approved" | "Archived" | string;
+  jiraRef: string | null;
+  jiraState: "Linked" | "Missing" | "AlreadyTracked" | string;
+  currentDraftId: string | null;
+  currentDraft: PlanDraftRevisionSummary | null;
+  materialization: PlanningMaterializationSummary | null;
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlanningSessionDetail {
+  session: PlanningSessionSummary;
+  messages: PlanningMessageSummary[];
+}
+
 export interface JiraConfig {
   enabled: boolean;
   siteUrl: string | null;

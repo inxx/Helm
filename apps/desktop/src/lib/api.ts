@@ -6,6 +6,7 @@ import type {
   AiConnectionCheckResult,
   AiModelRefreshResult,
   ApprovalSummary,
+  CreatePlanningSessionInput,
   CreateTaskInput,
   EpicSummary,
   GitBranchSummary,
@@ -16,11 +17,15 @@ import type {
   NodeRuntimeSummary,
   PlannerConversationInput,
   PlannerConversationResult,
+  PlanningMaterializationSummary,
+  PlanningSessionDetail,
+  PlanningSessionSummary,
   ProjectSettingsPatch,
   ProjectSnapshot,
   RunEventSummary,
   RunnerCheckResult,
   RunnerTemplateSummary,
+  SavePlanDraftRevisionInput,
   TaskStatus,
   TaskGraphConflictSummary,
   TaskGraphExportSummary,
@@ -72,6 +77,21 @@ export const api = {
   },
   runPlannerConversation(projectId: string, input: PlannerConversationInput) {
     return invoke<PlannerConversationResult>("run_planner_conversation", { projectId, input });
+  },
+  listPlanningSessions(projectId: string) {
+    return invoke<PlanningSessionSummary[]>("list_planning_sessions", { projectId });
+  },
+  createPlanningSession(projectId: string, input: CreatePlanningSessionInput) {
+    return invoke<PlanningSessionDetail>("create_planning_session", { projectId, input });
+  },
+  getPlanningSession(projectId: string, sessionId: string) {
+    return invoke<PlanningSessionDetail>("get_planning_session", { projectId, sessionId });
+  },
+  savePlanDraftRevision(projectId: string, sessionId: string, input: SavePlanDraftRevisionInput) {
+    return invoke<PlanningSessionDetail>("save_plan_draft_revision", { projectId, sessionId, input });
+  },
+  materializePlanDraft(projectId: string, draftId: string) {
+    return invoke<PlanningMaterializationSummary>("materialize_plan_draft", { projectId, draftId });
   },
   listRunnerTemplates(projectId: string) {
     return invoke<RunnerTemplateSummary[]>("list_runner_templates", { projectId });

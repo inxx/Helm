@@ -16,6 +16,8 @@
 
 Helm의 source of truth는 계속 Helm backend와 repo-local `.helm` 데이터다. 외부 레퍼런스에서 가져올 것은 코드가 아니라 제품 모델, 상태 계약, 복구 UX, 검증 전략이다.
 
+레퍼런스에서 가져올 제품/운영 패턴과 기술 blocker 제거 순서는 [Reference Product Quality Upgrade Plan](reference-product-quality-upgrade-plan.md)를 기준으로 한다.
+
 ## 참고 레퍼런스
 
 - Harnss: multi-engine session, rich tool visualization, plan mode/permission control, background task agents.

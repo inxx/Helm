@@ -359,6 +359,92 @@ pub struct CreateTaskInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreatePlanningSessionInput {
+    pub title: Option<String>,
+    pub goal_text: String,
+    pub jira_ref: Option<String>,
+    pub jira_state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePlanDraftRevisionInput {
+    pub draft_json: Value,
+    pub plan_markdown: Option<String>,
+    pub planner_message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningMessageSummary {
+    pub id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub role: String,
+    pub content: String,
+    pub draft_revision_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDraftRevisionSummary {
+    pub id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub revision: i64,
+    pub title: String,
+    pub summary: String,
+    pub plan_markdown: Option<String>,
+    pub draft_json: Value,
+    pub validation: Value,
+    pub task_count: i64,
+    pub task_graph_count: i64,
+    pub barrier_count: i64,
+    pub verification_gate_count: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningMaterializationSummary {
+    pub id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub draft_id: String,
+    pub status: String,
+    pub task_ids: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningSessionSummary {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub goal_text: String,
+    pub status: String,
+    pub jira_ref: Option<String>,
+    pub jira_state: String,
+    pub current_draft_id: Option<String>,
+    pub current_draft: Option<PlanDraftRevisionSummary>,
+    pub materialization: Option<PlanningMaterializationSummary>,
+    pub message_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningSessionDetail {
+    pub session: PlanningSessionSummary,
+    pub messages: Vec<PlanningMessageSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlannerConversationInput {
     pub message: String,
     pub goal_text: String,

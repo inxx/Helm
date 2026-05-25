@@ -2,7 +2,13 @@ import { CheckCircle2, Loader2, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
-import type { CreateTaskInput, PlannerConversationResult, ProjectSnapshot, TaskSummary } from "../lib/types";
+import type {
+  PlannerConversationResult,
+  PlanningMessageSummary,
+  PlanningSessionDetail,
+  PlanningSessionSummary,
+  ProjectSnapshot,
+} from "../lib/types";
 
 interface PlanningScreenProps {
   snapshot: ProjectSnapshot | null;
@@ -22,6 +28,8 @@ interface PlanningSessionStub {
   messages: PlanningMessage[];
   draft: PlannerDraft;
   revision: number;
+  currentDraftId?: string | null;
+  materializationId?: string | null;
   taskId?: string;
   taskIds?: string[];
 }
@@ -41,6 +49,7 @@ interface PlannerDraft {
   tasks: PlannerDraftTask[];
   openQuestions: string[];
   risks: string[];
+  executablePlan: PlannerExecutablePlan;
 }
 
 interface PlannerDraftTask {
@@ -60,6 +69,56 @@ interface PlannerCopyChange {
   reason: string;
 }
 
+interface PlannerExecutablePlan {
+  taskGraph: PlannerTaskGraphNode[];
+  taskCards: PlannerTaskCard[];
+  ownershipMap: PlannerOwnershipEntry[];
+  barriers: PlannerBarrier[];
+  verificationGates: PlannerVerificationGate[];
+}
+
+interface PlannerTaskGraphNode {
+  id: string;
+  title: string;
+  dependsOn: string[];
+  parallelizable: boolean;
+  batch: string;
+}
+
+interface PlannerTaskCard {
+  id: string;
+  title: string;
+  ownerRole: string;
+  goal: string;
+  inputs: string[];
+  outputs: string[];
+  acceptanceCriteria: string[];
+  verificationGates: string[];
+}
+
+interface PlannerOwnershipEntry {
+  ownerRole: string;
+  responsibilities: string[];
+  artifacts: string[];
+  approver: string;
+}
+
+interface PlannerBarrier {
+  id: string;
+  title: string;
+  blocks: string[];
+  condition: string;
+  ownerRole: string;
+}
+
+interface PlannerVerificationGate {
+  id: string;
+  title: string;
+  type: "command" | "manual" | "browser" | "review" | string;
+  command: string | null;
+  requiredEvidence: string[];
+}
+
 interface PlannerDraftParseResult {
   draft: PlannerDraft;
   note: string | null;
@@ -76,6 +135,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   const [jiraRef, setJiraRef] = useState("");
   const [sessions, setSessions] = useState<PlanningSessionStub[]>([]);
   const [plannerOperation, setPlannerOperation] = useState<"planner" | "approve" | null>(null);
+  const [loadingSessions, setLoadingSessions] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
   const sessionsRef = useRef<PlanningSessionStub[]>([]);
@@ -104,6 +164,46 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
 
   useEffect(() => () => cancelPlannerRefinement(), []);
 
+  useEffect(() => {
+    if (!snapshot) {
+      setSessions([]);
+      setActiveSessionId(null);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingSessions(true);
+    api
+      .listPlanningSessions(snapshot.project.id)
+      .then((items) => {
+        if (cancelled) return;
+        const nextSessions = items.map((item) => sessionStubFromSummary(item));
+        setSessions(nextSessions);
+        setActiveSessionId((current) =>
+          current && nextSessions.some((session) => session.id === current)
+            ? current
+            : nextSessions[0]?.id ?? null,
+        );
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        const message = errorMessage(err);
+        setError(message);
+        showToast({
+          tone: "error",
+          title: "계획 세션 로드 실패",
+          description: message,
+        });
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingSessions(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot?.project.id, showToast]);
+
   if (!snapshot) {
     return (
       <section className="empty-state">
@@ -125,6 +225,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   const jiraChecks = jiraPlanningChecks(projectSnapshot, draftJiraRef, draftJiraState);
   const draft = activeSession?.draft ?? (goal.trim() ? buildPlannerDraft(goal, null) : null);
   const approvingPlan = plannerOperation === "approve";
+  const startingPlanner = plannerOperation === "planner";
 
   function startNewPlan() {
     cancelPlannerRefinement();
@@ -159,51 +260,66 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     return session.messages.some((message) => message.id === messageId);
   }
 
-  function startPlannerSession() {
+  async function startPlannerSession() {
     const trimmed = goal.trim();
     const trimmedJiraRef = jiraRef.trim();
-    if (!trimmed || approvingPlan) return;
+    if (!trimmed || plannerOperation) return;
 
     const existingTask = trimmedJiraRef ? findTaskByJiraRef(projectSnapshot, trimmedJiraRef) : null;
     const jiraState = existingTask ? "AlreadyTracked" : trimmedJiraRef ? "Linked" : "Missing";
     const fallbackDraft = buildPlannerDraft(trimmed, existingTask?.title ?? null);
-    const sessionId = `plan-${Date.now()}`;
-    const pendingMessageId = `${sessionId}-planner-pending`;
-    const session: PlanningSessionStub = {
-      id: sessionId,
-      title: fallbackDraft.title,
-      status: "ReadyForApproval",
-      updatedLabel: "빠른 초안",
-      goalText: trimmed,
-      jiraRef: trimmedJiraRef || null,
-      jiraState,
-      messages: [
-        {
-          id: `${sessionId}-user-1`,
-          role: "user",
-          content: trimmed,
-          createdLabel: "방금 전",
-        },
-        {
-          id: pendingMessageId,
-          role: "planner",
-          content: quickPlannerDraftMessage(false),
-          createdLabel: "방금 전",
-        },
-      ],
-      draft: fallbackDraft,
-      revision: 1,
-      taskId: existingTask?.id,
-    };
+    setPlannerOperation("planner");
+    try {
+      const created = await api.createPlanningSession(projectSnapshot.project.id, {
+        title: fallbackDraft.title,
+        goalText: trimmed,
+        jiraRef: trimmedJiraRef || null,
+        jiraState,
+      });
+      const saved = await api.savePlanDraftRevision(projectSnapshot.project.id, created.session.id, {
+        draftJson: fallbackDraft,
+        planMarkdown: planMarkdownFromDraft(fallbackDraft, trimmed),
+        plannerMessage: quickPlannerDraftMessage(false),
+      });
+      const pendingMessageId = `${saved.session.id}-planner-pending`;
+      const session = {
+        ...sessionStubFromDetail(saved),
+        taskId: existingTask?.id,
+      };
+      const sessionWithPending: PlanningSessionStub = {
+        ...session,
+        messages: [
+          ...session.messages,
+          {
+            id: pendingMessageId,
+            role: "planner",
+            content:
+              "AI planner가 executable plan, task graph, barrier, verification gate를 더 정교하게 다듬고 있습니다.",
+            createdLabel: "진행 중",
+            pending: true,
+          },
+        ],
+      };
 
-    setSessions((current) => [session, ...current]);
-    setActiveSessionId(session.id);
-    setGoal("");
-    setPlannerRequest("");
-    setError(null);
-    schedulePlannerRefinement(() => {
-      void refineInitialPlannerSession(sessionId, pendingMessageId, trimmed, jiraState, fallbackDraft);
-    });
+      setSessions((current) => [sessionWithPending, ...current.filter((item) => item.id !== session.id)]);
+      setActiveSessionId(session.id);
+      setGoal("");
+      setPlannerRequest("");
+      setError(null);
+      schedulePlannerRefinement(() => {
+        void refineInitialPlannerSession(session.id, pendingMessageId, trimmed, jiraState, fallbackDraft);
+      });
+    } catch (err) {
+      const message = errorMessage(err);
+      setError(message);
+      showToast({
+        tone: "error",
+        title: "계획 세션 저장 실패",
+        description: message,
+      });
+    } finally {
+      setPlannerOperation(null);
+    }
   }
 
   async function refineInitialPlannerSession(
@@ -226,15 +342,18 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       });
       const draft = plannerResult.draft;
       const responseMessage = plannerResult.message ?? plannerOpeningMessage(draft, jiraState);
+      const persisted = await persistDraftRevision(sessionId, draft, goalText, responseMessage);
       setSessions((current) =>
         current.map((item) =>
           item.id === sessionId
             ? {
                 ...item,
+                currentDraftId: persisted?.session.currentDraftId ?? item.currentDraftId,
                 title: item.status === "Approved" ? item.title : draft.title,
                 status: item.status === "Approved" ? item.status : "ReadyForApproval",
                 updatedLabel: "방금 전",
                 draft: item.status === "Approved" ? item.draft : draft,
+                revision: item.status === "Approved" ? item.revision : persisted?.session.currentDraft?.revision ?? item.revision + 1,
                 messages: item.messages.map((message) =>
                   message.id === pendingMessageId
                     ? {
@@ -325,6 +444,22 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     );
     setPlannerRequest("");
     setError(null);
+    void persistDraftRevision(activeSession.id, fallbackDraft, activeSession.goalText, quickPlannerDraftMessage(true)).then(
+      (persisted) => {
+        if (!persisted) return;
+        setSessions((current) =>
+          current.map((item) =>
+            item.id === activeSession.id
+              ? {
+                  ...item,
+                  currentDraftId: persisted.session.currentDraftId ?? item.currentDraftId,
+                  revision: persisted.session.currentDraft?.revision ?? item.revision,
+                }
+              : item,
+          ),
+        );
+      },
+    );
     schedulePlannerRefinement(() => {
       void refineActivePlannerSession(
         activeSession.id,
@@ -366,17 +501,19 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       );
       const revisedDraft = plannerResult.draft;
       const responseMessage = plannerResult.message ?? plannerRevisionMessage(revisedDraft, nextRevision);
+      const persisted = await persistDraftRevision(sessionId, revisedDraft, goalText, responseMessage);
 
       setSessions((current) =>
         current.map((item) =>
           item.id === sessionId
             ? {
                 ...item,
+                currentDraftId: persisted?.session.currentDraftId ?? item.currentDraftId,
                 title: item.status === "Approved" ? item.title : revisedDraft.title,
                 status: item.status === "Approved" ? item.status : "ReadyForApproval",
                 updatedLabel: "방금 전",
                 draft: item.status === "Approved" ? item.draft : revisedDraft,
-                revision: item.status === "Approved" ? item.revision : nextRevision,
+                revision: item.status === "Approved" ? item.revision : persisted?.session.currentDraft?.revision ?? nextRevision,
                 messages: item.messages.map((message) =>
                   message.id === pendingMessageId
                     ? {
@@ -502,6 +639,30 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     }
   }
 
+  async function persistDraftRevision(
+    sessionId: string,
+    draft: PlannerDraft,
+    goalText: string,
+    plannerMessage: string,
+  ): Promise<PlanningSessionDetail | null> {
+    try {
+      return await api.savePlanDraftRevision(projectSnapshot.project.id, sessionId, {
+        draftJson: draft,
+        planMarkdown: planMarkdownFromDraft(draft, goalText),
+        plannerMessage,
+      });
+    } catch (err) {
+      const message = errorMessage(err);
+      setError(message);
+      showToast({
+        tone: "error",
+        title: "Plan Document 저장 실패",
+        description: message,
+      });
+      return null;
+    }
+  }
+
   async function approvePlanDraft() {
     if (!activeSession || approvingPlan) return;
     cancelPlannerRefinement();
@@ -529,23 +690,31 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         return;
       }
 
-      const createdTasks: TaskSummary[] = [];
-      for (const draftTask of activeSession.draft.tasks) {
-        const input = createTaskInputFromDraft(activeSession, draftTask);
-        const task = await api.createTask(projectSnapshot.project.id, input);
-        createdTasks.push(task);
+      const savedDraftId =
+        activeSession.currentDraftId ??
+        (
+          await persistDraftRevision(
+            activeSession.id,
+            activeSession.draft,
+            activeSession.goalText,
+            "승인 직전에 현재 Plan Document를 저장했습니다.",
+          )
+        )?.session.currentDraftId;
+      if (!savedDraftId) {
+        throw new Error("승인할 Plan Document revision이 없습니다.");
       }
-
-      const firstTask = createdTasks[0];
-      if (!firstTask) return;
+      const materialization = await api.materializePlanDraft(projectSnapshot.project.id, savedDraftId);
+      const createdTaskIds = materialization.taskIds;
+      const firstTaskId = createdTaskIds[0];
+      if (!firstTaskId) return;
       let autoStarted = 0;
       const autoStartFailures: string[] = [];
-      for (const task of createdTasks) {
+      for (const taskId of createdTaskIds) {
         try {
-          await api.startNextRoleRun(projectSnapshot.project.id, task.id);
+          await api.startNextRoleRun(projectSnapshot.project.id, taskId);
           autoStarted += 1;
         } catch (error) {
-          autoStartFailures.push(`${task.title}: ${errorMessage(error)}`);
+          autoStartFailures.push(`${taskId}: ${errorMessage(error)}`);
         }
       }
 
@@ -556,8 +725,10 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 ...item,
                 status: "Approved",
                 updatedLabel: "방금 전",
-                taskId: firstTask.id,
-                taskIds: createdTasks.map((task) => task.id),
+                currentDraftId: savedDraftId,
+                materializationId: materialization.id,
+                taskId: firstTaskId,
+                taskIds: createdTaskIds,
               }
             : item,
         ),
@@ -569,8 +740,8 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         title: autoStarted > 0 ? "Task 생성 및 자동 진행 시작" : "Task 생성 완료",
         description:
           autoStarted > 0
-            ? `${createdTasks.length}개 Task 중 ${autoStarted}개가 테스트 완료 전까지 자동 진행을 시작했습니다. Merge는 수동입니다.`
-            : `${createdTasks.length}개의 Task를 생성했습니다. Runtime readiness를 확인한 뒤 Planner 준비를 시작하세요.`,
+            ? `${createdTaskIds.length}개 Task 중 ${autoStarted}개가 테스트 완료 전까지 자동 진행을 시작했습니다. Merge는 수동입니다.`
+            : `${createdTaskIds.length}개의 Task를 생성했습니다. Runtime readiness를 확인한 뒤 Planner 준비를 시작하세요.`,
       });
       if (autoStartFailures.length > 0) {
         showToast({
@@ -579,7 +750,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
           description: autoStartFailures[0],
         });
       }
-      onOpenTask(firstTask.id);
+      onOpenTask(firstTaskId);
     } catch (err) {
       const message = errorMessage(err);
       setError(message);
@@ -599,7 +770,9 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         <aside className="planning-aside">
           <div className="planning-aside-section">
             <h3>계획 세션</h3>
-            {hasSessions ? (
+            {loadingSessions ? (
+              <p className="planning-aside-empty">계획 세션을 불러오는 중입니다.</p>
+            ) : hasSessions ? (
               <ul className="planning-session-list">
                 {sortedSessions.map((session) => {
                   const isActive = session.id === activeSessionId;
@@ -677,7 +850,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 if (activeSession) {
                   reviseActiveDraft();
                 } else {
-                  startPlannerSession();
+                  void startPlannerSession();
                 }
               }}
             >
@@ -697,7 +870,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                   if (activeSession) {
                     reviseActiveDraft();
                   } else {
-                    startPlannerSession();
+                    void startPlannerSession();
                   }
                 }}
                 rows={2}
@@ -719,11 +892,11 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 </span>
                 <button
                   type="submit"
-                  className="primary-button loading-button"
-                  disabled={approvingPlan || (activeSession ? !plannerRequest.trim() : !goal.trim())}
+                  className={startingPlanner ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+                  disabled={Boolean(plannerOperation) || (activeSession ? !plannerRequest.trim() : !goal.trim())}
                 >
-                  <Sparkles size={14} aria-hidden />
-                  {activeSession ? "planner에게 보내기" : "대화 시작"}
+                  {startingPlanner ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Sparkles size={14} aria-hidden />}
+                  {startingPlanner ? "저장 중..." : activeSession ? "planner에게 보내기" : "대화 시작"}
                 </button>
               </div>
               {error ? <p className="planning-form-error">{error}</p> : null}
@@ -753,6 +926,47 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 <div className="plan-preview-task-counts">
                   <span>{draft.tasks.length} Tasks</span>
                   <span>{draft.tasks.reduce((total, task) => total + task.subtasks.length, 0)} Subtasks</span>
+                  <span>{draft.executablePlan.taskGraph.length} Graph nodes</span>
+                  <span>{draft.executablePlan.verificationGates.length} Gates</span>
+                </div>
+                <div className="planner-executable-summary">
+                  <section>
+                    <h4>Task Graph</h4>
+                    <ul>
+                      {draft.executablePlan.taskGraph.map((node) => (
+                        <li key={node.id}>
+                          <strong>{node.id}</strong>
+                          <span>{node.dependsOn.length > 0 ? `after ${node.dependsOn.join(", ")}` : "parallel-ready"}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                  <section>
+                    <h4>Barriers</h4>
+                    {draft.executablePlan.barriers.length > 0 ? (
+                      <ul>
+                        {draft.executablePlan.barriers.map((barrier) => (
+                          <li key={barrier.id}>
+                            <strong>{barrier.title}</strong>
+                            <span>{barrier.condition}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>현재 명시 blocker 없음</p>
+                    )}
+                  </section>
+                  <section>
+                    <h4>Verification Gates</h4>
+                    <ul>
+                      {draft.executablePlan.verificationGates.map((gate) => (
+                        <li key={gate.id}>
+                          <strong>{gate.title}</strong>
+                          <span>{gate.command ?? gate.type}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
                 </div>
                 <div className="plan-document-grid">
                   <section>
@@ -972,6 +1186,7 @@ function buildPlannerDraft(goal: string, linkedTaskTitle: string | null): Planne
         ? copyPlan.openQuestions
       : ["계획 세션과 draft를 backend DB에 언제 영속화할지 결정해야 합니다."],
     risks: Array.from(new Set(tasks.flatMap((task) => task.risks))),
+    executablePlan: buildExecutablePlan(title, tasks),
   };
 }
 
@@ -1076,6 +1291,173 @@ function copyChangePlanFromGoal(goal: string, title: string): {
   };
 }
 
+function buildExecutablePlan(planTitle: string, tasks: PlannerDraftTask[]): PlannerExecutablePlan {
+  const taskIds = tasks.map((_, index) => `task-${index + 1}`);
+  return {
+    taskGraph: tasks.map((task, index) => ({
+      id: taskIds[index],
+      title: task.title,
+      dependsOn: index === 0 ? [] : [taskIds[index - 1]],
+      parallelizable: index === 0,
+      batch: index === 0 ? "batch-1" : `batch-${index + 1}`,
+    })),
+    taskCards: tasks.map((task, index) => ({
+      id: taskIds[index],
+      title: task.title,
+      ownerRole: index === 0 ? "planner" : "coder",
+      goal: task.description,
+      inputs: ["Plan Document", planTitle],
+      outputs: [`${task.title} implementation artifact`, `${task.title} verification evidence`],
+      acceptanceCriteria: task.acceptanceCriteria,
+      verificationGates: [`gate-${index + 1}`],
+    })),
+    ownershipMap: [
+      {
+        ownerRole: "planner",
+        responsibilities: ["계획 범위와 blocker를 확정한다.", "Task materialize 전 Plan Document를 검증한다."],
+        artifacts: ["Plan Document", "Executable task graph"],
+        approver: "human",
+      },
+      {
+        ownerRole: "coder",
+        responsibilities: ["승인된 Task card 범위 안에서 구현한다.", "작업 산출물을 Task evidence로 남긴다."],
+        artifacts: ["Code changes", "Run artifacts"],
+        approver: "code_reviewer",
+      },
+    ],
+    barriers: [
+      {
+        id: "barrier-plan-approval",
+        title: "Plan approval",
+        blocks: taskIds,
+        condition: "사용자가 Plan Document를 승인해야 Helm Task로 materialize한다.",
+        ownerRole: "human",
+      },
+    ],
+    verificationGates: tasks.map((task, index) => ({
+      id: `gate-${index + 1}`,
+      title: `${task.title} 검증`,
+      type: task.testPlan.some((item) => item.includes("build") || item.includes("typecheck")) ? "command" : "manual",
+      command: task.testPlan.find((item) => item.includes("pnpm") || item.includes("cargo")) ?? null,
+      requiredEvidence: task.testPlan.length > 0 ? task.testPlan : ["완료 조건을 수동으로 확인한다."],
+    })),
+  };
+}
+
+function normalizeExecutablePlan(
+  value: Record<string, unknown>,
+  planTitle: string,
+  tasks: PlannerDraftTask[],
+  fallback: PlannerExecutablePlan,
+): PlannerExecutablePlan {
+  const candidate = recordField(value, ["executablePlan", "executable_plan"]);
+  if (!candidate) return buildExecutablePlan(planTitle, tasks.length > 0 ? tasks : fallback.taskCards.map(taskFromCard));
+
+  const taskGraph = recordArrayField(candidate, ["taskGraph", "task_graph"]).map(normalizeTaskGraphNode);
+  const taskCards = recordArrayField(candidate, ["taskCards", "task_cards"]).map(normalizeTaskCard);
+  const ownershipMap = recordArrayField(candidate, ["ownershipMap", "ownership_map"]).map(normalizeOwnershipEntry);
+  const barriers = recordArrayField(candidate, ["barriers"]).map(normalizeBarrier);
+  const verificationGates = recordArrayField(candidate, ["verificationGates", "verification_gates"]).map(normalizeVerificationGate);
+
+  if (
+    taskGraph.length === 0 ||
+    taskCards.length === 0 ||
+    ownershipMap.length === 0 ||
+    verificationGates.length === 0
+  ) {
+    return buildExecutablePlan(planTitle, tasks);
+  }
+
+  return {
+    taskGraph,
+    taskCards,
+    ownershipMap,
+    barriers,
+    verificationGates,
+  };
+}
+
+function normalizeTaskGraphNode(value: Record<string, unknown>, index: number): PlannerTaskGraphNode {
+  return {
+    id: stringField(value, ["id", "taskId", "task_id"]) ?? `task-${index + 1}`,
+    title: stringField(value, ["title"]) ?? `Task ${index + 1}`,
+    dependsOn: stringArrayField(value, ["dependsOn", "depends_on", "dependencies"]),
+    parallelizable: typeof value.parallelizable === "boolean" ? value.parallelizable : stringArrayField(value, ["dependsOn", "depends_on"]).length === 0,
+    batch: stringField(value, ["batch"]) ?? `batch-${index + 1}`,
+  };
+}
+
+function normalizeTaskCard(value: Record<string, unknown>, index: number): PlannerTaskCard {
+  return {
+    id: stringField(value, ["id", "taskId", "task_id"]) ?? `task-${index + 1}`,
+    title: stringField(value, ["title"]) ?? `Task ${index + 1}`,
+    ownerRole: stringField(value, ["ownerRole", "owner_role"]) ?? "coder",
+    goal: stringField(value, ["goal", "description"]) ?? "승인된 계획 범위를 구현합니다.",
+    inputs: stringArrayField(value, ["inputs"]),
+    outputs: stringArrayField(value, ["outputs"]),
+    acceptanceCriteria: stringArrayField(value, ["acceptanceCriteria", "acceptance_criteria"]),
+    verificationGates: stringArrayField(value, ["verificationGates", "verification_gates"]),
+  };
+}
+
+function normalizeOwnershipEntry(value: Record<string, unknown>): PlannerOwnershipEntry {
+  return {
+    ownerRole: stringField(value, ["ownerRole", "owner_role", "role"]) ?? "coder",
+    responsibilities: stringArrayField(value, ["responsibilities"]),
+    artifacts: stringArrayField(value, ["artifacts"]),
+    approver: stringField(value, ["approver"]) ?? "human",
+  };
+}
+
+function normalizeBarrier(value: Record<string, unknown>, index: number): PlannerBarrier {
+  return {
+    id: stringField(value, ["id"]) ?? `barrier-${index + 1}`,
+    title: stringField(value, ["title"]) ?? `Barrier ${index + 1}`,
+    blocks: stringArrayField(value, ["blocks", "blockedTasks", "blocked_tasks"]),
+    condition: stringField(value, ["condition", "description"]) ?? "해결 조건을 확인해야 합니다.",
+    ownerRole: stringField(value, ["ownerRole", "owner_role"]) ?? "human",
+  };
+}
+
+function normalizeVerificationGate(value: Record<string, unknown>, index: number): PlannerVerificationGate {
+  return {
+    id: stringField(value, ["id"]) ?? `gate-${index + 1}`,
+    title: stringField(value, ["title"]) ?? `Gate ${index + 1}`,
+    type: stringField(value, ["type"]) ?? "manual",
+    command: stringField(value, ["command"]),
+    requiredEvidence: stringArrayField(value, ["requiredEvidence", "required_evidence", "evidence"]),
+  };
+}
+
+function taskFromCard(card: PlannerTaskCard): PlannerDraftTask {
+  return {
+    title: card.title,
+    description: card.goal,
+    subtasks: card.outputs,
+    copyChanges: [],
+    acceptanceCriteria: card.acceptanceCriteria,
+    risks: [],
+    testPlan: card.verificationGates,
+  };
+}
+
+function recordField(value: Record<string, unknown>, keys: string[]): Record<string, unknown> | null {
+  for (const key of keys) {
+    const field = value[key];
+    if (isRecord(field)) return field;
+  }
+  return null;
+}
+
+function recordArrayField(value: Record<string, unknown>, keys: string[]): Record<string, unknown>[] {
+  for (const key of keys) {
+    const field = value[key];
+    if (!Array.isArray(field)) continue;
+    return field.filter(isRecord);
+  }
+  return [];
+}
+
 function parsePlannerDraft(raw: string, fallbackDraft: PlannerDraft): PlannerDraftParseResult | null {
   for (const jsonText of extractJsonCandidates(raw)) {
     try {
@@ -1105,6 +1487,7 @@ function normalizePlannerDraft(value: unknown, fallbackDraft: PlannerDraft): Pla
 
   const risks = stringArrayField(parsed, ["risks"]);
   const scope = scopeList(parsed.scope);
+  const executablePlan = normalizeExecutablePlan(parsed, title, tasks, fallbackDraft.executablePlan);
   return {
     draft: {
       title,
@@ -1113,6 +1496,7 @@ function normalizePlannerDraft(value: unknown, fallbackDraft: PlannerDraft): Pla
       tasks,
       openQuestions: stringArrayField(parsed, ["openQuestions", "open_questions"]),
       risks: risks.length > 0 ? risks : Array.from(new Set(tasks.flatMap((task) => task.risks))),
+      executablePlan,
     },
     note,
   };
@@ -1378,67 +1762,123 @@ function plannerRevisionMessage(draft: PlannerDraft, revision: number): string {
   ].join(" ");
 }
 
-function createTaskInputFromDraft(
-  session: PlanningSessionStub,
-  draftTask: PlannerDraftTask,
-): CreateTaskInput {
+function planMarkdownFromDraft(draft: PlannerDraft, goalText: string): string {
+  return [
+    `# ${draft.title}`,
+    "",
+    draft.summary,
+    "",
+    "## Goal",
+    goalText,
+    "",
+    "## Scope",
+    ...draft.scope.map((item) => `- ${item}`),
+    "",
+    "## Executable Plan",
+    `- Task graph nodes: ${draft.executablePlan.taskGraph.length}`,
+    `- Task cards: ${draft.executablePlan.taskCards.length}`,
+    `- Barriers: ${draft.executablePlan.barriers.length}`,
+    `- Verification gates: ${draft.executablePlan.verificationGates.length}`,
+    "",
+    "## Tasks",
+    ...draft.tasks.flatMap((task, index) => [
+      `### ${index + 1}. ${task.title}`,
+      task.description,
+      "",
+      "Acceptance:",
+      ...task.acceptanceCriteria.map((item) => `- ${item}`),
+      "",
+      "Test plan:",
+      ...task.testPlan.map((item) => `- ${item}`),
+      "",
+    ]),
+  ].join("\n");
+}
+
+function sessionStubFromDetail(detail: PlanningSessionDetail): PlanningSessionStub {
+  const base = sessionStubFromSummary(detail.session);
+  const messages = detail.messages.map(messageStubFromSummary);
   return {
-    title: draftTask.title,
-    description: [
-      session.draft.summary,
-      "",
-      "Planning Goal",
-      session.goalText,
-      "",
-      "Description",
-      draftTask.description,
-      "",
-      ...(draftTask.copyChanges.length > 0
-        ? [
-            "Proposed Copy",
-            ...draftTask.copyChanges.flatMap((change) => [
-              `- Location: ${change.location}`,
-              ...(change.currentText ? [`  Current: ${change.currentText}`] : []),
-              `  Proposed: ${change.proposedText}`,
-              `  Reason: ${change.reason}`,
-            ]),
-            "",
-          ]
-        : []),
-      "Subtasks",
-      ...draftTask.subtasks.map((item) => `- ${item}`),
-      "",
-      "Acceptance Criteria",
-      ...draftTask.acceptanceCriteria.map((item) => `- ${item}`),
-      "",
-      "Risks",
-      ...draftTask.risks.map((item) => `- ${item}`),
-      "",
-      "Test Plan",
-      ...draftTask.testPlan.map((item) => `- ${item}`),
-    ].join("\n"),
-    externalRefs: [
-      ...(session.jiraRef
+    ...base,
+    messages: messages.length > 0 ? messages : base.messages,
+  };
+}
+
+function sessionStubFromSummary(summary: PlanningSessionSummary): PlanningSessionStub {
+  const fallbackDraft = buildPlannerDraft(summary.goalText, null);
+  const parsedDraft =
+    summary.currentDraft && isRecord(summary.currentDraft.draftJson)
+      ? normalizePlannerDraft(summary.currentDraft.draftJson, fallbackDraft)?.draft
+      : null;
+  const draft = parsedDraft ?? fallbackDraft;
+  const materializedTaskIds = summary.materialization?.taskIds ?? [];
+  return {
+    id: summary.id,
+    title: summary.title,
+    status: planningStatus(summary.status),
+    updatedLabel: createdLabelFromIso(summary.updatedAt),
+    goalText: summary.goalText,
+    jiraRef: summary.jiraRef,
+    jiraState: planningJiraState(summary.jiraState),
+    messages: [
+      {
+        id: `${summary.id}-goal`,
+        role: "user",
+        content: summary.goalText,
+        createdLabel: createdLabelFromIso(summary.createdAt),
+      },
+      ...(summary.currentDraft
         ? [
             {
-              refType: refTypeForJiraRef(session.jiraRef),
-              refValue: session.jiraRef,
-              refTitle: "Jira reference",
-            } satisfies NonNullable<CreateTaskInput["externalRefs"]>[number],
+              id: `${summary.currentDraft.id}-planner`,
+              role: "planner" as const,
+              content: `저장된 Plan Document v${summary.currentDraft.revision}을 불러왔습니다. ${summary.currentDraft.taskCount}개 Task, ${summary.currentDraft.taskGraphCount}개 graph node, ${summary.currentDraft.verificationGateCount}개 gate가 있습니다.`,
+              createdLabel: createdLabelFromIso(summary.currentDraft.createdAt),
+            },
           ]
         : []),
-      {
-        refType: "PlainText",
-        refValue: session.goalText,
-        refTitle: "Planning goal",
-      },
-      {
-        refType: "PlainText",
-        refValue: `Planner draft v${session.revision}: ${draftTask.title}`,
-        refTitle: "Planner draft task",
-      },
     ],
+    draft,
+    revision: summary.currentDraft?.revision ?? 0,
+    currentDraftId: summary.currentDraftId,
+    materializationId: summary.materialization?.id ?? null,
+    taskId: materializedTaskIds[0],
+    taskIds: materializedTaskIds,
   };
+}
+
+function messageStubFromSummary(message: PlanningMessageSummary): PlanningMessage {
+  return {
+    id: message.id,
+    role: message.role === "user" ? "user" : "planner",
+    content: message.content,
+    createdLabel: createdLabelFromIso(message.createdAt),
+  };
+}
+
+function planningStatus(value: string): PlanningSessionStub["status"] {
+  if (value === "Drafting" || value === "ReadyForApproval" || value === "Approved" || value === "Archived") {
+    return value;
+  }
+  return "Drafting";
+}
+
+function planningJiraState(value: string): PlanningSessionStub["jiraState"] {
+  if (value === "Linked" || value === "Missing" || value === "AlreadyTracked") {
+    return value;
+  }
+  return "Missing";
+}
+
+function createdLabelFromIso(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "저장됨";
+  return date.toLocaleString("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function titleFromGoal(value: string): string {
@@ -1510,10 +1950,6 @@ function findTaskByJiraRef(snapshot: ProjectSnapshot, value: string) {
       }),
     ) ?? null
   );
-}
-
-function refTypeForJiraRef(value: string): NonNullable<CreateTaskInput["externalRefs"]>[number]["refType"] {
-  return value.includes("browse/") || value.startsWith("http") ? "Url" : "JiraTask";
 }
 
 function withPlannerSoftNotice<T>(promise: Promise<T>, onSoftTimeout?: () => void): Promise<T> {
