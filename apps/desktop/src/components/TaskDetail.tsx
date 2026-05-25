@@ -732,7 +732,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
               </button>
             ) : null}
           </div>
-          {visibleRunActivity ? (
+          {visibleRunActivity && visibleRunActivity.tone !== "live" ? (
             <div className={`run-liveness-card ${visibleRunActivity.tone}`}>
               <strong>{visibleRunActivity.title}</strong>
               <span>{visibleRunActivity.description}</span>
