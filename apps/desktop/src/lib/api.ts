@@ -22,6 +22,8 @@ import type {
   RunnerCheckResult,
   RunnerTemplateSummary,
   TaskStatus,
+  TaskGraphConflictSummary,
+  TaskGraphExportSummary,
   TaskSummary,
   TaskTimelineEntry,
   TaskWorktreeSummary,
@@ -111,11 +113,26 @@ export const api = {
   ensureTaskWorktree(projectId: string, taskId: string) {
     return invoke<TaskWorktreeSummary>("ensure_task_worktree", { projectId, taskId });
   },
+  exportTaskGraph(projectId: string, force = false) {
+    return invoke<TaskGraphExportSummary>("export_task_graph", { projectId, force });
+  },
+  readTaskGraph(projectId: string) {
+    return invoke<string | null>("read_task_graph", { projectId });
+  },
+  checkTaskGraphConflict(projectId: string) {
+    return invoke<TaskGraphConflictSummary>("check_task_graph_conflict", { projectId });
+  },
+  openTaskGraph(projectId: string) {
+    return invoke<TaskGraphConflictSummary>("open_task_graph", { projectId });
+  },
   runStubRole(projectId: string, taskId: string, roleId: string) {
     return invoke<AgentRunSummary>("run_stub_role", { projectId, taskId, roleId });
   },
   prepareRoleContext(projectId: string, taskId: string, roleId: string) {
     return invoke<AgentRunSummary>("prepare_role_context", { projectId, taskId, roleId });
+  },
+  prepareRepairContext(projectId: string, repairRequestId: string) {
+    return invoke<AgentRunSummary>("prepare_repair_context", { projectId, repairRequestId });
   },
   startNextRoleRun(projectId: string, taskId: string) {
     return invoke<AgentRunSummary>("start_next_role_run", { projectId, taskId });

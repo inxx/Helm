@@ -203,6 +203,26 @@ pub struct TaskTimelineEntry {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskGraphConflictSummary {
+    pub path: String,
+    pub exists: bool,
+    pub conflict: bool,
+    pub reason: Option<String>,
+    pub modified_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskGraphExportSummary {
+    pub path: String,
+    pub content: String,
+    pub task_count: usize,
+    pub written_at: String,
+    pub conflict: TaskGraphConflictSummary,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuditLogEntry {
     pub id: String,
     pub project_id: String,
@@ -397,10 +417,17 @@ pub struct AgentRunSummary {
     pub result_path: String,
     pub stdout_log_path: String,
     pub stderr_log_path: String,
+    pub repair_request_id: Option<String>,
     pub exit_code: Option<i64>,
     pub result_status: Option<String>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    pub lifecycle_phase: Option<String>,
+    pub claimed_at: Option<String>,
+    pub heartbeat_at: Option<String>,
+    pub failure_kind: Option<String>,
+    pub failure_reason: Option<String>,
+    pub attempt: i64,
     pub created_at: String,
     pub updated_at: String,
 }

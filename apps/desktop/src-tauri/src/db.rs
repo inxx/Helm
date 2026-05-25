@@ -3,9 +3,10 @@ use crate::models::{
     AgentRunSummary, ApprovalSummary, AuditLogEntry, CommandError, CommandResult, CreateEpicInput,
     CreateTaskInput, EffectiveSettings, EpicSummary, GitFileStatus, ProjectSettingsPatch,
     ProjectSummary, RunEventSummary, TaskCounts, TaskExternalRefInput, TaskExternalRefSummary,
-    TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
+    TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary, TaskTimelineEntry,
+    TaskWorktreeSummary,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -20,12 +21,27 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 5;
+const SUPPORTED_SCHEMA_VERSION: i64 = 7;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
 const PHASE4_MIGRATION: &str = include_str!("../migrations/0004_evidence_gate_timeline.sql");
 const PHASE5_MIGRATION: &str = include_str!("../migrations/0005_run_events.sql");
+const PHASE6_MIGRATION: &str = include_str!("../migrations/0006_run_lifecycle.sql");
+const PHASE7_MIGRATION: &str = include_str!("../migrations/0007_repair_run_links.sql");
+const TASK_STATUS_ORDER: &[&str] = &[
+    "Planned",
+    "Ready",
+    "Coding",
+    "PlanVerification",
+    "CodeReview",
+    "Testing",
+    "MergeWaiting",
+    "Merged",
+    "Done",
+    "Blocked",
+];
+const REPAIR_FAILURE_LIMIT: i64 = 3;
 
 pub fn now() -> String {
     Utc::now().to_rfc3339()
@@ -86,6 +102,16 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
         apply_migration(conn, 5, "phase5_run_events", PHASE5_MIGRATION)?;
     } else if !table_exists(conn, "run_events")? {
         apply_schema_patch(conn, PHASE5_MIGRATION)?;
+    }
+    if current_version < 6 {
+        apply_migration(conn, 6, "phase6_run_lifecycle", PHASE6_MIGRATION)?;
+    } else if !table_has_column(conn, "agent_runs", "lifecycle_phase")? {
+        apply_schema_patch(conn, PHASE6_MIGRATION)?;
+    }
+    if current_version < 7 {
+        apply_migration(conn, 7, "phase7_repair_run_links", PHASE7_MIGRATION)?;
+    } else if !table_has_column(conn, "agent_runs", "repair_request_id")? {
+        apply_schema_patch(conn, PHASE7_MIGRATION)?;
     }
     Ok(())
 }
@@ -153,6 +179,24 @@ fn table_exists(conn: &Connection, table_name: &str) -> CommandResult<bool> {
         .optional()
         .map_err(|err| CommandError::database("Helm 데이터베이스를 확인하지 못했습니다.", err))?;
     Ok(exists.is_some())
+}
+
+fn table_has_column(conn: &Connection, table_name: &str, column_name: &str) -> CommandResult<bool> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table_name})"))
+        .map_err(|err| CommandError::database("Helm 데이터베이스를 확인하지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| CommandError::database("Helm 데이터베이스를 확인하지 못했습니다.", err))?;
+    for row in rows {
+        if row.map_err(|err| {
+            CommandError::database("Helm 데이터베이스를 확인하지 못했습니다.", err)
+        })? == column_name
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn upsert_project(conn: &Connection, root: &Path) -> CommandResult<ProjectSummary> {
@@ -726,9 +770,10 @@ pub fn run_stub_role(
         "INSERT INTO agent_runs (
            id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
            stdout_log_path, stderr_log_path, exit_code, result_status, started_at, finished_at,
-           created_at, updated_at
+           lifecycle_phase, claimed_at, heartbeat_at, attempt, created_at, updated_at
          )
-         VALUES (?1, ?2, ?3, ?4, 'Succeeded', ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?11, ?11, ?11)",
+         VALUES (?1, ?2, ?3, ?4, 'Succeeded', ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?11,
+                 'completed', ?11, ?11, 1, ?11, ?11)",
         params![
             run_id,
             project_id,
@@ -953,9 +998,10 @@ pub fn prepare_role_context(
         "INSERT INTO agent_runs (
            id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
            stdout_log_path, stderr_log_path, exit_code, result_status, started_at, finished_at,
-           created_at, updated_at
+           lifecycle_phase, attempt, created_at, updated_at
          )
-         VALUES (?1, ?2, ?3, ?4, 'Queued', ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL, NULL, ?10, ?10)",
+         VALUES (?1, ?2, ?3, ?4, 'Queued', ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL, NULL,
+                 'queued', 1, ?10, ?10)",
         params![
             run_id,
             project_id,
@@ -1104,7 +1150,12 @@ pub fn claim_host_run(
     let changed = conn
         .execute(
             "UPDATE agent_runs
-             SET status = 'Running', started_at = COALESCE(started_at, ?1), updated_at = ?1
+             SET status = 'Running',
+                 lifecycle_phase = 'running',
+                 started_at = COALESCE(started_at, ?1),
+                 claimed_at = COALESCE(claimed_at, ?1),
+                 heartbeat_at = ?1,
+                 updated_at = ?1
              WHERE id = ?2 AND project_id = ?3 AND status = 'Queued'",
             params![started_at, run_id, project_id],
         )
@@ -1197,7 +1248,11 @@ pub fn run_host_role(
         ));
     }
     let task = get_task(conn, &run.task_id)?;
-    validate_role_run_state(conn, project_id, &task, &run.role_id)?;
+    if run.repair_request_id.is_some() {
+        validate_repair_run_state(conn, project_id, &run)?;
+    } else {
+        validate_role_run_state(conn, project_id, &task, &run.role_id)?;
+    }
     let worktree = get_task_worktree(conn, project_id, &run.task_id)?.ok_or_else(|| {
         CommandError::validation("host run 실행 전에 태스크 worktree를 먼저 준비해주세요.")
     })?;
@@ -1409,6 +1464,26 @@ pub fn run_host_role(
         "NeedsInspection"
     };
     let finished_at = now();
+    let lifecycle_phase = lifecycle_phase_for_run_status(final_status);
+    let failure_kind = failure_kind_for_run_result(
+        final_status,
+        command_output.timed_out,
+        command_output.canceled,
+        !schema_ok,
+        has_blocking_gate,
+        diff_consistency.is_some(),
+        exit_code,
+    )
+    .map(str::to_string);
+    let failure_reason = failure_reason_for_run_result(
+        final_status,
+        command_output.timed_out,
+        command_output.canceled,
+        !schema_ok,
+        has_blocking_gate,
+        diff_consistency.is_some(),
+        exit_code,
+    );
 
     let persistence_result = (|| -> CommandResult<()> {
         let tx = conn
@@ -1436,9 +1511,26 @@ pub fn run_host_role(
         )?;
         tx.execute(
             "UPDATE agent_runs
-             SET status = ?1, exit_code = ?2, result_status = ?3, finished_at = ?4, updated_at = ?4
-             WHERE id = ?5",
-            params![final_status, exit_code, result_status, finished_at, run_id],
+             SET status = ?1,
+                 exit_code = ?2,
+                 result_status = ?3,
+                 finished_at = ?4,
+                 lifecycle_phase = ?5,
+                 heartbeat_at = ?4,
+                 failure_kind = ?6,
+                 failure_reason = ?7,
+                 updated_at = ?4
+             WHERE id = ?8",
+            params![
+                final_status,
+                exit_code,
+                result_status,
+                finished_at,
+                lifecycle_phase,
+                failure_kind,
+                failure_reason,
+                run_id
+            ],
         )
         .map_err(|err| CommandError::database("host run 결과를 저장하지 못했습니다.", err))?;
         insert_audit(
@@ -1485,6 +1577,15 @@ pub fn run_host_role(
         }
 
         if final_status == "Succeeded" && result_status.as_deref() == Some("pass") {
+            if let Some(repair_request_id) = run.repair_request_id.as_deref() {
+                resolve_repair_request_after_success(
+                    &tx,
+                    project_id,
+                    repair_request_id,
+                    run_id,
+                    &finished_at,
+                )?;
+            }
             apply_successful_role_result(&tx, project_id, &task, &run.role_id, run_id)?;
         } else if run.role_id == "coder" {
             let changed = tx
@@ -1589,10 +1690,13 @@ pub fn mark_host_run_launch_error(
          SET status = 'NeedsInspection',
              exit_code = -1,
              result_status = 'needs_changes',
+             lifecycle_phase = 'failed',
+             failure_kind = 'launch_failed',
+             failure_reason = ?4,
              finished_at = ?1,
              updated_at = ?1
          WHERE id = ?2 AND project_id = ?3",
-        params![finished_at, run_id, project_id],
+        params![finished_at, run_id, project_id, message],
     )
     .map_err(|err| CommandError::database("host run 실패 상태를 저장하지 못했습니다.", err))?;
     insert_audit(
@@ -1656,6 +1760,231 @@ pub fn retry_host_role(
     prepare_role_context(conn, root, project_id, &run.task_id, &run.role_id)
 }
 
+pub fn prepare_repair_context(
+    conn: &mut Connection,
+    root: &Path,
+    project_id: &str,
+    repair_request_id: &str,
+) -> CommandResult<AgentRunSummary> {
+    let repair = get_repair_request_record(conn, project_id, repair_request_id)?;
+    if repair.status != "Open" {
+        return Err(CommandError::validation(
+            "이미 닫힌 repair request는 실행 준비를 만들 수 없습니다.",
+        ));
+    }
+    if has_active_run(conn, project_id, &repair.task_id)? {
+        return Err(CommandError::validation(
+            "이미 준비 중이거나 실행 중인 role run이 있습니다.",
+        ));
+    }
+
+    let attempts = repair_attempt_count(conn, project_id, repair_request_id)?;
+    if attempts >= REPAIR_FAILURE_LIMIT {
+        return Err(CommandError::validation(
+            "repair 반복 실패 limit에 도달했습니다. manual handoff로 원인을 확인해주세요.",
+        ));
+    }
+
+    let task = get_task(conn, &repair.task_id)?;
+    if task.project_id != project_id {
+        return Err(CommandError::validation("대상 태스크를 찾을 수 없습니다."));
+    }
+    let worktree = ensure_task_worktree(conn, root, project_id, &repair.task_id)?;
+    let gate = get_gate_result_record(conn, project_id, repair.gate_result_id.as_deref())?;
+    let role_id = repair_role_for_gate(gate.as_ref().map(|item| item.gate.as_str()), &task);
+    let settings = effective_settings(conn, project_id)?;
+    let worktree_setup = resolve_worktree_setup_config(root, settings.worktree_setup.as_ref())?;
+    let previous_run = repair
+        .run_id
+        .as_ref()
+        .and_then(|run_id| get_agent_run(conn, run_id).ok());
+    let previous_summary = previous_run
+        .as_ref()
+        .map(|run| read_run_summary_for_context(root, run))
+        .unwrap_or_else(|| "이전 실행 summary를 찾지 못했습니다.".to_string());
+
+    let run_id = new_id();
+    let timestamp = now();
+    let artifact_dir = format!(".helm/artifacts/runs/{run_id}");
+    validate_relative_artifact_path(&artifact_dir)?;
+    let artifact_path = root.join(&artifact_dir);
+    fs::create_dir_all(&artifact_path)
+        .map_err(|err| CommandError::io("repair 산출물 폴더를 만들지 못했습니다.", err))?;
+
+    let mut context_pack =
+        build_context_pack_markdown(root, &task, &worktree, role_id, worktree_setup.as_ref())?;
+    context_pack.push_str(&repair_context_markdown(
+        &repair,
+        gate.as_ref(),
+        previous_run.as_ref(),
+        &previous_summary,
+    ));
+    let mut context_manifest =
+        build_context_manifest(root, &task, &worktree, role_id, worktree_setup.as_ref())?;
+    if let Some(object) = context_manifest.as_object_mut() {
+        object.insert(
+            "repair".to_string(),
+            json!({
+                "repairRequestId": repair.id,
+                "sourceRunId": repair.run_id,
+                "gateResultId": repair.gate_result_id,
+                "gate": gate.as_ref().map(|item| item.gate.clone()),
+                "gateStatus": gate.as_ref().map(|item| item.status.clone()),
+                "summary": repair.summary,
+                "requiredAction": repair.required_action,
+                "affectedFiles": repair.affected_files,
+                "attempt": attempts + 1,
+                "allowedScope": repair_allowed_scope(&repair.affected_files),
+                "disallowedScope": repair_disallowed_scope()
+            }),
+        );
+    }
+    let placeholder_result = json!({
+        "schemaVersion": 1,
+        "status": "needs_changes",
+        "summary": "Repair Context Pack이 준비되었고 host runner 실행을 기다리고 있습니다.",
+        "changedFiles": [],
+        "risks": ["아직 targeted repair runner가 실행되지 않았습니다."],
+        "nextActions": ["repair 실행"],
+        "gateResult": null
+    });
+
+    fs::write(artifact_path.join("context-pack.md"), context_pack)
+        .map_err(|err| CommandError::io("Repair Context Pack을 저장하지 못했습니다.", err))?;
+    fs::write(
+        artifact_path.join("context-pack.json"),
+        serde_json::to_string_pretty(&context_manifest).map_err(|err| {
+            CommandError::io("Repair Context Pack manifest를 만들지 못했습니다.", err)
+        })?,
+    )
+    .map_err(|err| CommandError::io("Repair Context Pack manifest를 저장하지 못했습니다.", err))?;
+    if let Some(setup) = worktree_setup.as_ref() {
+        fs::write(
+            artifact_path.join("worktree-setup.json"),
+            serde_json::to_string_pretty(setup).map_err(|err| {
+                CommandError::io("worktree setup config를 만들지 못했습니다.", err)
+            })?,
+        )
+        .map_err(|err| CommandError::io("worktree setup config를 저장하지 못했습니다.", err))?;
+    }
+    fs::write(
+        artifact_path.join("structured-result.schema.json"),
+        include_str!("../schemas/structured-result.schema.json"),
+    )
+    .map_err(|err| CommandError::io("structured result schema를 저장하지 못했습니다.", err))?;
+    fs::write(
+        artifact_path.join("summary.md"),
+        "# Targeted Repair Queued\n\nRepair Context Pack이 준비되었고 실제 host runner 실행 전입니다.\n",
+    )
+    .map_err(|err| CommandError::io("repair 실행 요약을 저장하지 못했습니다.", err))?;
+    fs::write(
+        artifact_path.join("structured-result.json"),
+        serde_json::to_string_pretty(&placeholder_result)
+            .map_err(|err| CommandError::io("structured result를 만들지 못했습니다.", err))?,
+    )
+    .map_err(|err| CommandError::io("structured result를 저장하지 못했습니다.", err))?;
+    fs::write(artifact_path.join("stdout.log"), "")
+        .map_err(|err| CommandError::io("stdout 로그를 저장하지 못했습니다.", err))?;
+    fs::write(artifact_path.join("stderr.log"), "")
+        .map_err(|err| CommandError::io("stderr 로그를 저장하지 못했습니다.", err))?;
+
+    let tx = conn
+        .transaction()
+        .map_err(|err| CommandError::database("repair context를 저장하지 못했습니다.", err))?;
+    tx.execute(
+        "INSERT INTO agent_runs (
+           id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+           stdout_log_path, stderr_log_path, repair_request_id, exit_code, result_status,
+           started_at, finished_at, lifecycle_phase, attempt, created_at, updated_at
+         )
+         VALUES (?1, ?2, ?3, ?4, 'Queued', ?5, ?6, ?7, ?8, ?9, ?10, NULL, NULL,
+                 NULL, NULL, 'queued', ?11, ?12, ?12)",
+        params![
+            run_id,
+            project_id,
+            repair.task_id,
+            role_id,
+            artifact_dir,
+            "summary.md",
+            "structured-result.json",
+            "stdout.log",
+            "stderr.log",
+            repair.id,
+            attempts + 1,
+            timestamp
+        ],
+    )
+    .map_err(|err| CommandError::database("repair context를 저장하지 못했습니다.", err))?;
+    append_run_event(
+        &tx,
+        project_id,
+        &repair.task_id,
+        &run_id,
+        "status",
+        "Queued",
+        json!({
+            "status": "Queued",
+            "roleId": role_id,
+            "artifactDir": artifact_dir,
+            "repairRequestId": repair.id,
+            "attempt": attempts + 1,
+            "worktreePath": worktree.worktree_path.clone()
+        }),
+    )?;
+    append_run_event(
+        &tx,
+        project_id,
+        &repair.task_id,
+        &run_id,
+        "system",
+        "Repair Context Pack created",
+        json!({
+            "repairRequestId": repair.id,
+            "sourceRunId": repair.run_id,
+            "gateResultId": repair.gate_result_id,
+            "affectedFiles": repair.affected_files,
+            "requiredAction": repair.required_action,
+            "allowedScope": repair_allowed_scope(&repair.affected_files),
+            "disallowedScope": repair_disallowed_scope()
+        }),
+    )?;
+    append_run_event(
+        &tx,
+        project_id,
+        &repair.task_id,
+        &run_id,
+        "artifact",
+        "Repair summary and structured result placeholders created",
+        json!({
+            "summaryPath": format!("{artifact_dir}/summary.md"),
+            "resultPath": format!("{artifact_dir}/structured-result.json"),
+            "schemaPath": format!("{artifact_dir}/structured-result.schema.json")
+        }),
+    )?;
+    tx.execute(
+        "UPDATE repair_requests SET updated_at = ?1 WHERE id = ?2 AND project_id = ?3",
+        params![timestamp, repair.id, project_id],
+    )
+    .map_err(|err| CommandError::database("repair request를 갱신하지 못했습니다.", err))?;
+    insert_audit(
+        &tx,
+        project_id,
+        "RepairRequest",
+        Some(&repair.id),
+        "repair.context_prepared",
+        json!({
+            "repairRequestId": repair.id,
+            "runId": run_id,
+            "taskId": repair.task_id,
+            "roleId": role_id,
+            "attempt": attempts + 1
+        }),
+    )?;
+    tx.commit()
+        .map_err(|err| CommandError::database("repair context를 저장하지 못했습니다.", err))?;
+    get_agent_run(conn, &run_id)
+}
+
 pub fn list_agent_runs(
     conn: &Connection,
     project_id: &str,
@@ -1664,7 +1993,8 @@ pub fn list_agent_runs(
     let mut stmt = conn
         .prepare(
             "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
-                    stdout_log_path, stderr_log_path, exit_code, result_status, started_at, finished_at,
+                    stdout_log_path, stderr_log_path, repair_request_id, exit_code, result_status, started_at, finished_at,
+                    lifecycle_phase, claimed_at, heartbeat_at, failure_kind, failure_reason, attempt,
                     created_at, updated_at
              FROM agent_runs WHERE project_id = ?1 AND task_id = ?2 ORDER BY created_at DESC",
         )
@@ -1675,13 +2005,699 @@ pub fn list_agent_runs(
     collect_rows(rows, "실행 기록을 읽지 못했습니다.")
 }
 
+pub fn task_graph_path(root: &Path) -> PathBuf {
+    root.join(".helm").join("tasks.md")
+}
+
+pub fn read_task_graph(root: &Path) -> CommandResult<Option<String>> {
+    let path = task_graph_path(root);
+    if !path.exists() {
+        return Ok(None);
+    }
+    fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|err| CommandError::io("tasks.md를 읽지 못했습니다.", err))
+}
+
+pub fn check_task_graph_conflict(root: &Path) -> CommandResult<TaskGraphConflictSummary> {
+    let path = task_graph_path(root);
+    if !path.exists() {
+        return Ok(TaskGraphConflictSummary {
+            path: path.to_string_lossy().to_string(),
+            exists: false,
+            conflict: false,
+            reason: None,
+            modified_at: None,
+        });
+    }
+
+    let content = fs::read_to_string(&path)
+        .map_err(|err| CommandError::io("tasks.md를 읽지 못했습니다.", err))?;
+    let modified_at = file_modified_at(&path);
+    let (stored_hash, body) = split_task_graph_hash(&content);
+    let conflict = match stored_hash.as_deref() {
+        Some(expected) => expected != stable_hash_hex(body.as_bytes()),
+        None => true,
+    };
+    let reason = if conflict {
+        Some(match stored_hash {
+            Some(_) => "tasks.md가 Helm export 이후 외부에서 수정되었습니다.".to_string(),
+            None => "tasks.md에 Helm export hash marker가 없습니다.".to_string(),
+        })
+    } else {
+        None
+    };
+
+    Ok(TaskGraphConflictSummary {
+        path: path.to_string_lossy().to_string(),
+        exists: true,
+        conflict,
+        reason,
+        modified_at,
+    })
+}
+
+pub fn export_task_graph(
+    conn: &Connection,
+    root: &Path,
+    project_id: &str,
+    force: bool,
+) -> CommandResult<TaskGraphExportSummary> {
+    let before = check_task_graph_conflict(root)?;
+    if before.conflict && !force {
+        return Err(CommandError::validation(
+            "tasks.md가 외부에서 수정되었습니다. 내용을 확인한 뒤 강제로 재생성해주세요.",
+        ));
+    }
+
+    let (body, task_count) = render_task_graph(conn, root, project_id)?;
+    let hash = stable_hash_hex(body.as_bytes());
+    let content = format!("<!-- helm-task-graph-hash: {hash} -->\n{body}");
+    let path = task_graph_path(root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| CommandError::io(".helm 폴더를 만들지 못했습니다.", err))?;
+    }
+    fs::write(&path, &content)
+        .map_err(|err| CommandError::io("tasks.md를 저장하지 못했습니다.", err))?;
+
+    Ok(TaskGraphExportSummary {
+        path: path.to_string_lossy().to_string(),
+        content,
+        task_count,
+        written_at: now(),
+        conflict: check_task_graph_conflict(root)?,
+    })
+}
+
+fn render_task_graph(
+    conn: &Connection,
+    root: &Path,
+    project_id: &str,
+) -> CommandResult<(String, usize)> {
+    let project = get_project(conn, project_id)?;
+    let tasks = list_tasks(conn, project_id)?;
+    let counts = task_counts(&tasks);
+    let mut out = String::new();
+
+    out.push_str("<!-- helm-task-graph-version: 1 -->\n");
+    out.push_str("<!-- generated-by: Helm Desktop -->\n\n");
+    out.push_str("# Helm Task Graph\n\n");
+    out.push_str("This file is an export-only mirror of Helm's local DB. ");
+    out.push_str("Edit Helm state in the app; manual edits here are treated as a conflict before overwrite.\n\n");
+    out.push_str("## Project\n\n");
+    out.push_str(&format!("- Name: {}\n", markdown_inline(&project.name)));
+    out.push_str(&format!(
+        "- Root: `{}`\n",
+        inline_code(root.to_string_lossy())
+    ));
+    if let Some(base_branch) = project.base_branch.as_ref() {
+        out.push_str(&format!("- Base branch: `{}`\n", inline_code(base_branch)));
+    }
+    out.push_str(&format!("- Total tasks: {}\n", counts.total));
+    out.push_str(&format!("- Done tasks: {}\n\n", counts.done));
+
+    out.push_str("## Board Summary\n\n");
+    if tasks.is_empty() {
+        out.push_str("- No tasks yet. Approve a Plan Document in Helm to materialize tasks.\n\n");
+    } else {
+        for status in TASK_STATUS_ORDER {
+            let count = counts.by_status.get(*status).copied().unwrap_or(0);
+            out.push_str(&format!("- {}: {}\n", status, count));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Tasks\n\n");
+    if tasks.is_empty() {
+        out.push_str("_No tasks._\n");
+        return Ok((out, 0));
+    }
+
+    for (index, task) in tasks.iter().enumerate() {
+        let runs = list_agent_runs(conn, project_id, &task.id)?;
+        let worktree = get_task_worktree(conn, project_id, &task.id)?;
+        let active_run = preferred_task_graph_run(&runs);
+        let latest_blocker = runs.iter().find(|run| is_retryable_run_status(&run.status));
+
+        out.push_str(&format!(
+            "### {}. {}\n\n",
+            index + 1,
+            markdown_inline(&task.title)
+        ));
+        out.push_str(&format!("- Task id: `{}`\n", inline_code(&task.id)));
+        out.push_str(&format!("- Status: `{}`\n", inline_code(&task.status)));
+        if let Some(reason) = task
+            .status_reason
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            out.push_str(&format!("- Status reason: {}\n", markdown_inline(reason)));
+        }
+        out.push_str(&format!(
+            "- Next action: {}\n",
+            markdown_inline(&next_action_for_task_graph(
+                task,
+                active_run,
+                worktree.as_ref()
+            ))
+        ));
+        out.push_str(&format!(
+            "- Active role/run: {}\n",
+            markdown_inline(&active_run_summary(active_run))
+        ));
+        out.push_str(&format!(
+            "- Latest blocker: {}\n",
+            markdown_inline(&latest_blocker_summary(conn, project_id, latest_blocker)?)
+        ));
+        out.push_str(&format!(
+            "- Worktree: {}\n",
+            markdown_inline(&worktree_summary(worktree.as_ref()))
+        ));
+        out.push_str("- Artifacts:\n");
+        if let Some(run) = active_run {
+            out.push_str(&format!(
+                "  - artifact dir: `{}`\n",
+                inline_code(&run.artifact_dir)
+            ));
+            out.push_str(&format!(
+                "  - summary: `{}`\n",
+                inline_code(&run.summary_path)
+            ));
+            out.push_str(&format!(
+                "  - result: `{}`\n",
+                inline_code(&run.result_path)
+            ));
+        } else {
+            out.push_str("  - none\n");
+        }
+        out.push_str("- Source refs:\n");
+        if task.external_refs.is_empty() {
+            out.push_str("  - none\n");
+        } else {
+            for reference in &task.external_refs {
+                out.push_str(&format!(
+                    "  - {}: `{}`\n",
+                    markdown_inline(&reference.ref_type),
+                    inline_code(&reference.ref_value)
+                ));
+            }
+        }
+        out.push('\n');
+    }
+
+    Ok((out, tasks.len()))
+}
+
+fn preferred_task_graph_run(runs: &[AgentRunSummary]) -> Option<&AgentRunSummary> {
+    runs.iter()
+        .find(|run| run.status == "Running" || run.status == "Queued")
+        .or_else(|| runs.first())
+}
+
+fn latest_blocker_summary(
+    conn: &Connection,
+    project_id: &str,
+    run: Option<&AgentRunSummary>,
+) -> CommandResult<String> {
+    let Some(run) = run else {
+        return Ok("none".to_string());
+    };
+    let evidence = latest_run_evidence(conn, project_id, run)?;
+    let label = if run.status == "TimedOut" {
+        "시간 초과"
+    } else if has_worktree_conflict(&evidence) {
+        "Worktree 경로 충돌"
+    } else if has_auth_problem(&evidence) {
+        "Runner 인증 필요"
+    } else if run.status == "NeedsInspection" && has_schema_problem(&evidence) {
+        "결과 스키마 점검 필요"
+    } else if run.status == "NeedsInspection" {
+        "Gate 점검 필요"
+    } else if run.status == "Canceled" {
+        "실행 취소됨"
+    } else {
+        "실행 실패"
+    };
+    if evidence.is_empty() {
+        Ok(format!(
+            "{} · {} {}",
+            label,
+            role_label(&run.role_id),
+            run_status_summary(run)
+        ))
+    } else {
+        Ok(format!(
+            "{} · {} {} · {}",
+            label,
+            role_label(&run.role_id),
+            run_status_summary(run),
+            evidence
+        ))
+    }
+}
+
+fn latest_run_evidence(
+    conn: &Connection,
+    project_id: &str,
+    run: &AgentRunSummary,
+) -> CommandResult<String> {
+    let events = list_run_events(conn, project_id, &run.id)?;
+    let message = events
+        .iter()
+        .rev()
+        .find(|event| event.kind != "status" && !event.message.trim().is_empty())
+        .map(|event| compact_line(&event.message))
+        .unwrap_or_default();
+    if !message.is_empty() {
+        return Ok(message);
+    }
+    if let Some(reason) = run.failure_reason.as_ref() {
+        return Ok(compact_line(reason));
+    }
+    if let Some(kind) = run.failure_kind.as_ref() {
+        return Ok(kind.clone());
+    }
+    Ok(run
+        .result_status
+        .as_ref()
+        .map(|status| format!("structured result status: {status}"))
+        .unwrap_or_default())
+}
+
+fn active_run_summary(run: Option<&AgentRunSummary>) -> String {
+    match run {
+        Some(run) => format!("{} · {}", role_label(&run.role_id), run_status_summary(run)),
+        None => "none".to_string(),
+    }
+}
+
+fn run_status_summary(run: &AgentRunSummary) -> String {
+    let mut parts = vec![run.status.as_str()];
+    if let Some(phase) = run.lifecycle_phase.as_deref() {
+        parts.push(phase);
+    }
+    if let Some(kind) = run.failure_kind.as_deref() {
+        parts.push(kind);
+    } else if let Some(result_status) = run.result_status.as_deref() {
+        parts.push(result_status);
+    }
+    parts.join(" · ")
+}
+
+fn worktree_summary(worktree: Option<&TaskWorktreeSummary>) -> String {
+    match worktree {
+        Some(worktree) => format!("{} · {}", worktree.branch_name, worktree.worktree_path),
+        None => "none".to_string(),
+    }
+}
+
+fn next_action_for_task_graph(
+    task: &TaskSummary,
+    active_run: Option<&AgentRunSummary>,
+    worktree: Option<&TaskWorktreeSummary>,
+) -> String {
+    if let Some(run) = active_run {
+        if run.status == "Running" {
+            return "명시 report/structured-result 도착까지 Running 유지".to_string();
+        }
+        if run.status == "Queued" {
+            return "host 실행".to_string();
+        }
+        if is_retryable_run_status(&run.status) {
+            return "retry 준비 또는 blocker 확인".to_string();
+        }
+    }
+
+    if matches!(role_for_task_status(&task.status), Some(_)) && worktree.is_none() {
+        return "worktree 준비".to_string();
+    }
+
+    match task.status.as_str() {
+        "Planned" => "Planner 준비".to_string(),
+        "Ready" => "Coder 준비".to_string(),
+        "Coding" => "Coder 실행/준비 확인".to_string(),
+        "PlanVerification" => "계획 검토 준비".to_string(),
+        "CodeReview" => "코드 리뷰 준비".to_string(),
+        "Testing" => "테스트 준비".to_string(),
+        "MergeWaiting" => "merge decision 확인".to_string(),
+        "Merged" => "완료 처리 확인".to_string(),
+        "Done" => "none".to_string(),
+        "Blocked" => "blocker 확인 또는 계획 수정".to_string(),
+        _ => "상태 확인".to_string(),
+    }
+}
+
+fn role_for_task_status(status: &str) -> Option<&'static str> {
+    match status {
+        "Planned" | "Blocked" => Some("planner"),
+        "Ready" | "Coding" => Some("coder"),
+        "PlanVerification" => Some("plan_verifier"),
+        "CodeReview" => Some("code_reviewer"),
+        "Testing" => Some("tester"),
+        _ => None,
+    }
+}
+
+fn role_label(role_id: &str) -> &'static str {
+    match role_id {
+        "planner" => "설계자",
+        "coder" => "구현자",
+        "plan_verifier" => "계획 검토자",
+        "code_reviewer" => "코드 리뷰어",
+        "tester" => "테스트 담당자",
+        _ => "알 수 없는 역할",
+    }
+}
+
+fn is_retryable_run_status(status: &str) -> bool {
+    matches!(
+        status,
+        "Failed" | "TimedOut" | "NeedsInspection" | "Canceled"
+    )
+}
+
+struct RepairRequestRecord {
+    id: String,
+    task_id: String,
+    run_id: Option<String>,
+    gate_result_id: Option<String>,
+    status: String,
+    severity: String,
+    summary: String,
+    required_action: String,
+    affected_files: Value,
+}
+
+struct GateResultRecord {
+    gate: String,
+    status: String,
+    blocking: bool,
+    blockers: Value,
+    suggested_next: Option<Value>,
+}
+
+fn get_repair_request_record(
+    conn: &Connection,
+    project_id: &str,
+    repair_request_id: &str,
+) -> CommandResult<RepairRequestRecord> {
+    conn.query_row(
+        "SELECT id, task_id, run_id, gate_result_id, status, severity, summary,
+                required_action, affected_files_json
+         FROM repair_requests
+         WHERE id = ?1 AND project_id = ?2",
+        params![repair_request_id, project_id],
+        |row| {
+            let affected_files_raw: String = row.get(8)?;
+            Ok(RepairRequestRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                run_id: row.get(2)?,
+                gate_result_id: row.get(3)?,
+                status: row.get(4)?,
+                severity: row.get(5)?,
+                summary: row.get(6)?,
+                required_action: row.get(7)?,
+                affected_files: serde_json::from_str(&affected_files_raw).unwrap_or(Value::Null),
+            })
+        },
+    )
+    .map_err(|err| {
+        CommandError::with_details(
+            "ValidationFailed",
+            "대상 repair request를 찾을 수 없습니다.",
+            err,
+        )
+    })
+}
+
+fn get_gate_result_record(
+    conn: &Connection,
+    project_id: &str,
+    gate_result_id: Option<&str>,
+) -> CommandResult<Option<GateResultRecord>> {
+    let Some(gate_result_id) = gate_result_id else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "SELECT gate, status, blocking, blockers_json, suggested_next_json
+         FROM gate_results
+         WHERE id = ?1 AND project_id = ?2",
+        params![gate_result_id, project_id],
+        |row| {
+            let blockers_raw: String = row.get(3)?;
+            let suggested_next_raw: Option<String> = row.get(4)?;
+            Ok(GateResultRecord {
+                gate: row.get(0)?,
+                status: row.get(1)?,
+                blocking: row.get::<_, i64>(2)? == 1,
+                blockers: serde_json::from_str(&blockers_raw).unwrap_or(Value::Null),
+                suggested_next: suggested_next_raw
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok()),
+            })
+        },
+    )
+    .optional()
+    .map_err(|err| CommandError::database("gate result를 읽지 못했습니다.", err))
+}
+
+fn repair_attempt_count(
+    conn: &Connection,
+    project_id: &str,
+    repair_request_id: &str,
+) -> CommandResult<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM agent_runs WHERE project_id = ?1 AND repair_request_id = ?2",
+        params![project_id, repair_request_id],
+        |row| row.get(0),
+    )
+    .map_err(|err| CommandError::database("repair attempt를 확인하지 못했습니다.", err))
+}
+
+fn repair_role_for_gate(gate: Option<&str>, task: &TaskSummary) -> &'static str {
+    if matches!(task.status.as_str(), "Planned" | "Blocked") {
+        return "planner";
+    }
+    match gate {
+        Some("plan_verification" | "code_review" | "test" | "security" | "rules") | None => "coder",
+        Some(_) => "coder",
+    }
+}
+
+fn validate_repair_run_state(
+    conn: &Connection,
+    project_id: &str,
+    run: &AgentRunSummary,
+) -> CommandResult<()> {
+    let Some(repair_request_id) = run.repair_request_id.as_deref() else {
+        return Ok(());
+    };
+    let repair = get_repair_request_record(conn, project_id, repair_request_id)?;
+    if repair.status != "Open" {
+        return Err(CommandError::validation(
+            "닫힌 repair request에 연결된 실행은 시작할 수 없습니다.",
+        ));
+    }
+    if repair.task_id != run.task_id {
+        return Err(CommandError::validation(
+            "repair request와 실행 태스크가 일치하지 않습니다.",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_repair_request_after_success(
+    conn: &Connection,
+    project_id: &str,
+    repair_request_id: &str,
+    run_id: &str,
+    timestamp: &str,
+) -> CommandResult<()> {
+    conn.execute(
+        "UPDATE repair_requests
+         SET status = 'Resolved', updated_at = ?1
+         WHERE id = ?2 AND project_id = ?3 AND status = 'Open'",
+        params![timestamp, repair_request_id, project_id],
+    )
+    .map_err(|err| {
+        CommandError::database("repair request를 해결 상태로 저장하지 못했습니다.", err)
+    })?;
+    insert_audit(
+        conn,
+        project_id,
+        "RepairRequest",
+        Some(repair_request_id),
+        "repair.resolved",
+        json!({
+            "repairRequestId": repair_request_id,
+            "runId": run_id,
+            "reason": "repair run passed"
+        }),
+    )?;
+    Ok(())
+}
+
+fn lifecycle_phase_for_run_status(status: &str) -> &'static str {
+    match status {
+        "Queued" => "queued",
+        "Running" => "running",
+        "Succeeded" => "completed",
+        "Canceled" => "canceled",
+        "Failed" | "TimedOut" => "failed",
+        "NeedsInspection" => "blocked",
+        _ => "unknown",
+    }
+}
+
+fn failure_kind_for_run_result(
+    final_status: &str,
+    timed_out: bool,
+    canceled: bool,
+    schema_invalid: bool,
+    has_blocking_gate: bool,
+    diff_mismatch: bool,
+    exit_code: i32,
+) -> Option<&'static str> {
+    if final_status == "Succeeded" {
+        return None;
+    }
+    if canceled {
+        return Some("canceled");
+    }
+    if timed_out {
+        return Some("timeout");
+    }
+    if schema_invalid {
+        return Some("schema_invalid");
+    }
+    if diff_mismatch {
+        return Some("diff_mismatch");
+    }
+    if has_blocking_gate {
+        return Some("blocking_gate");
+    }
+    if exit_code != 0 {
+        return Some("exit_failed");
+    }
+    Some("needs_inspection")
+}
+
+fn failure_reason_for_run_result(
+    final_status: &str,
+    timed_out: bool,
+    canceled: bool,
+    schema_invalid: bool,
+    has_blocking_gate: bool,
+    diff_mismatch: bool,
+    exit_code: i32,
+) -> Option<String> {
+    failure_kind_for_run_result(
+        final_status,
+        timed_out,
+        canceled,
+        schema_invalid,
+        has_blocking_gate,
+        diff_mismatch,
+        exit_code,
+    )
+    .map(|kind| match kind {
+        "canceled" => "Host runner was canceled.".to_string(),
+        "timeout" => "Host runner exceeded its configured timeout.".to_string(),
+        "schema_invalid" => {
+            "structured-result.json was missing or did not match the contract.".to_string()
+        }
+        "diff_mismatch" => {
+            "Runner-reported changed files did not match the actual git diff.".to_string()
+        }
+        "blocking_gate" => "A structured gate result reported blocking issues.".to_string(),
+        "exit_failed" => format!("Host runner exited with code {exit_code}."),
+        _ => "Run requires manual inspection before continuing.".to_string(),
+    })
+}
+
+fn has_worktree_conflict(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("worktree")
+        && (message.contains("이미 존재")
+            || lower.contains("already exists")
+            || lower.contains("path exists"))
+}
+
+fn has_auth_problem(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("auth")
+        || lower.contains("login")
+        || lower.contains("unauthorized")
+        || lower.contains("api key")
+        || message.contains("로그인")
+        || message.contains("인증")
+        || message.contains("토큰")
+}
+
+fn has_schema_problem(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("schema")
+        || lower.contains("structured-result")
+        || lower.contains("structured result")
+        || message.contains("스키마")
+}
+
+fn markdown_inline(value: &str) -> String {
+    let compact = compact_line(value);
+    compact.replace('[', "\\[").replace(']', "\\]")
+}
+
+fn inline_code(value: impl AsRef<str>) -> String {
+    value.as_ref().replace('`', "'")
+}
+
+fn compact_line(value: &str) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() > 180 {
+        format!("{}...", compact.chars().take(177).collect::<String>())
+    } else {
+        compact
+    }
+}
+
+fn split_task_graph_hash(content: &str) -> (Option<String>, &str) {
+    let Some((first_line, rest)) = content.split_once('\n') else {
+        return (None, content);
+    };
+    let hash = first_line
+        .strip_prefix("<!-- helm-task-graph-hash: ")
+        .and_then(|value| value.strip_suffix(" -->"))
+        .map(str::to_string);
+    match hash {
+        Some(hash) => (Some(hash), rest),
+        None => (None, content),
+    }
+}
+
+fn stable_hash_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn file_modified_at(path: &Path) -> Option<String> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let date: DateTime<Utc> = modified.into();
+    Some(date.to_rfc3339())
+}
+
 pub fn next_queued_agent_run(
     conn: &Connection,
     project_id: &str,
 ) -> CommandResult<Option<AgentRunSummary>> {
     conn.query_row(
         "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
-                stdout_log_path, stderr_log_path, exit_code, result_status, started_at, finished_at,
+                stdout_log_path, stderr_log_path, repair_request_id, exit_code, result_status, started_at, finished_at,
+                lifecycle_phase, claimed_at, heartbeat_at, failure_kind, failure_reason, attempt,
                 created_at, updated_at
          FROM agent_runs
          WHERE project_id = ?1 AND status = 'Queued'
@@ -1932,7 +2948,8 @@ pub fn list_task_timeline(
 pub fn get_agent_run(conn: &Connection, run_id: &str) -> CommandResult<AgentRunSummary> {
     conn.query_row(
         "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
-                stdout_log_path, stderr_log_path, exit_code, result_status, started_at, finished_at,
+                stdout_log_path, stderr_log_path, repair_request_id, exit_code, result_status, started_at, finished_at,
+                lifecycle_phase, claimed_at, heartbeat_at, failure_kind, failure_reason, attempt,
                 created_at, updated_at
          FROM agent_runs WHERE id = ?1",
         params![run_id],
@@ -1991,6 +3008,9 @@ pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> Comman
             "UPDATE agent_runs
              SET status = 'NeedsInspection',
                  result_status = COALESCE(result_status, 'needs_changes'),
+                 lifecycle_phase = 'orphaned',
+                 failure_kind = 'orphaned_after_restart',
+                 failure_reason = 'Helm app restarted before the host run finished.',
                  finished_at = COALESCE(finished_at, ?1),
                  updated_at = ?1
              WHERE project_id = ?2 AND status = 'Running'",
@@ -2030,10 +3050,13 @@ fn mark_host_run_persistence_failed(
         "UPDATE agent_runs
          SET status = 'NeedsInspection',
              result_status = COALESCE(result_status, 'needs_changes'),
+             lifecycle_phase = 'blocked',
+             failure_kind = 'persistence_failed',
+             failure_reason = ?4,
              finished_at = COALESCE(finished_at, ?1),
              updated_at = ?1
          WHERE id = ?2 AND project_id = ?3",
-        params![timestamp, run_id, project_id],
+        params![timestamp, run_id, project_id, error.message.as_str()],
     )
     .map_err(|err| CommandError::database("host run 실패 상태를 저장하지 못했습니다.", err))?;
     insert_audit(
@@ -2255,12 +3278,19 @@ fn map_agent_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunSummary> {
         result_path: row.get(7)?,
         stdout_log_path: row.get(8)?,
         stderr_log_path: row.get(9)?,
-        exit_code: row.get(10)?,
-        result_status: row.get(11)?,
-        started_at: row.get(12)?,
-        finished_at: row.get(13)?,
-        created_at: row.get(14)?,
-        updated_at: row.get(15)?,
+        repair_request_id: row.get(10)?,
+        exit_code: row.get(11)?,
+        result_status: row.get(12)?,
+        started_at: row.get(13)?,
+        finished_at: row.get(14)?,
+        lifecycle_phase: row.get(15)?,
+        claimed_at: row.get(16)?,
+        heartbeat_at: row.get(17)?,
+        failure_kind: row.get(18)?,
+        failure_reason: row.get(19)?,
+        attempt: row.get(20)?,
+        created_at: row.get(21)?,
+        updated_at: row.get(22)?,
     })
 }
 
@@ -2746,6 +3776,13 @@ fn append_run_event(
         ],
     )
     .map_err(|err| CommandError::database("실행 이벤트를 저장하지 못했습니다.", err))?;
+    conn.execute(
+        "UPDATE agent_runs
+         SET heartbeat_at = ?1, updated_at = ?1
+         WHERE id = ?2 AND project_id = ?3 AND status = 'Running'",
+        params![timestamp, run_id, project_id],
+    )
+    .map_err(|err| CommandError::database("실행 heartbeat를 저장하지 못했습니다.", err))?;
 
     Ok(RunEventSummary {
         id,
@@ -4595,6 +5632,125 @@ fn markdown_list(items: &[&str]) -> String {
         .join("\n")
 }
 
+fn repair_context_markdown(
+    repair: &RepairRequestRecord,
+    gate: Option<&GateResultRecord>,
+    previous_run: Option<&AgentRunSummary>,
+    previous_summary: &str,
+) -> String {
+    let affected_files = string_list_from_json(&repair.affected_files);
+    let blockers = gate
+        .map(|gate| compact_json_line(&gate.blockers))
+        .unwrap_or_else(|| "없음".to_string());
+    let suggested_next = gate
+        .and_then(|gate| gate.suggested_next.as_ref())
+        .map(compact_json_line)
+        .unwrap_or_else(|| "없음".to_string());
+    let previous_run_summary = previous_run
+        .map(|run| format!("{} · {}", run.id, run_status_summary(run)))
+        .unwrap_or_else(|| "이전 run 없음".to_string());
+    format!(
+        "\n\n\
+         ## Targeted Repair\n\n\
+         - repair request id: {}\n\
+         - severity: {}\n\
+         - source run: {}\n\
+         - source run status: {}\n\
+         - failed gate: {}\n\
+         - gate status: {}\n\
+         - blocking: {}\n\
+         - summary: {}\n\
+         - required action: {}\n\
+         - affected files:\n{}\n\n\
+         ### Previous Summary\n\n{}\n\n\
+         ### Gate Blockers\n\n{}\n\n\
+         ### Suggested Next\n\n{}\n\n\
+         ### Allowed Scope\n\n{}\n\n\
+         ### Disallowed Scope\n\n{}\n\n\
+         ### Repair Output Contract\n\n\
+         - 이 실행은 위 repair request 하나만 해결한다.\n\
+         - `changedFiles`는 실제 수정 파일과 일치해야 한다.\n\
+         - 해결되면 `status=pass`와 요약 근거를 남긴다.\n\
+         - 아직 해결하지 못했으면 `gateResult.status=fail`, `blocking=true`를 유지하고 다음 repair 근거를 남긴다.\n",
+        repair.id,
+        repair.severity,
+        repair.run_id.as_deref().unwrap_or("none"),
+        previous_run_summary,
+        gate.map(|gate| gate.gate.as_str()).unwrap_or("rules"),
+        gate.map(|gate| gate.status.as_str()).unwrap_or("unknown"),
+        gate.map(|gate| gate.blocking.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        repair.summary,
+        repair.required_action,
+        markdown_string_list(&affected_files),
+        truncate_for_context(previous_summary, 4000),
+        blockers,
+        suggested_next,
+        repair_allowed_scope(&repair.affected_files),
+        repair_disallowed_scope()
+    )
+}
+
+fn read_run_summary_for_context(root: &Path, run: &AgentRunSummary) -> String {
+    let path = root.join(&run.artifact_dir).join(&run.summary_path);
+    fs::read_to_string(path)
+        .map(|summary| truncate_for_context(&summary, 4000))
+        .unwrap_or_else(|_| "summary.md를 읽지 못했습니다.".to_string())
+}
+
+fn repair_allowed_scope(affected_files: &Value) -> String {
+    let files = string_list_from_json(affected_files);
+    if files.is_empty() {
+        return "blocking gate를 해결하는 데 필요한 최소 파일만 수정합니다.".to_string();
+    }
+    format!(
+        "아래 affected files와 그 실패를 해결하는 데 직접 필요한 최소 인접 코드로 제한합니다: {}",
+        files.join(", ")
+    )
+}
+
+fn repair_disallowed_scope() -> &'static str {
+    "관련 없는 refactor, UI 레이아웃 변경, 새 기능 추가, 사용자 변경 되돌리기, merge/commit/push는 금지합니다."
+}
+
+fn string_list_from_json(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|item| !item.trim().is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn markdown_string_list(items: &[String]) -> String {
+    if items.is_empty() {
+        return "- 없음".to_string();
+    }
+    items
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn compact_json_line(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "JSON 직렬화 실패".to_string())
+}
+
+fn truncate_for_context(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    output.push_str("\n\n...(truncated)");
+    output
+}
+
 fn resolve_worktree_setup_config(
     root: &Path,
     settings_setup: Option<&Value>,
@@ -5262,7 +6418,7 @@ mod tests {
                 row.get(0)
             })
             .expect("version");
-        assert_eq!(version, 5);
+        assert_eq!(version, 7);
     }
 
     #[test]
@@ -5377,6 +6533,66 @@ mod tests {
     }
 
     #[test]
+    fn task_graph_export_writes_empty_board() {
+        let repo = test_repo();
+        let (conn, project) = open_test_project(&repo);
+
+        let exported =
+            export_task_graph(&conn, &repo.root, &project.id, false).expect("export graph");
+
+        assert_eq!(exported.task_count, 0);
+        assert!(exported.content.contains("# Helm Task Graph"));
+        assert!(exported.content.contains("No tasks yet"));
+        assert!(task_graph_path(&repo.root).exists());
+        let conflict = check_task_graph_conflict(&repo.root).expect("conflict");
+        assert!(conflict.exists);
+        assert!(!conflict.conflict);
+    }
+
+    #[test]
+    fn task_graph_export_includes_run_blocker_and_detects_conflict() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "planner")
+            .expect("context");
+        conn.execute(
+            "UPDATE agent_runs
+             SET status = 'TimedOut',
+                 result_status = 'needs_changes',
+                 lifecycle_phase = 'failed',
+                 failure_kind = 'timeout',
+                 failure_reason = 'test timeout',
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now(), &run.id],
+        )
+        .expect("mark timeout");
+
+        let exported =
+            export_task_graph(&conn, &repo.root, &project.id, false).expect("export graph");
+
+        assert!(exported.content.contains("Fixture core loop"));
+        assert!(exported
+            .content
+            .contains("Active role/run: 설계자 · TimedOut"));
+        assert!(exported.content.contains("Latest blocker: 시간 초과"));
+        assert!(exported.content.contains("summary.md"));
+
+        fs::write(
+            task_graph_path(&repo.root),
+            format!("{}\nmanual edit\n", exported.content),
+        )
+        .expect("manual edit");
+        let conflict = check_task_graph_conflict(&repo.root).expect("conflict");
+        assert!(conflict.conflict);
+        assert!(export_task_graph(&conn, &repo.root, &project.id, false).is_err());
+        let forced = export_task_graph(&conn, &repo.root, &project.id, true).expect("force");
+        assert!(!forced.conflict.conflict);
+    }
+
+    #[test]
     fn coder_is_blocked_before_plan_approval_and_allowed_after_approval() {
         let repo = test_repo();
         let (mut conn, project) = open_test_project(&repo);
@@ -5415,6 +6631,8 @@ mod tests {
         let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "coder")
             .expect("context");
         assert_eq!(run.status, "Queued");
+        assert_eq!(run.lifecycle_phase.as_deref(), Some("queued"));
+        assert_eq!(run.attempt, 1);
         let events = list_run_events(&conn, &project.id, &run.id).expect("events");
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].kind, "status");
@@ -5542,6 +6760,9 @@ mod tests {
         )
         .expect("claim");
         assert_eq!(claimed.status, "Running");
+        assert_eq!(claimed.lifecycle_phase.as_deref(), Some("running"));
+        assert!(claimed.claimed_at.is_some());
+        assert!(claimed.heartbeat_at.is_some());
 
         let duplicate = claim_host_run(
             &conn,
@@ -5884,6 +7105,124 @@ mod tests {
     }
 
     #[test]
+    fn prepare_repair_context_links_run_and_limits_scope() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("desktop app dir")
+            .join("scripts")
+            .join("fixture-runner.mjs");
+
+        update_task_status(
+            &mut conn,
+            &project.id,
+            &task.id,
+            "PlanVerification",
+            Some("테스트 상태 전환".to_string()),
+        )
+        .expect("status");
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: Some(json!([
+                    {
+                        "roleId": "plan_verifier",
+                        "label": "계획 검토자",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "gate_fail"],
+                        "timeoutSeconds": 60
+                    },
+                    {
+                        "roleId": "coder",
+                        "label": "구현자",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "pass"],
+                        "timeoutSeconds": 60
+                    }
+                ])),
+                ai_connections: None,
+                role_assignments: None,
+                conductor_config: None,
+                worktree_root: None,
+                worktree_setup: None,
+                jira_config: None,
+                obsidian_vault_path: None,
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("settings");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let gate_run = prepare_role_context(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &task.id,
+            "plan_verifier",
+        )
+        .expect("context");
+        run_host_role(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &gate_run.id,
+            Arc::new(AtomicBool::new(false)),
+            None,
+        )
+        .expect("host run");
+        let repair_id: String = conn
+            .query_row(
+                "SELECT id FROM repair_requests WHERE run_id = ?1 AND status = 'Open'",
+                params![gate_run.id],
+                |row| row.get(0),
+            )
+            .expect("repair id");
+
+        let repair_run = prepare_repair_context(&mut conn, &repo.root, &project.id, &repair_id)
+            .expect("repair context");
+        assert_eq!(repair_run.role_id, "coder");
+        assert_eq!(repair_run.status, "Queued");
+        assert_eq!(
+            repair_run.repair_request_id.as_deref(),
+            Some(repair_id.as_str())
+        );
+        assert_eq!(repair_run.attempt, 1);
+        let context_pack = fs::read_to_string(
+            repo.root
+                .join(&repair_run.artifact_dir)
+                .join("context-pack.md"),
+        )
+        .expect("context pack");
+        assert!(context_pack.contains("## Targeted Repair"));
+        assert!(context_pack.contains("Repair fixture gate failure"));
+        assert!(context_pack.contains("README.md"));
+
+        let finished = run_host_role(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &repair_run.id,
+            Arc::new(AtomicBool::new(false)),
+            None,
+        )
+        .expect("repair run");
+        assert_eq!(finished.status, "Succeeded");
+
+        let repair_status: String = conn
+            .query_row(
+                "SELECT status FROM repair_requests WHERE id = ?1",
+                params![repair_id],
+                |row| row.get(0),
+            )
+            .expect("repair status");
+        assert_eq!(repair_status, "Resolved");
+    }
+
+    #[test]
     fn coder_host_run_blocks_when_reported_changed_files_do_not_match_diff() {
         let repo = test_repo();
         let (mut conn, project) = open_test_project(&repo);
@@ -6124,6 +7463,8 @@ mod tests {
 
         let run = get_agent_run(&conn, &run_id).expect("run");
         assert_eq!(run.status, "NeedsInspection");
+        assert_eq!(run.lifecycle_phase.as_deref(), Some("orphaned"));
+        assert_eq!(run.failure_kind.as_deref(), Some("orphaned_after_restart"));
         assert!(run.finished_at.is_some());
     }
 }

@@ -135,7 +135,7 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask }
                     {task.description ? <span className="task-card-description">{task.description}</span> : null}
                     {activeRun ? (
                       <div className={`task-card-run ${runTone(activeRun)}`}>
-                        <span>{activeRun.status}</span>
+                        <span>{runStatusLabel(activeRun)}</span>
                         <strong>{roleLabel(activeRun.roleId)}</strong>
                         <small>{runHint(activeRun)}</small>
                       </div>
@@ -174,13 +174,21 @@ function activeRunForTask(runs: AgentRunSummary[]): AgentRunSummary | null {
 function runFlowLabel(run: AgentRunSummary): string {
   if (run.status === "Running") return `${roleLabel(run.roleId)} 진행 중`;
   if (run.status === "Queued") return `${roleLabel(run.roleId)} 대기`;
+  if (run.failureKind) return `${roleLabel(run.roleId)} · ${run.failureKind}`;
   return `${roleLabel(run.roleId)} 점검`;
 }
 
 function runHint(run: AgentRunSummary): string {
-  if (run.status === "Running") return "report가 올 때까지 실행 중";
+  if (run.status === "Running") {
+    return run.heartbeatAt ? `heartbeat ${relativeTime(run.heartbeatAt)}` : "report가 올 때까지 실행 중";
+  }
   if (run.status === "Queued") return "worker queue 대기";
+  if (run.failureKind) return run.failureReason ?? `${run.failureKind} · retry 가능`;
   return run.resultStatus ? `${run.resultStatus} · retry 가능` : "상세에서 근거 확인";
+}
+
+function runStatusLabel(run: AgentRunSummary): string {
+  return run.lifecyclePhase ? `${run.status} · ${run.lifecyclePhase}` : run.status;
 }
 
 function runTone(run: AgentRunSummary): "running" | "queued" | "attention" {

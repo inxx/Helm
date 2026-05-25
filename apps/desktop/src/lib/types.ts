@@ -208,6 +208,22 @@ export interface TaskWorktreeSummary {
   updatedAt: string;
 }
 
+export interface TaskGraphConflictSummary {
+  path: string;
+  exists: boolean;
+  conflict: boolean;
+  reason: string | null;
+  modifiedAt: string | null;
+}
+
+export interface TaskGraphExportSummary {
+  path: string;
+  content: string;
+  taskCount: number;
+  writtenAt: string;
+  conflict: TaskGraphConflictSummary;
+}
+
 export interface TaskTimelineEntry {
   id: string;
   projectId: string;
@@ -388,10 +404,17 @@ export interface AgentRunSummary {
   resultPath: string;
   stdoutLogPath: string;
   stderrLogPath: string;
+  repairRequestId: string | null;
   exitCode: number | null;
   resultStatus: "pass" | "fail" | "needs_changes" | null;
   startedAt: string | null;
   finishedAt: string | null;
+  lifecyclePhase: string | null;
+  claimedAt: string | null;
+  heartbeatAt: string | null;
+  failureKind: string | null;
+  failureReason: string | null;
+  attempt: number;
   createdAt: string;
   updatedAt: string;
 }

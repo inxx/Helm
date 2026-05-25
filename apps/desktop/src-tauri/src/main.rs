@@ -8,8 +8,8 @@ use crate::models::{
     GitBranchSummary, GitCommitSummary, GitFileStatus, GitRepositoryState, NodeRuntimeSummary,
     OrchestratorSettings, PlannerConversationInput, PlannerConversationResult, ProjectContext,
     ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult,
-    RunnerTemplateSummary, TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
-    TerminalCommandResult, TerminalDirectoryEntry,
+    RunnerTemplateSummary, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
+    TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -741,6 +741,56 @@ fn ensure_task_worktree(
 }
 
 #[tauri::command]
+fn export_task_graph(
+    project_id: String,
+    force: Option<bool>,
+    state: State<'_, AppState>,
+) -> CommandResult<TaskGraphExportSummary> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::export_task_graph(
+        &conn,
+        &context.root_path,
+        &project_id,
+        force.unwrap_or(false),
+    )
+}
+
+#[tauri::command]
+fn read_task_graph(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<String>> {
+    let context = project_context(&state, &project_id)?;
+    db::read_task_graph(&context.root_path)
+}
+
+#[tauri::command]
+fn check_task_graph_conflict(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<TaskGraphConflictSummary> {
+    let context = project_context(&state, &project_id)?;
+    db::check_task_graph_conflict(&context.root_path)
+}
+
+#[tauri::command]
+fn open_task_graph(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<TaskGraphConflictSummary> {
+    let context = project_context(&state, &project_id)?;
+    let summary = db::check_task_graph_conflict(&context.root_path)?;
+    if !summary.exists {
+        return Err(CommandError::validation(
+            "tasks.md가 아직 없습니다. 먼저 Task graph를 재생성해주세요.",
+        ));
+    }
+    open_file_path(&db::task_graph_path(&context.root_path))?;
+    Ok(summary)
+}
+
+#[tauri::command]
 fn list_audit_logs(
     project_id: String,
     limit: Option<i64>,
@@ -1111,6 +1161,22 @@ fn prepare_role_context(
 }
 
 #[tauri::command]
+fn prepare_repair_context(
+    project_id: String,
+    repair_request_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<AgentRunSummary> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::prepare_repair_context(
+        &mut conn,
+        &context.root_path,
+        &project_id,
+        &repair_request_id,
+    )
+}
+
+#[tauri::command]
 fn start_next_role_run(
     project_id: String,
     task_id: String,
@@ -1207,6 +1273,38 @@ fn queue_next_role_after_success(
         return;
     }
 
+    if run.role_id == "planner" {
+        match auto_approve_plan_approval(conn, project_id, &run.task_id) {
+            Ok(Some(approval_id)) => {
+                let _ = app.emit(
+                    "agent-run://updated",
+                    json!({
+                        "projectId": project_id,
+                        "taskId": run.task_id,
+                        "runId": run.id,
+                        "status": "PlanApprovalAutoApproved",
+                        "approvalId": approval_id,
+                        "source": "automation-policy"
+                    }),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = app.emit(
+                    "agent-run://updated",
+                    json!({
+                        "projectId": project_id,
+                        "taskId": run.task_id,
+                        "runId": run.id,
+                        "status": "PlanApprovalAutoApproveFailed",
+                        "error": command_error_summary(&error)
+                    }),
+                );
+                return;
+            }
+        }
+    }
+
     match db::prepare_next_role_context(conn, &context.root_path, project_id, &run.task_id) {
         Ok(next_run) => {
             let state = app.state::<AppState>();
@@ -1237,6 +1335,31 @@ fn queue_next_role_after_success(
             }
         }
     }
+}
+
+fn auto_approve_plan_approval(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    task_id: &str,
+) -> CommandResult<Option<String>> {
+    let pending = db::list_approvals(conn, project_id, Some("Pending".to_string()))?
+        .into_iter()
+        .find(|approval| {
+            approval.entity_type == "Task"
+                && approval.entity_id == task_id
+                && approval.approval_type == "PlanApproval"
+        });
+    let Some(approval) = pending else {
+        return Ok(None);
+    };
+    db::decide_approval(
+        conn,
+        project_id,
+        &approval.id,
+        "Approved",
+        "Plan Document 승인 후 테스트 완료까지 자동 진행",
+    )?;
+    Ok(Some(approval.id))
 }
 
 fn spawn_background_host_run(
@@ -1390,14 +1513,14 @@ struct AutomationPolicy {
 }
 
 fn project_automation_policy(_context: &ProjectContext, _project_id: &str) -> AutomationPolicy {
-    // P0 keeps observation, approval, context preparation, and host execution as
-    // separate user actions. A later setting can opt projects into supervisor
-    // handoff once the UI explains that operating mode.
+    // Planning approval is the user's automation boundary: after a Plan Document
+    // is approved, Helm may prepare/run roles until Testing passes and the task
+    // reaches MergeWaiting. Merge itself remains a manual decision.
     AutomationPolicy {
-        background_queue_worker_enabled: false,
-        supervisor_reconcile_enabled: false,
-        require_explicit_host_run: true,
-        auto_handoff_enabled: false,
+        background_queue_worker_enabled: true,
+        supervisor_reconcile_enabled: true,
+        require_explicit_host_run: false,
+        auto_handoff_enabled: true,
     }
 }
 
@@ -3847,6 +3970,34 @@ fn elapsed_millis(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+fn open_file_path(path: &Path) -> CommandResult<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]).arg(path);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+
+    command
+        .spawn()
+        .map_err(|err| CommandError::io("파일을 열지 못했습니다.", err))?;
+    Ok(())
+}
+
 fn run_pty_command_with_input(
     cwd: &Path,
     command: &[String],
@@ -4345,11 +4496,7 @@ fn terminal_session_handles(
         .map(|session| (session.writer.clone(), session.state.clone())))
 }
 
-fn resize_pty_writer(
-    writer: &Arc<Mutex<fs::File>>,
-    cols: u16,
-    rows: u16,
-) -> CommandResult<()> {
+fn resize_pty_writer(writer: &Arc<Mutex<fs::File>>, cols: u16, rows: u16) -> CommandResult<()> {
     let file = writer
         .lock()
         .map_err(|_| CommandError::new("IoFailed", "터미널 크기 변경에 실패했습니다."))?;
@@ -4992,6 +5139,10 @@ fn main() {
             update_task_status,
             get_task_worktree,
             ensure_task_worktree,
+            export_task_graph,
+            read_task_graph,
+            check_task_graph_conflict,
+            open_task_graph,
             list_audit_logs,
             get_repository_state,
             get_local_branches,
@@ -5011,6 +5162,7 @@ fn main() {
             stop_terminal_pty,
             run_stub_role,
             prepare_role_context,
+            prepare_repair_context,
             start_next_role_run,
             run_host_role,
             retry_host_role,

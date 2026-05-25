@@ -51,6 +51,19 @@ interface TerminalPtyExit {
   exitCode: number;
 }
 
+interface TerminalInputState {
+  tracking: boolean;
+  value: string;
+}
+
+interface TerminalAutocompleteSuggestion {
+  command: string;
+  suffix: string;
+}
+
+const MAX_TERMINAL_COMMAND_HISTORY = 200;
+const MAX_TERMINAL_COMMAND_LENGTH = 500;
+
 function createPane(cwd: string, nodeBinPath: string | null): TerminalPaneState {
   return {
     id: crypto.randomUUID(),
@@ -95,9 +108,15 @@ export function TerminalScreen({
   const inputDisposers = useRef(new Map<string, { dispose: () => void }>());
   const resizeObservers = useRef(new Map<string, ResizeObserver>());
   const isActiveRef = useRef(isActive);
+  const commandHistoryRef = useRef<string[]>([]);
+  const inputStateRefs = useRef(new Map<string, TerminalInputState>());
+  const autocompleteRefs = useRef(new Map<string, TerminalAutocompleteSuggestion>());
   const lastOutputSeqRefs = useRef(new Map<string, number>());
   const restoringPaneIds = useRef(new Set<string>());
   const pendingOutputRefs = useRef(new Map<string, TerminalPtyOutput[]>());
+  const [autocompleteByPane, setAutocompleteByPane] = useState<
+    Record<string, TerminalAutocompleteSuggestion | null>
+  >({});
 
   const selectedPaneId = activePaneId ?? panes[0]?.id ?? null;
   const activePane = panes.find((pane) => pane.id === selectedPaneId) ?? panes[0] ?? null;
@@ -116,6 +135,10 @@ export function TerminalScreen({
     }
     let cancelled = false;
     const restoredNodeBinPath = loadTerminalNodeSelection(snapshot.project.id);
+    commandHistoryRef.current = loadTerminalCommandHistory(snapshot.project.id);
+    inputStateRefs.current.clear();
+    autocompleteRefs.current.clear();
+    setAutocompleteByPane({});
     setSelectedNodeBinPath(restoredNodeBinPath);
     disposeAllPanes();
     void api
@@ -440,7 +463,9 @@ export function TerminalScreen({
     inputDisposers.current.set(
       pane.id,
       terminal.onData((data) => {
-        void api.writeTerminalPty(pane.id, data).catch((err) => {
+        const nextData = handleTerminalInputData(pane.id, data);
+        if (!nextData) return;
+        void api.writeTerminalPty(pane.id, nextData).catch((err) => {
           updatePane(pane.id, { error: errorMessage(err) });
         });
       }),
@@ -546,6 +571,8 @@ export function TerminalScreen({
     lastOutputSeqRefs.current.delete(id);
     restoringPaneIds.current.delete(id);
     pendingOutputRefs.current.delete(id);
+    inputStateRefs.current.delete(id);
+    setPaneAutocomplete(id, null);
     if (options.stopPty) {
       void api.stopTerminalPty(id).catch(() => undefined);
     }
@@ -558,6 +585,7 @@ export function TerminalScreen({
   }
 
   function renderPane(pane: TerminalPaneState, index: number) {
+    const autocomplete = autocompleteByPane[pane.id] ?? null;
     return (
       <article
         className={selectedPaneId === pane.id ? "terminal-pane active" : "terminal-pane"}
@@ -618,6 +646,12 @@ export function TerminalScreen({
             <Cpu size={11} aria-hidden="true" />
             {nodeRuntimeLabel(pane.nodeBinPath, nodeRuntimes)}
           </span>
+          {autocomplete ? (
+            <span className="terminal-autocomplete-chip" title="Tab으로 완성">
+              <kbd>Tab</kbd>
+              <strong>{autocomplete.command}</strong>
+            </span>
+          ) : null}
           {pane.running ? (
             <span className="ok">pty running</span>
           ) : pane.exitCode !== null ? (
@@ -628,6 +662,103 @@ export function TerminalScreen({
         </footer>
       </article>
     );
+  }
+
+  function handleTerminalInputData(paneId: string, data: string): string {
+    if (data === "\t") {
+      const autocomplete = autocompleteRefs.current.get(paneId);
+      if (!autocomplete || autocomplete.suffix.length === 0) {
+        markPaneInputUnknown(paneId);
+        return data;
+      }
+      inputStateRefs.current.set(paneId, {
+        tracking: true,
+        value: autocomplete.command,
+      });
+      refreshPaneAutocomplete(paneId, autocomplete.command, true);
+      return autocomplete.suffix;
+    }
+
+    let inputState = inputStateRefs.current.get(paneId) ?? { tracking: true, value: "" };
+    for (const char of data) {
+      inputState = applyTerminalInputChar(paneId, inputState, char);
+    }
+    inputStateRefs.current.set(paneId, inputState);
+    refreshPaneAutocomplete(paneId, inputState.value, inputState.tracking);
+    return data;
+  }
+
+  function applyTerminalInputChar(
+    paneId: string,
+    inputState: TerminalInputState,
+    char: string,
+  ): TerminalInputState {
+    if (char === "\r" || char === "\n") {
+      rememberTerminalCommand(inputState);
+      setPaneAutocomplete(paneId, null);
+      return { tracking: true, value: "" };
+    }
+    if (char === "\u0003" || char === "\u0004") {
+      setPaneAutocomplete(paneId, null);
+      return { tracking: true, value: "" };
+    }
+    if (char === "\u001b") {
+      setPaneAutocomplete(paneId, null);
+      return { tracking: false, value: inputState.value };
+    }
+    if (!inputState.tracking) {
+      return inputState;
+    }
+    if (char === "\u007f") {
+      return { ...inputState, value: removeLastCodePoint(inputState.value) };
+    }
+    if (char === "\u0015") {
+      return { ...inputState, value: "" };
+    }
+    if (char === "\u0017") {
+      return { ...inputState, value: removePreviousShellWord(inputState.value) };
+    }
+    if (isPrintableTerminalInput(char)) {
+      return { ...inputState, value: inputState.value + char };
+    }
+    return inputState;
+  }
+
+  function rememberTerminalCommand(inputState: TerminalInputState) {
+    if (!snapshot || !inputState.tracking) return;
+    if (inputState.value.startsWith(" ")) return;
+    const command = normalizeTerminalCommand(inputState.value);
+    if (!command || !isTerminalCommandHistoryCandidate(command)) return;
+    const nextHistory = addTerminalCommandHistory(commandHistoryRef.current, command);
+    commandHistoryRef.current = nextHistory;
+    saveTerminalCommandHistory(snapshot.project.id, nextHistory);
+  }
+
+  function markPaneInputUnknown(paneId: string) {
+    const inputState = inputStateRefs.current.get(paneId) ?? { tracking: true, value: "" };
+    inputStateRefs.current.set(paneId, { ...inputState, tracking: false });
+    setPaneAutocomplete(paneId, null);
+  }
+
+  function refreshPaneAutocomplete(paneId: string, value: string, tracking: boolean) {
+    const autocomplete = tracking
+      ? findTerminalAutocomplete(commandHistoryRef.current, value)
+      : null;
+    setPaneAutocomplete(paneId, autocomplete);
+  }
+
+  function setPaneAutocomplete(id: string, autocomplete: TerminalAutocompleteSuggestion | null) {
+    const current = autocompleteRefs.current.get(id) ?? null;
+    if (sameTerminalAutocomplete(current, autocomplete)) return;
+    if (autocomplete) autocompleteRefs.current.set(id, autocomplete);
+    else autocompleteRefs.current.delete(id);
+    setAutocompleteByPane((currentByPane) => {
+      if (sameTerminalAutocomplete(currentByPane[id] ?? null, autocomplete)) return currentByPane;
+      return {
+        ...currentByPane,
+        [id]: autocomplete,
+      };
+    });
   }
 
   return (
@@ -868,6 +999,92 @@ function saveTerminalNodeSelection(projectId: string, nodeBinPath: string | null
 
 function terminalNodeSelectionKey(projectId: string): string {
   return `helm.terminal.nodeBinPath.${projectId}`;
+}
+
+function loadTerminalCommandHistory(projectId: string): string[] {
+  try {
+    const raw = localStorage.getItem(terminalCommandHistoryKey(projectId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((command): command is string => typeof command === "string")
+      .map(normalizeTerminalCommand)
+      .filter(isTerminalCommandHistoryCandidate)
+      .slice(0, MAX_TERMINAL_COMMAND_HISTORY);
+  } catch {
+    return [];
+  }
+}
+
+function saveTerminalCommandHistory(projectId: string, history: string[]): void {
+  try {
+    localStorage.setItem(
+      terminalCommandHistoryKey(projectId),
+      JSON.stringify(history.slice(0, MAX_TERMINAL_COMMAND_HISTORY)),
+    );
+  } catch {
+    // 명령어 히스토리는 편의 기능이라 저장 실패가 입력을 막으면 안 된다.
+  }
+}
+
+function terminalCommandHistoryKey(projectId: string): string {
+  return `helm.terminal.commandHistory.${projectId}`;
+}
+
+function addTerminalCommandHistory(history: string[], command: string): string[] {
+  return [
+    command,
+    ...history.filter((candidate) => candidate.toLowerCase() !== command.toLowerCase()),
+  ].slice(0, MAX_TERMINAL_COMMAND_HISTORY);
+}
+
+function findTerminalAutocomplete(
+  history: string[],
+  value: string,
+): TerminalAutocompleteSuggestion | null {
+  if (value.trim().length === 0 || value.startsWith(" ")) return null;
+  const lowerValue = value.toLowerCase();
+  const command = history.find(
+    (candidate) =>
+      candidate.length > value.length && candidate.toLowerCase().startsWith(lowerValue),
+  );
+  if (!command) return null;
+  return {
+    command,
+    suffix: command.slice(value.length),
+  };
+}
+
+function sameTerminalAutocomplete(
+  left: TerminalAutocompleteSuggestion | null,
+  right: TerminalAutocompleteSuggestion | null,
+): boolean {
+  return left?.command === right?.command && left?.suffix === right?.suffix;
+}
+
+function normalizeTerminalCommand(value: string): string {
+  return value.trim().slice(0, MAX_TERMINAL_COMMAND_LENGTH);
+}
+
+function isTerminalCommandHistoryCandidate(command: string): boolean {
+  if (command.length === 0 || command.length > MAX_TERMINAL_COMMAND_LENGTH) return false;
+  const lowerCommand = command.toLowerCase();
+  return !/(password|passwd|token|secret|api[-_]?key|authorization)\s*=|bearer\s+\S+/i.test(
+    lowerCommand,
+  );
+}
+
+function isPrintableTerminalInput(char: string): boolean {
+  return char.length > 0 && !/[\u0000-\u001f\u007f]/.test(char);
+}
+
+function removeLastCodePoint(value: string): string {
+  return Array.from(value).slice(0, -1).join("");
+}
+
+function removePreviousShellWord(value: string): string {
+  return value.replace(/\s*\S+\s*$/, "");
 }
 
 function errorMessage(error: unknown): string {

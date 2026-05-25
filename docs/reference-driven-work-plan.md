@@ -153,6 +153,12 @@ Test Plan:
 
 - UI/DB 상태가 헷갈릴 때도 사용자가 repo 안에서 현재 작업판을 읽을 수 있게 한다.
 
+진행 상태:
+
+- 2026-05-25 P0 export-only 구현됨: Helm DB 상태를 `.helm/tasks.md`로 내보내고, Task 화면에서 `tasks.md 열기`와 `tasks.md 재생성`을 실행할 수 있다.
+- 파일에는 Helm hash marker를 포함한다. 외부 편집으로 hash가 맞지 않으면 재생성 전에 사용자 확인을 요구한다.
+- import/sync는 아직 구현하지 않았고, DB가 source of truth인 mirror 정책을 유지한다.
+
 레퍼런스:
 
 - Hive: `<workspace>/.hive/tasks.md`를 공유 task graph로 사용하고 파일 충돌 배너를 둔다.
@@ -199,6 +205,12 @@ Test Plan:
 
 - `Queued`, `Running`, `TimedOut`만으로는 부족한 실행 상태를 더 정확히 분류한다.
 
+진행 상태:
+
+- 2026-05-25 additive migration 구현됨: `agent_runs`에 `lifecycle_phase`, `claimed_at`, `heartbeat_at`, `failure_kind`, `failure_reason`, `attempt`를 추가했다.
+- 기존 `agent_runs.status` CHECK는 유지한다. UI label과 `.helm/tasks.md`는 `status + lifecycle_phase + failure_kind`를 조합해 표시한다.
+- run event가 들어오면 running run의 `heartbeat_at`을 갱신하고, app restart orphan은 `failure_kind=orphaned_after_restart`로 분류한다.
+
 레퍼런스:
 
 - Multica: enqueue, claim, start, complete/fail lifecycle.
@@ -240,6 +252,11 @@ Test Plan:
 
 - artifact viewer를 raw text 창에서 “무엇을 했는지 이해하는 카드”로 바꾼다.
 
+진행 상태:
+
+- 2026-05-25 P0 frontend evidence feed 구현됨: Task Detail `산출물` 탭에서 각 run의 `structured-result.json`, `changed-files.json`, lifecycle/failure metadata를 읽어 Run Summary, Blocker, Gate Result, File Changes 카드를 보여준다.
+- raw artifact 접근은 유지한다. 카드의 `summary/result/events` 버튼으로 원문을 바로 열 수 있다.
+
 레퍼런스:
 
 - Harnss: tool call card, word-level diff, inline bash output, changes panel.
@@ -277,6 +294,13 @@ Test Plan:
 목표:
 
 - review/test 실패 후 “뭘 고쳐야 하는지”가 repair task로 이어진다.
+
+진행 상태:
+
+- 2026-05-25 P0 targeted repair 구현됨: blocking gate가 만든 `repair_requests`에서 `repair 준비`를 실행하면 `agent_runs.repair_request_id`로 연결된 repair run이 생성된다.
+- Repair Context Pack에는 failed gate, affected files, 이전 summary, allowed/disallowed scope, repair output contract가 포함된다.
+- repair run은 일반 role 상태 제약과 분리해 실행할 수 있고, 성공 시 연결된 repair request를 `Resolved`로 닫는다.
+- 반복 실패 limit은 동일 repair request 기준 3회로 제한했다. 반복 초과 시 manual handoff 안내를 반환한다.
 
 레퍼런스:
 
@@ -316,6 +340,12 @@ Test Plan:
 
 - 사용자가 실행 전에 CLI 설치, 로그인, timeout, bypass flag, worktree root 문제를 알 수 있게 한다.
 
+진행 상태:
+
+- 2026-05-25 P0 Task board 상단 Runtime readiness 패널 구현됨: 역할별 runner 배정 상태, health check 결과, command, timeout, approval/sandbox policy, bypass flag를 표시한다.
+- `runtime 점검` 버튼은 기존 `check_role_runner` command를 역할별로 실행해 CLI 로그인/경로/health failure를 보드 안에서 확인한다.
+- Settings 이동 버튼을 함께 제공해 runner 문제를 바로 수정할 수 있게 했다.
+
 레퍼런스:
 
 - Multica: runtime dashboard와 CLI auto-detection.
@@ -352,6 +382,13 @@ Test Plan:
 
 - plan mode, approval policy, automation policy, conductor mode가 섞이지 않게 한다.
 
+진행 상태:
+
+- 2026-05-25 P0 automation boundary 정리됨: Plan Document 승인 후 생성된 Task는 `start_next_role_run`으로 자동 queue에 올라가고, background worker가 host run을 실행한다.
+- planner host run이 성공해 `PlanApproval`을 만들면 automation policy가 이를 자동 승인하고 coder -> plan verifier -> code reviewer -> tester 순서로 이어간다.
+- tester 통과 후 `MergeWaiting`에서 자동 진행은 멈추며 merge decision은 수동으로 남는다.
+- Planning CTA와 Runtime readiness copy를 `승인하고 테스트까지 자동 진행`, `테스트 완료까지 자동 · 머지 수동`으로 갱신했다.
+
 레퍼런스:
 
 - Harnss: plan mode와 permission control을 실행 중에도 명확히 표시.
@@ -380,6 +417,12 @@ Acceptance Criteria:
 목표:
 
 - 과거 run을 찾고, 반복 해결책을 재사용 가능한 지식으로 축적한다.
+
+진행 상태:
+
+- 2026-05-25 P0 Task board history search 구현됨: Task title/description/status/external refs와 로드된 run role/status/lifecycle/failure/repair request id를 한 입력창에서 검색한다.
+- 검색 결과는 기존 Kanban 보드 필터로 반영되어 이전 tester failure, blocker, repair 대상 task를 빠르게 찾을 수 있다.
+- artifact 본문 full-text index와 `.helm/skills` 후보 저장은 P1로 남겼다.
 
 레퍼런스:
 

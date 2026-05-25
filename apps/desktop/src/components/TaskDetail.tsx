@@ -18,7 +18,7 @@ import type {
 } from "../lib/types";
 
 type DetailTab = "overview" | "timeline" | "runs" | "git" | "artifacts";
-type TaskBlockerSource = "agent_run" | "runner_check" | "worktree" | "approval";
+type TaskBlockerSource = "agent_run" | "runner_check" | "worktree" | "approval" | "repair_request";
 type TaskBlockerKind =
   | "timeout"
   | "launch_failed"
@@ -28,7 +28,8 @@ type TaskBlockerKind =
   | "gate_failed"
   | "worktree_conflict"
   | "manual_decision";
-type TaskBlockerActionKind = "retry" | "open_settings" | "open_git" | "view_events";
+type TaskBlockerActionKind = "retry" | "prepare_repair" | "open_settings" | "open_git" | "view_events";
+type EvidenceTone = "info" | "success" | "warning" | "danger";
 
 interface TaskBlocker {
   id: string;
@@ -45,6 +46,30 @@ interface TaskBlockerAction {
   kind: TaskBlockerActionKind;
   label: string;
   runId?: string;
+  repairRequestId?: string;
+}
+
+interface EvidenceCard {
+  id: string;
+  tone: EvidenceTone;
+  label: string;
+  title: string;
+  summary: string;
+  details: string[];
+  runId: string;
+}
+
+interface RepairRequestView {
+  id: string;
+  status: string;
+  severity: string;
+  summary: string;
+  requiredAction: string;
+  affectedFiles: string[];
+  sourceRunId: string | null;
+  gateResultId: string | null;
+  roleId: RoleId;
+  updatedAt: string | null;
 }
 
 const DETAIL_TABS: Array<{ id: DetailTab; label: string }> = [
@@ -78,6 +103,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
   const [worktreeFiles, setWorktreeFiles] = useState<GitFileStatus[]>([]);
   const [artifact, setArtifact] = useState<string | null>(null);
+  const [evidenceCards, setEvidenceCards] = useState<EvidenceCard[]>([]);
   const [activeTab, setActiveTab] = useState<DetailTab>("overview");
   const [detailsLoaded, setDetailsLoaded] = useState(false);
   const pendingPlanApproval = task
@@ -99,6 +125,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     setActiveTab("overview");
     setArtifact(null);
     setRunEvents({});
+    setEvidenceCards([]);
     setWorktreeError(null);
     setDetailsLoaded(false);
   }, [task?.id]);
@@ -200,6 +227,21 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     };
   }, [onRefresh, snapshot.project.id, task?.id]);
 
+  useEffect(() => {
+    let disposed = false;
+    if (!task || runs.length === 0) {
+      setEvidenceCards([]);
+      return;
+    }
+    void (async () => {
+      const cards = await evidenceCardsForRuns(snapshot.project.id, runs.slice(0, 6));
+      if (!disposed) setEvidenceCards(cards);
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [snapshot.project.id, task?.id, runs]);
+
   if (!task) {
     return (
       <aside className="detail-panel empty-detail">
@@ -292,6 +334,33 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     }
   }
 
+  async function prepareRepair(repairRequestId: string) {
+    if (!task) return;
+    setBusyAction({ key: `repair:${repairRequestId}`, label: "targeted repair 준비 중" });
+    try {
+      await api.prepareRepairContext(snapshot.project.id, repairRequestId);
+      const nextRuns = await api.listAgentRuns(snapshot.project.id, task.id);
+      setRuns(nextRuns);
+      setTimeline(await api.listTaskTimeline(snapshot.project.id, task.id));
+      await refreshWorktreeFiles();
+      await onRefresh();
+      setActiveTab("runs");
+      showToast({
+        tone: "success",
+        title: "repair 준비 완료",
+        description: "실패 gate와 affected files를 포함한 Repair Context Pack을 만들었습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "repair 준비 실패",
+        description: messageFromError(error, "targeted repair를 준비하지 못했습니다."),
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function prepareWorktree() {
     if (!task) return;
     setBusyAction({ key: "worktree", label: "Worktree 준비 중" });
@@ -365,7 +434,16 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     const run = runs.find((item) => item.id === runId);
     setBusyAction({ key: `host:${runId}`, label: `${roleLabel(run?.roleId ?? "host")} host 실행 중` });
     setRuns((current) =>
-      current.map((run) => (run.id === runId ? { ...run, status: "Running" } : run)),
+      current.map((run) =>
+        run.id === runId
+          ? {
+              ...run,
+              status: "Running",
+              lifecyclePhase: "running",
+              heartbeatAt: new Date().toISOString(),
+            }
+          : run,
+      ),
     );
     try {
       const completedRun = await api.runHostRole(snapshot.project.id, runId);
@@ -451,12 +529,17 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     setBusyAction({ key: `approval:${approval.id}`, label: "계획 승인 중" });
     try {
       await api.approveApproval(snapshot.project.id, approval.id, "Task 상세에서 계획 승인");
+      try {
+        await api.startNextRoleRun(snapshot.project.id, task.id);
+      } catch {
+        // The task remains Ready; Runtime readiness and next action explain what is missing.
+      }
       await onRefresh();
       setActiveTab("runs");
       showToast({
         tone: "success",
         title: "계획 승인 완료",
-        description: "Task가 준비됨 상태로 전환되었습니다. 다음 액션에서 Coder 실행 준비를 시작하세요.",
+        description: "테스트 완료 전까지 자동 진행을 시작했습니다. Merge는 수동으로 남겨둡니다.",
       });
     } catch (error) {
       showToast({
@@ -496,6 +579,17 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
 
   const activeRoleId = roleForTaskStatus(task.status);
   const activeRunnerReadiness = activeRoleId ? runnerReadinessFor(snapshot.settings, activeRoleId) : null;
+  const openRepairRequests = repairRequestsFromTimeline(timeline);
+  const activeRepairRequest = openRepairRequests[0] ?? null;
+  const repairRunnerReadiness = activeRepairRequest
+    ? runnerReadinessFor(snapshot.settings, activeRepairRequest.roleId)
+    : null;
+  const repairQueuedRun = activeRepairRequest
+    ? runs.find((run) => run.repairRequestId === activeRepairRequest.id && run.status === "Queued") ?? null
+    : null;
+  const repairRunningRun = activeRepairRequest
+    ? runs.find((run) => run.repairRequestId === activeRepairRequest.id && run.status === "Running") ?? null
+    : null;
   const activeQueuedRun = activeRoleId
     ? runs.find((run) => run.roleId === activeRoleId && run.status === "Queued") ?? null
     : null;
@@ -514,6 +608,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     runnerReadiness: activeRunnerReadiness,
     runEvents,
     runs,
+    repairRequests: openRepairRequests,
     task,
     worktree,
     worktreeError,
@@ -583,6 +678,10 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
             task={task}
             worktree={worktree}
             runnerReadiness={activeRunnerReadiness}
+            repairRequest={activeRepairRequest}
+            repairRunnerReadiness={repairRunnerReadiness}
+            repairQueuedRun={repairQueuedRun}
+            repairRunningRun={repairRunningRun}
             queuedRun={activeQueuedRun}
             runningRun={activeRunningRun}
             retryableRun={activeRetryableRun}
@@ -591,6 +690,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
             onRequestPlanRevision={requestPlanRevision}
             onPrepareWorktree={prepareWorktree}
             onPrepareContext={prepareContext}
+            onPrepareRepair={prepareRepair}
             onRunHost={runHost}
             onCancelHost={cancelHost}
             onRetryHost={retryHost}
@@ -606,6 +706,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
           busy={busy}
           onGoGit={onGoGit}
           onGoSettings={onGoSettings}
+          onPrepareRepair={prepareRepair}
           onRetryHost={retryHost}
           onShowRunEvents={showRunEvents}
         />
@@ -617,8 +718,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
             <div>
               <h3>현재 실행</h3>
               <p>
-                {roleLabel(visibleRun.roleId)} · {visibleRun.status}
-                {visibleRun.resultStatus ? ` · ${visibleRun.resultStatus}` : ""}
+                {roleLabel(visibleRun.roleId)} · {runStatusSummary(visibleRun)}
               </p>
             </div>
             {visibleRun.status === "Running" ? (
@@ -767,7 +867,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
                       <strong>{roleLabel(roleId)}</strong>
                       <span>
                         {latestRun
-                          ? `${latestRun.status} · ${latestRun.resultStatus ?? "-"}`
+                          ? runStatusSummary(latestRun)
                           : readiness.ready
                             ? readiness.label
                             : readiness.description}
@@ -958,6 +1058,31 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
           <section className="detail-section">
             <h3>실행 기록</h3>
             {runs.length === 0 ? <p className="muted">아직 실행 기록이 없습니다.</p> : null}
+            {evidenceCards.length > 0 ? (
+              <ul className="evidence-card-list" aria-label="실행 evidence">
+                {evidenceCards.map((card) => (
+                  <li className={`evidence-card ${card.tone}`} key={card.id}>
+                    <div>
+                      <span>{card.label}</span>
+                      <strong>{card.title}</strong>
+                      <p>{card.summary}</p>
+                    </div>
+                    {card.details.length > 0 ? (
+                      <ul>
+                        {card.details.map((detail) => (
+                          <li key={detail}>{detail}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <div className="artifact-actions">
+                      <button onClick={() => showArtifact(card.runId, "summary.md")} type="button">summary</button>
+                      <button onClick={() => showArtifact(card.runId, "structured-result.json")} type="button">result</button>
+                      <button onClick={() => showRunEvents(card.runId)} type="button">events</button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             <ul className="run-list">
               {runs.map((run) => {
                 const runBusy =
@@ -971,7 +1096,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
                     <strong>{roleLabel(run.roleId)}</strong>
                     <span>
                       {runBusy ? <Loader2 className="loading-icon" size={12} aria-hidden /> : null}
-                      {run.status} · {run.resultStatus ?? "-"}
+                      {runStatusSummary(run)}
                     </span>
                   </div>
                   <div className="artifact-actions">
@@ -1009,6 +1134,10 @@ interface NextActionProps {
   task: TaskSummary;
   worktree: TaskWorktreeSummary | null;
   runnerReadiness: ReturnType<typeof runnerReadinessFor> | null;
+  repairRequest: RepairRequestView | null;
+  repairRunnerReadiness: ReturnType<typeof runnerReadinessFor> | null;
+  repairQueuedRun: AgentRunSummary | null;
+  repairRunningRun: AgentRunSummary | null;
   queuedRun: AgentRunSummary | null;
   runningRun: AgentRunSummary | null;
   retryableRun: AgentRunSummary | null;
@@ -1017,6 +1146,7 @@ interface NextActionProps {
   onRequestPlanRevision: (approval: ApprovalSummary) => Promise<void>;
   onPrepareWorktree: () => Promise<void>;
   onPrepareContext: (roleId: string) => Promise<void>;
+  onPrepareRepair: (repairRequestId: string) => Promise<void>;
   onRunHost: (runId: string) => Promise<void>;
   onCancelHost: (runId: string) => Promise<void>;
   onRetryHost: (runId: string) => Promise<void>;
@@ -1030,6 +1160,7 @@ function TaskBlockerPanel({
   onGoGit,
   onGoSettings,
   onRetryHost,
+  onPrepareRepair,
   onShowRunEvents,
 }: {
   blockers: TaskBlocker[];
@@ -1037,6 +1168,7 @@ function TaskBlockerPanel({
   onGoGit: () => void;
   onGoSettings: () => void;
   onRetryHost: (runId: string) => Promise<void>;
+  onPrepareRepair: (repairRequestId: string) => Promise<void>;
   onShowRunEvents: (runId: string) => Promise<void>;
 }) {
   return (
@@ -1072,6 +1204,10 @@ function TaskBlockerPanel({
                       void onRetryHost(action.runId);
                       return;
                     }
+                    if (action.kind === "prepare_repair" && action.repairRequestId) {
+                      void onPrepareRepair(action.repairRequestId);
+                      return;
+                    }
                     if (action.kind === "view_events" && action.runId) {
                       void onShowRunEvents(action.runId);
                     }
@@ -1095,6 +1231,10 @@ function NextAction({
   task,
   worktree,
   runnerReadiness,
+  repairRequest,
+  repairRunnerReadiness,
+  repairQueuedRun,
+  repairRunningRun,
   queuedRun,
   runningRun,
   retryableRun,
@@ -1103,6 +1243,7 @@ function NextAction({
   onRequestPlanRevision,
   onPrepareWorktree,
   onPrepareContext,
+  onPrepareRepair,
   onRunHost,
   onCancelHost,
   onRetryHost,
@@ -1115,7 +1256,7 @@ function NextAction({
       <div className="next-action-card waiting">
         <div>
           <strong>계획 승인 대기</strong>
-          <p>승인하면 Task가 준비됨 상태가 됩니다. Coder 실행 준비와 host 실행은 다음 액션에서 명시적으로 시작합니다.</p>
+          <p>승인하면 구현, 검토, 테스트 완료까지 자동 진행을 시작합니다. Merge 결정은 수동으로 남습니다.</p>
         </div>
         <div className="artifact-actions">
           <button
@@ -1132,6 +1273,108 @@ function NextAction({
             계획 수정 요청
           </button>
         </div>
+      </div>
+    );
+  }
+
+  if (repairRequest) {
+    if (repairRunningRun) {
+      const cancelBusy = busyAction?.key === `cancel:${repairRunningRun.id}`;
+      return (
+        <div className="next-action-card waiting">
+          <div>
+            <strong>Targeted repair 실행 중</strong>
+            <p>{repairRequest.summary}</p>
+          </div>
+          <button
+            aria-busy={cancelBusy ? true : undefined}
+            className={cancelBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+            disabled={busy}
+            onClick={() => void onCancelHost(repairRunningRun.id)}
+            type="button"
+          >
+            {cancelBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+            {cancelBusy ? "중지 중..." : "실행 중지"}
+          </button>
+        </div>
+      );
+    }
+
+    if (repairQueuedRun) {
+      const hostBusy = busyAction?.key === `host:${repairQueuedRun.id}`;
+      return (
+        <div className="next-action-card waiting">
+          <div>
+            <strong>Targeted repair 실행 대기</strong>
+            <p>Repair Context Pack이 준비됐습니다. 이 실행은 blocker 하나와 affected files 범위로 제한됩니다.</p>
+          </div>
+          <button
+            aria-busy={hostBusy ? true : undefined}
+            className={hostBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+            disabled={busy}
+            onClick={() => void onRunHost(repairQueuedRun.id)}
+            type="button"
+          >
+            {hostBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+            {hostBusy ? "실행 중..." : "repair 실행"}
+          </button>
+        </div>
+      );
+    }
+
+    if (repairRunnerReadiness && !repairRunnerReadiness.ready) {
+      return (
+        <div className="next-action-card waiting">
+          <div>
+            <strong>{roleLabel(repairRequest.roleId)} repair runner 설정 필요</strong>
+            <p>{repairRunnerReadiness.description}</p>
+          </div>
+          <button className="primary-button" disabled={busy} onClick={onGoSettings} type="button">
+            설정 열기
+          </button>
+        </div>
+      );
+    }
+
+    const worktreeBusy = busyAction?.key === "worktree";
+    if (!worktree) {
+      return (
+        <div className="next-action-card waiting">
+          <div>
+            <strong>Repair worktree 준비</strong>
+            <p>Targeted repair를 실행할 태스크 전용 branch와 worktree를 먼저 준비합니다.</p>
+          </div>
+          <button
+            aria-busy={worktreeBusy ? true : undefined}
+            className={worktreeBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+            disabled={busy}
+            onClick={() => void onPrepareWorktree()}
+            type="button"
+          >
+            {worktreeBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+            {worktreeBusy ? "준비 중..." : "worktree 준비"}
+          </button>
+        </div>
+      );
+    }
+
+    const repairBusy = busyAction?.key === `repair:${repairRequest.id}`;
+    return (
+      <div className="next-action-card waiting">
+        <div>
+          <strong>Targeted repair 필요</strong>
+          <p>{repairRequest.requiredAction}</p>
+        </div>
+        <button
+          aria-busy={repairBusy ? true : undefined}
+          className={repairBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+          disabled={busy}
+          onClick={() => void onPrepareRepair(repairRequest.id)}
+          type="button"
+        >
+          {repairBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+          {repairBusy ? "준비 중..." : "repair 준비"}
+        </button>
       </div>
     );
   }
@@ -1347,12 +1590,52 @@ function isRetryableRunStatus(status: AgentRunSummary["status"]): boolean {
   return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
 }
 
+function runStatusSummary(run: AgentRunSummary): string {
+  const parts = [run.status];
+  if (run.lifecyclePhase) parts.push(run.lifecyclePhase);
+  if (run.failureKind) parts.push(run.failureKind);
+  else if (run.resultStatus) parts.push(run.resultStatus);
+  return parts.join(" · ");
+}
+
+function repairRequestsFromTimeline(timeline: TaskTimelineEntry[]): RepairRequestView[] {
+  return timeline
+    .filter((entry) => entry.entryType === "repair_request")
+    .map(repairRequestFromTimelineEntry)
+    .filter((repair): repair is RepairRequestView => Boolean(repair))
+    .filter((repair) => repair.status === "Open");
+}
+
+function repairRequestFromTimelineEntry(entry: TaskTimelineEntry): RepairRequestView | null {
+  const metadata: Record<string, unknown> = isRecord(entry.metadata) ? entry.metadata : {};
+  const status = stringValue(metadata.status) ?? entry.status ?? "Open";
+  const affectedFilesValue = metadata.affectedFiles;
+  const affectedFiles = Array.isArray(affectedFilesValue)
+    ? affectedFilesValue.filter((item): item is string => typeof item === "string")
+    : [];
+  const sourceRunId = stringValue(metadata.runId);
+  const gateResultId = stringValue(metadata.gateResultId);
+  return {
+    id: entry.id,
+    status,
+    severity: stringValue(metadata.severity) ?? "error",
+    summary: stringValue(metadata.summary) ?? entry.summary ?? "blocking gate를 해결해야 합니다.",
+    requiredAction: stringValue(metadata.requiredAction) ?? "실패 gate의 affected files만 수정한 뒤 재검증합니다.",
+    affectedFiles,
+    sourceRunId,
+    gateResultId,
+    roleId: "coder",
+    updatedAt: stringValue(metadata.updatedAt),
+  };
+}
+
 function taskBlockersFor({
   activeRoleId,
   pendingPlanApproval,
   runnerReadiness,
   runEvents,
   runs,
+  repairRequests,
   task,
   worktree,
   worktreeError,
@@ -1362,6 +1645,7 @@ function taskBlockersFor({
   runnerReadiness: ReturnType<typeof runnerReadinessFor> | null;
   runEvents: Record<string, RunEventSummary[]>;
   runs: AgentRunSummary[];
+  repairRequests: RepairRequestView[];
   task: TaskSummary;
   worktree: TaskWorktreeSummary | null;
   worktreeError: string | null;
@@ -1383,6 +1667,24 @@ function taskBlockersFor({
 
   if (!worktree && worktreeError) {
     blockers.push(worktreeErrorBlocker(worktreeError));
+  }
+
+  for (const repairRequest of repairRequests.slice(0, 2)) {
+    blockers.push({
+      id: `repair:${repairRequest.id}`,
+      source: "repair_request",
+      kind: "gate_failed",
+      tone: repairRequest.severity === "error" ? "danger" : "warning",
+      title: "Targeted repair 필요",
+      reason: repairRequest.summary,
+      nextStep: repairRequest.requiredAction,
+      actions: [
+        { kind: "prepare_repair", label: "repair 준비", repairRequestId: repairRequest.id },
+        ...(repairRequest.sourceRunId
+          ? [{ kind: "view_events" as const, label: "source events", runId: repairRequest.sourceRunId }]
+          : []),
+      ],
+    });
   }
 
   const blockedRoles = new Set<string>();
@@ -1539,6 +1841,8 @@ function evidenceFromRun(run: AgentRunSummary, events: RunEventSummary[]): strin
     .reverse()
     .find((item) => item.message.trim() && item.kind !== "status");
   if (event) return compactEventMessage(event.message);
+  if (run.failureReason) return compactEventMessage(run.failureReason);
+  if (run.failureKind) return run.failureKind;
   if (run.resultStatus) return `structured result status: ${run.resultStatus}`;
   return "";
 }
@@ -1577,7 +1881,7 @@ function runActivityFor(run: AgentRunSummary, events: RunEventSummary[]): {
   description: string;
 } {
   const latestEvent = events.length > 0 ? events[events.length - 1] : null;
-  const anchor = latestEvent?.createdAt ?? run.startedAt ?? run.updatedAt ?? run.createdAt;
+  const anchor = latestEvent?.createdAt ?? run.heartbeatAt ?? run.startedAt ?? run.updatedAt ?? run.createdAt;
   const ageMs = ageFromNow(anchor);
   const ageLabel = formatRelativeAge(anchor);
 
@@ -1675,6 +1979,124 @@ function RunEventPreview({ events }: { events: RunEventSummary[] }) {
       ))}
     </ol>
   );
+}
+
+async function evidenceCardsForRuns(projectId: string, runs: AgentRunSummary[]): Promise<EvidenceCard[]> {
+  const groups = await Promise.all(runs.map((run) => evidenceCardsForRun(projectId, run)));
+  return groups.flat();
+}
+
+async function evidenceCardsForRun(projectId: string, run: AgentRunSummary): Promise<EvidenceCard[]> {
+  const [resultRaw, changedFilesRaw] = await Promise.all([
+    api.readRunArtifact(projectId, run.id, "structured-result.json").catch(() => null),
+    api.readRunArtifact(projectId, run.id, "changed-files.json").catch(() => null),
+  ]);
+  const result = parseJsonRecord(resultRaw);
+  const changedFiles = parseChangedFiles(changedFilesRaw);
+  const cards: EvidenceCard[] = [];
+  const resultSummary = stringValue(result?.summary) ?? run.failureReason ?? run.resultStatus ?? run.status;
+
+  cards.push({
+    id: `${run.id}:summary`,
+    tone: toneForRun(run),
+    label: `${roleLabel(run.roleId)} · ${runStatusSummary(run)}`,
+    title: "Run Summary",
+    summary: compactEventMessage(resultSummary),
+    details: [
+      run.startedAt ? `started ${formatRelativeAge(run.startedAt)}` : "",
+      run.finishedAt ? `finished ${formatRelativeAge(run.finishedAt)}` : "",
+      run.attempt > 1 ? `attempt ${run.attempt}` : "",
+    ].filter(Boolean),
+    runId: run.id,
+  });
+
+  if (run.failureKind || run.failureReason) {
+    cards.push({
+      id: `${run.id}:blocker`,
+      tone: "danger",
+      label: "Blocker",
+      title: run.failureKind ?? "실행 점검 필요",
+      summary: run.failureReason ?? "상세 근거를 확인한 뒤 retry 또는 수정을 진행합니다.",
+      details: [run.resultStatus ? `result ${run.resultStatus}` : "", run.lifecyclePhase ? `phase ${run.lifecyclePhase}` : ""].filter(Boolean),
+      runId: run.id,
+    });
+  }
+
+  const gate = isRecord(result?.gateResult) ? result.gateResult : null;
+  if (gate) {
+    const blocking = Boolean(gate.blocking);
+    const gateStatus = stringValue(gate.status) ?? "unknown";
+    const blockers = Array.isArray(gate.blockers) ? gate.blockers : [];
+    cards.push({
+      id: `${run.id}:gate`,
+      tone: blocking || gateStatus === "fail" ? "warning" : "success",
+      label: "Gate Result",
+      title: stringValue(gate.gate) ?? `${roleLabel(run.roleId)} gate`,
+      summary: blocking ? "blocking gate가 보고되었습니다." : `gate status: ${gateStatus}`,
+      details: blockers.slice(0, 3).map((item) => {
+        if (!isRecord(item)) return String(item);
+        return stringValue(item.summary) ?? stringValue(item.id) ?? "blocking item";
+      }),
+      runId: run.id,
+    });
+  }
+
+  if (changedFiles.length > 0) {
+    cards.push({
+      id: `${run.id}:files`,
+      tone: "info",
+      label: "File Changes",
+      title: `${changedFiles.length} changed file${changedFiles.length === 1 ? "" : "s"}`,
+      summary: changedFiles.slice(0, 3).map((file) => file.path).join(", "),
+      details: changedFiles.slice(0, 5).map((file) => `${file.status} ${file.path}`),
+      runId: run.id,
+    });
+  }
+
+  return cards;
+}
+
+function parseJsonRecord(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseChangedFiles(raw: string | null): Array<{ path: string; status: string }> {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => {
+        if (!isRecord(item)) return null;
+        const path = stringValue(item.path);
+        if (!path) return null;
+        return { path, status: stringValue(item.status) ?? "changed" };
+      })
+      .filter((item): item is { path: string; status: string } => item !== null);
+  } catch {
+    return [];
+  }
+}
+
+function toneForRun(run: AgentRunSummary): EvidenceTone {
+  if (run.status === "Succeeded") return "success";
+  if (isRetryableRunStatus(run.status)) return "warning";
+  if (run.status === "Running" || run.status === "Queued") return "info";
+  return "info";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function appendRunEvent(

@@ -538,6 +538,16 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
 
       const firstTask = createdTasks[0];
       if (!firstTask) return;
+      let autoStarted = 0;
+      const autoStartFailures: string[] = [];
+      for (const task of createdTasks) {
+        try {
+          await api.startNextRoleRun(projectSnapshot.project.id, task.id);
+          autoStarted += 1;
+        } catch (error) {
+          autoStartFailures.push(`${task.title}: ${errorMessage(error)}`);
+        }
+      }
 
       setSessions((current) =>
         current.map((item) =>
@@ -555,10 +565,20 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       await onRefresh();
       setError(null);
       showToast({
-        tone: "success",
-        title: "Task 생성 완료",
-        description: `${createdTasks.length}개의 Task를 생성했습니다. 첫 Task에서 Planner 준비를 시작하세요.`,
+        tone: autoStartFailures.length > 0 ? "info" : "success",
+        title: autoStarted > 0 ? "Task 생성 및 자동 진행 시작" : "Task 생성 완료",
+        description:
+          autoStarted > 0
+            ? `${createdTasks.length}개 Task 중 ${autoStarted}개가 테스트 완료 전까지 자동 진행을 시작했습니다. Merge는 수동입니다.`
+            : `${createdTasks.length}개의 Task를 생성했습니다. Runtime readiness를 확인한 뒤 Planner 준비를 시작하세요.`,
       });
+      if (autoStartFailures.length > 0) {
+        showToast({
+          tone: "info",
+          title: "일부 자동 진행 대기",
+          description: autoStartFailures[0],
+        });
+      }
       onOpenTask(firstTask.id);
     } catch (err) {
       const message = errorMessage(err);
@@ -845,10 +865,10 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                         <CheckCircle2 size={14} aria-hidden />
                       )}
                       {approvingPlan
-                        ? "Task 생성 중..."
+                        ? "자동 진행 준비 중..."
                         : activeSession.taskId && activeSession.jiraState === "AlreadyTracked"
                         ? "기존 Task 열기"
-                        : "승인하고 Task 생성"}
+                        : "승인하고 테스트까지 자동 진행"}
                     </button>
                   ) : null}
                 </div>
