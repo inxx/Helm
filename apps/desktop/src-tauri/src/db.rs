@@ -6190,8 +6190,7 @@ fn codex_thread_start_params(
 ) -> Value {
     let mut params = json!({
         "cwd": worktree_path,
-        "ephemeral": true,
-        "threadSource": { "kind": "user" }
+        "ephemeral": true
     });
     if let Some(model) = runner_command.model.as_deref() {
         params["model"] = json!(model);
