@@ -4186,7 +4186,13 @@ fn role_assignment_command(
         });
 
     Ok(Some(ResolvedHostRunnerCommand {
-        args: inject_provider_options(args, provider.as_deref(), model.as_deref(), effort),
+        args: inject_provider_options(
+            args,
+            provider.as_deref(),
+            model.as_deref(),
+            effort,
+            placeholders,
+        ),
         timeout_seconds: connection
             .get("timeoutSeconds")
             .and_then(Value::as_u64)
@@ -4242,6 +4248,7 @@ fn inject_provider_options(
     provider: Option<&str>,
     model: Option<&str>,
     effort: Option<&str>,
+    placeholders: &HashMap<String, String>,
 ) -> Vec<String> {
     let with_model = match (provider, model) {
         (Some("codex"), Some(model)) if !has_arg(&args, &["-m", "--model"]) => {
@@ -4253,11 +4260,22 @@ fn inject_provider_options(
         _ => args,
     };
 
-    match (provider, effort) {
+    let with_effort = match (provider, effort) {
         (Some("claude"), Some(effort)) if !has_arg(&with_model, &["--effort"]) => {
             insert_after_index(with_model, 0, ["--effort".to_string(), effort.to_string()])
         }
         _ => with_model,
+    };
+
+    match (provider, placeholders.get("artifactDir")) {
+        (Some("claude"), Some(artifact_dir)) if !has_arg(&with_effort, &["--add-dir"]) => {
+            insert_after_index(
+                with_effort,
+                0,
+                ["--add-dir".to_string(), artifact_dir.to_string()],
+            )
+        }
+        _ => with_effort,
     }
 }
 
@@ -7431,6 +7449,63 @@ mod tests {
         assert_eq!(command.runner_adapter, RunnerAdapterKind::CodexAppServer);
         assert_eq!(command.approval_policy.as_deref(), Some("on-request"));
         assert_eq!(command.sandbox.as_deref(), Some("workspace-write"));
+    }
+
+    #[test]
+    fn role_assignment_command_adds_artifact_dir_for_claude() {
+        let settings = EffectiveSettings {
+            role_presets: default_role_presets(),
+            ai_connections: json!([
+                {
+                    "id": "claude-local",
+                    "label": "Claude CLI",
+                    "provider": "claude",
+                    "commandArgs": ["claude", "-p", "run {roleId}"],
+                    "timeoutSeconds": 120,
+                    "enabled": true,
+                    "defaultModel": "sonnet"
+                }
+            ]),
+            role_assignments: json!([
+                {
+                    "roleId": "coder",
+                    "selectionMode": "single",
+                    "connectionIds": ["claude-local"],
+                    "selections": [{ "connectionId": "claude-local", "model": null }],
+                    "aggregationPolicy": null
+                }
+            ]),
+            conductor_config: None,
+            worktree_root: None,
+            worktree_setup: None,
+            jira_config: None,
+            obsidian_vault_path: None,
+            token_budget: None,
+            artifact_retention_days: Some(30),
+        };
+        let placeholders = HashMap::from([
+            (
+                "artifactDir".to_string(),
+                "/tmp/helm-artifacts/run-1".to_string(),
+            ),
+            ("roleId".to_string(), "coder".to_string()),
+        ]);
+
+        let command =
+            resolve_host_runner_command(&settings, "coder", &placeholders).expect("command");
+
+        assert_eq!(
+            command.args,
+            vec![
+                "claude",
+                "--add-dir",
+                "/tmp/helm-artifacts/run-1",
+                "--model",
+                "sonnet",
+                "-p",
+                "run coder"
+            ]
+        );
     }
 
     #[test]

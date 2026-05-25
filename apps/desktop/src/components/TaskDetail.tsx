@@ -1057,7 +1057,9 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
         <div className="task-console-tab-panel">
           <section className="detail-section">
             <h3>실행 기록</h3>
-            {runs.length === 0 ? <p className="muted">아직 실행 기록이 없습니다.</p> : null}
+            {runs.length === 0 ? (
+              <p className="muted">아직 실행된 기록이 없습니다. 실행을 시작하면 이곳에 진행 상황이 표시됩니다.</p>
+            ) : null}
             {evidenceCards.length > 0 ? (
               <ul className="evidence-card-list" aria-label="실행 evidence">
                 {evidenceCards.map((card) => (
