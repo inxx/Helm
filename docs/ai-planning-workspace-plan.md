@@ -88,6 +88,8 @@ planner가 해야 하는 일:
 - Epic/Task/Subtask 구조로 작업을 분해한다.
 - 각 Task의 acceptance criteria, risk, test plan을 제안한다.
 - Task 간 dependency와 실행 순서를 제안한다.
+- 큰 작업은 phase 목록이 아니라 실행 가능한 task graph, task card, ownership map, barrier, verification gate로 분해한다.
+- 병렬 실행 가능한 작업과 직렬 실행해야 하는 작업을 구분한다.
 - 모호한 요구사항을 open question으로 남긴다.
 - 어떤 role 흐름으로 실행할지 제안한다.
 
@@ -112,7 +114,15 @@ Plan Draft에는 최소한 아래 항목이 있어야 한다.
 - risks
 - open questions
 - suggested role plan
+- executable plan
+  - task graph
+  - task cards
+  - ownership map
+  - merge barriers
+  - verification gates
 - external references
+
+non-trivial Plan Draft의 executable plan은 [Executable Planning Contract](executable-planning-contract.md)를 따른다. 작은 작업도 최소 단일 task card와 verification gate는 가져야 한다.
 
 ### 5. 사용자 검토와 승인
 
@@ -202,6 +212,54 @@ created_at
   "schemaVersion": 1,
   "title": "AI Planning Workspace 구현",
   "summary": "사용자가 AI와 프로젝트 계획을 세우고 승인된 초안을 Helm Task로 변환한다.",
+  "executablePlan": {
+    "classification": "graph-shaped",
+    "taskGraph": {
+      "serialSpine": ["PLANNING-FOUNDATION", "PLANNING-MATERIALIZE"],
+      "parallelLanes": [
+        {
+          "id": "LANE-UI",
+          "tasks": ["PLANNING-UI-SHELL"]
+        },
+        {
+          "id": "LANE-DB",
+          "tasks": ["PLANNING-DB-SKELETON"]
+        }
+      ],
+      "barriers": ["BARRIER-PLANNING-INTEGRATION", "BARRIER-FINAL-VERIFY"]
+    },
+    "taskCards": [
+      {
+        "id": "PLANNING-UI-SHELL",
+        "type": "parallel-domain",
+        "status": "ready",
+        "goal": "Planning 탭과 세션 목록, planner 대화 canvas를 추가한다.",
+        "dependsOn": ["PLANNING-FOUNDATION"],
+        "canRunInParallel": true,
+        "ownedFiles": ["apps/desktop/src/screens/PlanningScreen.tsx"],
+        "readOnlyFiles": ["docs/ai-planning-workspace-plan.md"],
+        "sharedFiles": [],
+        "doneWhen": ["Planning 탭에서 새 planning session을 시작할 수 있다."],
+        "verifyCommand": "pnpm --dir apps/desktop typecheck",
+        "reportFormat": "taskId/status/changedFiles/verification/blockers"
+      }
+    ],
+    "ownershipMap": {
+      "ownedFiles": {
+        "PLANNING-UI-SHELL": ["apps/desktop/src/screens/PlanningScreen.tsx"],
+        "PLANNING-DB-SKELETON": ["apps/desktop/src-tauri/src/db.rs"]
+      },
+      "sharedFiles": ["README.md", "docs/ai-planning-workspace-plan.md"],
+      "generatedFiles": []
+    },
+    "verificationGates": [
+      {
+        "id": "GATE-PLANNING-TYPECHECK",
+        "level": "per-batch",
+        "command": "pnpm --dir apps/desktop typecheck"
+      }
+    ]
+  },
   "epics": [
     {
       "title": "Planning Workspace",
@@ -367,6 +425,7 @@ created_at
 - 목표를 입력하면 planning session이 생성된다.
 - repo context와 existing task를 참고할 수 있다.
 - planner 또는 fixture runner가 Plan Draft와 Task breakdown을 생성한다.
+- non-trivial 목표는 task graph, task card, ownership map, barrier, verification gate를 포함한 executable plan으로 생성된다.
 - 사용자가 draft를 승인해야만 Epic/Task가 생성된다.
 - 생성된 Task는 기존 Task Detail core loop로 이어진다.
 - planning 대화, draft, 승인 이력이 DB와 audit에 남는다.

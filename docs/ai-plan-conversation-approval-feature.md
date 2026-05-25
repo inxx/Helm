@@ -56,10 +56,13 @@
 - Task breakdown은 대화 본문이 아니라 승인 대상 Plan Document draft의 한 섹션으로 표시한다.
 - `planner` 응답은 자유 텍스트만이 아니라 구조화된 Plan Draft와 사람이 읽는 Markdown 계획 문서로 저장한다.
 - `planner`는 목표를 Epic/Task/Subtask로 나누고 각 Task에 acceptance criteria, risk, test plan을 붙인다.
+- non-trivial 목표는 phase 목록이 아니라 실행 가능한 task graph, task card, ownership map, barrier, verification gate로 쪼갠다.
 - 사용자는 `planner`에게 수정 요청을 보내거나 draft를 직접 편집할 수 있다.
 - 승인 시점의 draft version을 불변 record로 남긴다.
 - 승인된 draft만 Epic/Task/External Ref로 materialize한다.
 - materialize 이후에도 어떤 대화와 draft에서 Task가 생성됐는지 추적할 수 있다.
+
+계획 분해의 기본 계약은 [Executable Planning Contract](executable-planning-contract.md)를 따른다.
 
 ## 제외 범위
 
@@ -107,6 +110,9 @@ Planning 탭의 대화 상대는 범용 채팅 AI가 아니라 Helm의 `planner`
 - 큰 Task는 Subtask 또는 checklist로 더 쪼갠다.
 - 각 Task에 description, acceptance criteria, risk, test plan을 붙인다.
 - Task 간 순서와 dependency를 제안한다.
+- 작업을 `trivial`, `linear`, `graph-shaped`로 분류한다.
+- `linear` 이상이면 executable task graph와 task card를 만든다.
+- 병렬 가능한 task에는 owned files, read-only files, shared-file barrier, verification gate를 붙인다.
 - 모호한 요구사항은 blocking open question으로 남긴다.
 - 너무 큰 범위는 smaller milestone으로 줄이는 선택지를 제안한다.
 
@@ -124,6 +130,8 @@ Planning 탭의 대화 상대는 범용 채팅 AI가 아니라 Helm의 `planner`
 - `plan_markdown`: 사용자가 읽고 승인하는 계획 문서
 
 Plan Draft는 version을 가진다. 사용자가 수정 요청을 보내거나 직접 편집하면 새 version을 만든다.
+
+non-trivial draft의 `draft_json`은 `executablePlan`을 포함해야 한다. `executablePlan`은 Helm이 Task 생성, `.helm/tasks.md` export, queue/supervisor, 향후 worker dispatch에 쓰는 작업 그래프다.
 
 ### 4. 수정 요청과 직접 편집
 
@@ -312,6 +320,67 @@ approval_type: PlanDraftApproval
     "in": ["planning session 저장", "planner 대화", "draft versioning", "draft approval", "Task materialize"],
     "out": ["Jira 자동 생성", "자동 구현 실행"]
   },
+  "executablePlan": {
+    "classification": "graph-shaped",
+    "taskGraph": {
+      "serialSpine": ["PLAN-FOUNDATION", "PLAN-MATERIALIZE"],
+      "parallelLanes": [
+        {
+          "id": "LANE-DB",
+          "tasks": ["PLAN-DB-MODEL"]
+        },
+        {
+          "id": "LANE-UI",
+          "tasks": ["PLAN-UI-DRAFT"]
+        }
+      ],
+      "barriers": [
+        {
+          "id": "BARRIER-INTEGRATION",
+          "waitsFor": ["PLAN-DB-MODEL", "PLAN-UI-DRAFT"],
+          "checks": ["plan draft schema validation", "PlanningScreen smoke"]
+        }
+      ]
+    },
+    "taskCards": [
+      {
+        "id": "PLAN-DB-MODEL",
+        "title": "planning session DB 모델 추가",
+        "type": "parallel-domain",
+        "status": "ready",
+        "goal": "세션, 메시지, draft version을 repo-local DB에 저장한다.",
+        "dependsOn": ["PLAN-FOUNDATION"],
+        "canRunInParallel": true,
+        "ownedFiles": ["apps/desktop/src-tauri/src/db.rs"],
+        "readOnlyFiles": ["docs/ai-plan-conversation-approval-feature.md"],
+        "sharedFiles": [],
+        "generatedFilesPolicy": "do not edit generated files manually",
+        "doneWhen": ["migration이 deterministic하게 적용된다.", "invalid draft가 validation에서 차단된다."],
+        "verifyCommand": "cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml",
+        "reportFormat": "taskId/status/changedFiles/verification/blockers",
+        "blockerPolicy": "DB migration 충돌은 blocked로 보고하고 schema 변경을 coordinator에게 요청한다."
+      }
+    ],
+    "ownershipMap": {
+      "ownedFiles": {
+        "PLAN-DB-MODEL": ["apps/desktop/src-tauri/src/db.rs"],
+        "PLAN-UI-DRAFT": ["apps/desktop/src/screens/PlanningScreen.tsx"]
+      },
+      "sharedFiles": ["docs/ai-plan-conversation-approval-feature.md"],
+      "generatedFiles": []
+    },
+    "verificationGates": [
+      {
+        "id": "GATE-PLAN-DRAFT-SCHEMA",
+        "level": "per-batch",
+        "command": "cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml",
+        "doneWhen": "Plan Draft JSON validation path compiles and rejects invalid output."
+      }
+    ],
+    "reportContract": {
+      "requiredFields": ["taskId", "status", "changedFiles", "verification", "blockers", "nextRecommendedTask"]
+    }
+  },
   "epics": [
     {
       "title": "Planning Conversation",
@@ -398,6 +467,7 @@ Planning 화면은 세 구역을 가진다.
 - 중앙: `planner` 대화와 사용자 수정 요청 입력
 - 하단 또는 우측: 승인 대상 Plan Document preview/editor
 - Plan Document 내부 섹션: scope, open questions, context, Epic/Task/Subtask breakdown, acceptance criteria, risk, test plan
+- non-trivial Plan Document 내부 섹션: task graph, task cards, ownership map, barriers, verification gates
 
 현재 버튼 의미 변경:
 
@@ -440,6 +510,8 @@ audit payload에는 최소한 `sessionId`, `draftId`, `version`, `approvalId`, `
 - 새로고침 후에도 planning session, messages, active draft가 유지된다.
 - `planner` 수정 요청을 보내면 기존 draft를 덮어쓰지 않고 새 version이 생성된다.
 - `planner`가 목표를 Epic/Task/Subtask로 나누고 각 Task에 acceptance criteria와 test plan을 붙인다.
+- non-trivial draft는 `executablePlan`을 포함하고, task graph/task cards/ownership/barrier/verification gate가 비어 있지 않다.
+- 병렬 task의 owned files가 서로 겹치면 schema validation 또는 approval gate에서 차단된다.
 - 승인 가능한 draft가 없으면 승인 버튼이 비활성화된다.
 - 승인 전에는 생성될 Epic/Task/Acceptance Criteria/Risk를 확인할 수 있다.
 - 승인하면 Epic/Task/External Ref가 한 transaction으로 생성된다.
@@ -465,6 +537,8 @@ audit payload에는 최소한 `sessionId`, `draftId`, `version`, `approvalId`, `
 - Fixture runner 테스트:
   - 목표와 repo context를 받아 valid Plan Draft JSON 생성
   - 큰 목표를 2개 이상의 Task로 나누는지 확인
+  - graph-shaped 목표에서 `executablePlan.taskCards`, `ownershipMap`, `verificationGates`가 생성되는지 확인
+  - owned files가 겹치는 parallel task를 invalid output으로 차단하는지 확인
   - schema invalid output일 때 draft 저장 차단
 
 ## 구현 순서
