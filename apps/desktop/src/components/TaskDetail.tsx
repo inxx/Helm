@@ -655,7 +655,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
         </div>
       </div>
 
-      {busyAction ? (
+      {busyAction && !busyAction.key.startsWith("host:") ? (
         <div className="operation-status task-operation-status" role="status">
           <Loader2 className="loading-icon" size={14} aria-hidden />
           <span>{busyAction.label}</span>
@@ -1097,7 +1097,6 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
                   <div>
                     <strong>{roleLabel(run.roleId)}</strong>
                     <span>
-                      {runBusy ? <Loader2 className="loading-icon" size={12} aria-hidden /> : null}
                       {runStatusSummary(run)}
                     </span>
                   </div>
@@ -1290,13 +1289,12 @@ function NextAction({
           </div>
           <button
             aria-busy={cancelBusy ? true : undefined}
-            className={cancelBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+            className="primary-button"
             disabled={busy}
             onClick={() => void onCancelHost(repairRunningRun.id)}
             type="button"
           >
-            {cancelBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
-            {cancelBusy ? "중지 중..." : "실행 중지"}
+            {cancelBusy ? "중지 요청 중..." : "실행 중지"}
           </button>
         </div>
       );
@@ -1312,13 +1310,12 @@ function NextAction({
           </div>
           <button
             aria-busy={hostBusy ? true : undefined}
-            className={hostBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+            className="primary-button"
             disabled={busy}
             onClick={() => void onRunHost(repairQueuedRun.id)}
             type="button"
           >
-            {hostBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
-            {hostBusy ? "실행 중..." : "repair 실행"}
+            {hostBusy ? "실행 요청 중..." : "repair 실행"}
           </button>
         </div>
       );
@@ -1452,13 +1449,12 @@ function NextAction({
         </div>
         <button
           aria-busy={cancelBusy ? true : undefined}
-          className={cancelBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+          className="primary-button"
           disabled={busy}
           onClick={() => void onCancelHost(runningRun.id)}
           type="button"
         >
-          {cancelBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
-          {cancelBusy ? "중지 중..." : "실행 중지"}
+          {cancelBusy ? "중지 요청 중..." : "실행 중지"}
         </button>
       </div>
     );
@@ -1474,13 +1470,12 @@ function NextAction({
         </div>
         <button
           aria-busy={hostBusy ? true : undefined}
-          className={hostBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+          className="primary-button"
           disabled={busy}
           onClick={() => void onRunHost(queuedRun.id)}
           type="button"
         >
-          {hostBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
-          {hostBusy ? "실행 중..." : "host 실행"}
+          {hostBusy ? "실행 요청 중..." : "host 실행"}
         </button>
       </div>
     );
