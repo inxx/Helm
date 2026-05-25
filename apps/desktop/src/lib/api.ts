@@ -8,6 +8,7 @@ import type {
   ApprovalSummary,
   CreatePlanningSessionInput,
   CreateTaskInput,
+  DecidePlanDraftInput,
   EpicSummary,
   GitBranchSummary,
   GitCommitSummary,
@@ -89,6 +90,12 @@ export const api = {
   },
   savePlanDraftRevision(projectId: string, sessionId: string, input: SavePlanDraftRevisionInput) {
     return invoke<PlanningSessionDetail>("save_plan_draft_revision", { projectId, sessionId, input });
+  },
+  approvePlanDraft(projectId: string, draftId: string, input: DecidePlanDraftInput = {}) {
+    return invoke<PlanningSessionDetail>("approve_plan_draft", { projectId, draftId, input });
+  },
+  rejectPlanDraft(projectId: string, draftId: string, input: DecidePlanDraftInput = {}) {
+    return invoke<PlanningSessionDetail>("reject_plan_draft", { projectId, draftId, input });
   },
   materializePlanDraft(projectId: string, draftId: string) {
     return invoke<PlanningMaterializationSummary>("materialize_plan_draft", { projectId, draftId });

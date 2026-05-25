@@ -31,6 +31,14 @@ Helm에는 정리된 Task를 실행하는 화면만 있으면 부족하다.
 - Helm DB의 Planning Session, Plan Draft, Task가 기준 소스다.
 - Planning Workspace는 chat UI가 아니라 project planning canvas다.
 
+## 2026-05-25 구현 메모
+
+- Planning session/revision/materialization은 repo-local SQLite source of truth로 저장된다.
+- draft revision은 `.helm/planning/{session_id}/draft-v{n}.md` artifact와 `content_hash`를 남긴다.
+- draft approval은 `planning_approvals` 전용 테이블에 저장되며, Task 생성은 `approve_plan_draft` 후 `materialize_plan_draft`에서만 가능하다.
+- 새 planner contract가 `taskCards.ownedFiles/sharedFiles/generatedFiles/generatedFilePolicy/reportContract`를 포함하면 backend가 parallel ownership overlap과 report/generated policy 누락을 차단한다.
+- 남은 UX 정리는 `PlanningSessionStub` 제거, materialization repair command, browser/frontend smoke 자동화다.
+
 ## 화면 구조
 
 ```text

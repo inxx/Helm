@@ -29,6 +29,9 @@ interface PlanningSessionStub {
   draft: PlannerDraft;
   revision: number;
   currentDraftId?: string | null;
+  approvalStatus?: string | null;
+  artifactPath?: string | null;
+  contentHash?: string | null;
   materializationId?: string | null;
   taskId?: string;
   taskIds?: string[];
@@ -92,6 +95,11 @@ interface PlannerTaskCard {
   goal: string;
   inputs: string[];
   outputs: string[];
+  ownedFiles: string[];
+  sharedFiles: string[];
+  generatedFiles: string[];
+  generatedFilePolicy: string;
+  reportContract: string;
   acceptanceCriteria: string[];
   verificationGates: string[];
 }
@@ -703,6 +711,9 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
       if (!savedDraftId) {
         throw new Error("승인할 Plan Document revision이 없습니다.");
       }
+      await api.approvePlanDraft(projectSnapshot.project.id, savedDraftId, {
+        reason: "User approved Plan Document from Planning workspace",
+      });
       const materialization = await api.materializePlanDraft(projectSnapshot.project.id, savedDraftId);
       const createdTaskIds = materialization.taskIds;
       const firstTaskId = createdTaskIds[0];
@@ -726,6 +737,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                 status: "Approved",
                 updatedLabel: "방금 전",
                 currentDraftId: savedDraftId,
+                approvalStatus: "Approved",
                 materializationId: materialization.id,
                 taskId: firstTaskId,
                 taskIds: createdTaskIds,
@@ -1308,6 +1320,11 @@ function buildExecutablePlan(planTitle: string, tasks: PlannerDraftTask[]): Plan
       goal: task.description,
       inputs: ["Plan Document", planTitle],
       outputs: [`${task.title} implementation artifact`, `${task.title} verification evidence`],
+      ownedFiles: [],
+      sharedFiles: [],
+      generatedFiles: [],
+      generatedFilePolicy: "Generated files are read-only unless an explicit generation command is listed in verification gates.",
+      reportContract: "taskId/status/changedFiles/verification/blockers",
       acceptanceCriteria: task.acceptanceCriteria,
       verificationGates: [`gate-${index + 1}`],
     })),
@@ -1395,6 +1412,15 @@ function normalizeTaskCard(value: Record<string, unknown>, index: number): Plann
     goal: stringField(value, ["goal", "description"]) ?? "승인된 계획 범위를 구현합니다.",
     inputs: stringArrayField(value, ["inputs"]),
     outputs: stringArrayField(value, ["outputs"]),
+    ownedFiles: stringArrayField(value, ["ownedFiles", "owned_files"]),
+    sharedFiles: stringArrayField(value, ["sharedFiles", "shared_files", "readOnlyFiles", "read_only_files"]),
+    generatedFiles: stringArrayField(value, ["generatedFiles", "generated_files"]),
+    generatedFilePolicy:
+      stringField(value, ["generatedFilePolicy", "generated_file_policy", "generatedPolicy", "generated_policy"]) ??
+      "Generated files are read-only unless an explicit generation command is listed in verification gates.",
+    reportContract:
+      stringField(value, ["reportContract", "report_contract", "reportFormat", "report_format"]) ??
+      "taskId/status/changedFiles/verification/blockers",
     acceptanceCriteria: stringArrayField(value, ["acceptanceCriteria", "acceptance_criteria"]),
     verificationGates: stringArrayField(value, ["verificationGates", "verification_gates"]),
   };
@@ -1812,6 +1838,12 @@ function sessionStubFromSummary(summary: PlanningSessionSummary): PlanningSessio
       : null;
   const draft = parsedDraft ?? fallbackDraft;
   const materializedTaskIds = summary.materialization?.taskIds ?? [];
+  const artifactNote = summary.currentDraft?.artifactPath
+    ? ` Artifact: ${summary.currentDraft.artifactPath}.`
+    : "";
+  const approvalNote = summary.currentApproval?.status
+    ? ` Approval: ${summary.currentApproval.status}.`
+    : "";
   return {
     id: summary.id,
     title: summary.title,
@@ -1832,7 +1864,7 @@ function sessionStubFromSummary(summary: PlanningSessionSummary): PlanningSessio
             {
               id: `${summary.currentDraft.id}-planner`,
               role: "planner" as const,
-              content: `저장된 Plan Document v${summary.currentDraft.revision}을 불러왔습니다. ${summary.currentDraft.taskCount}개 Task, ${summary.currentDraft.taskGraphCount}개 graph node, ${summary.currentDraft.verificationGateCount}개 gate가 있습니다.`,
+              content: `저장된 Plan Document v${summary.currentDraft.revision}을 불러왔습니다. ${summary.currentDraft.taskCount}개 Task, ${summary.currentDraft.taskGraphCount}개 graph node, ${summary.currentDraft.verificationGateCount}개 gate가 있습니다.${approvalNote}${artifactNote}`,
               createdLabel: createdLabelFromIso(summary.currentDraft.createdAt),
             },
           ]
@@ -1841,6 +1873,9 @@ function sessionStubFromSummary(summary: PlanningSessionSummary): PlanningSessio
     draft,
     revision: summary.currentDraft?.revision ?? 0,
     currentDraftId: summary.currentDraftId,
+    approvalStatus: summary.currentApproval?.status ?? null,
+    artifactPath: summary.currentDraft?.artifactPath ?? null,
+    contentHash: summary.currentDraft?.contentHash ?? null,
     materializationId: summary.materialization?.id ?? null,
     taskId: materializedTaskIds[0],
     taskIds: materializedTaskIds,

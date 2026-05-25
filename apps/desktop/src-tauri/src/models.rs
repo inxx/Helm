@@ -374,6 +374,12 @@ pub struct SavePlanDraftRevisionInput {
     pub planner_message: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecidePlanDraftInput {
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanningMessageSummary {
@@ -396,6 +402,8 @@ pub struct PlanDraftRevisionSummary {
     pub title: String,
     pub summary: String,
     pub plan_markdown: Option<String>,
+    pub artifact_path: Option<String>,
+    pub content_hash: Option<String>,
     pub draft_json: Value,
     pub validation: Value,
     pub task_count: i64,
@@ -403,6 +411,22 @@ pub struct PlanDraftRevisionSummary {
     pub barrier_count: i64,
     pub verification_gate_count: i64,
     pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanningApprovalSummary {
+    pub id: String,
+    pub project_id: String,
+    pub session_id: String,
+    pub draft_id: String,
+    pub status: String,
+    pub requested_reason: String,
+    pub decision_reason: Option<String>,
+    pub requested_at: String,
+    pub decided_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -430,6 +454,7 @@ pub struct PlanningSessionSummary {
     pub jira_state: String,
     pub current_draft_id: Option<String>,
     pub current_draft: Option<PlanDraftRevisionSummary>,
+    pub current_approval: Option<PlanningApprovalSummary>,
     pub materialization: Option<PlanningMaterializationSummary>,
     pub message_count: i64,
     pub created_at: String,

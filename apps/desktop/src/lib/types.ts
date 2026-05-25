@@ -165,6 +165,10 @@ export interface SavePlanDraftRevisionInput {
   plannerMessage?: string | null;
 }
 
+export interface DecidePlanDraftInput {
+  reason?: string | null;
+}
+
 export interface PlanningMessageSummary {
   id: string;
   projectId: string;
@@ -183,6 +187,8 @@ export interface PlanDraftRevisionSummary {
   title: string;
   summary: string;
   planMarkdown: string | null;
+  artifactPath: string | null;
+  contentHash: string | null;
   draftJson: unknown;
   validation: unknown;
   taskCount: number;
@@ -190,6 +196,20 @@ export interface PlanDraftRevisionSummary {
   barrierCount: number;
   verificationGateCount: number;
   createdAt: string;
+}
+
+export interface PlanningApprovalSummary {
+  id: string;
+  projectId: string;
+  sessionId: string;
+  draftId: string;
+  status: "Pending" | "Approved" | "Rejected" | string;
+  requestedReason: string;
+  decisionReason: string | null;
+  requestedAt: string;
+  decidedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PlanningMaterializationSummary {
@@ -213,6 +233,7 @@ export interface PlanningSessionSummary {
   jiraState: "Linked" | "Missing" | "AlreadyTracked" | string;
   currentDraftId: string | null;
   currentDraft: PlanDraftRevisionSummary | null;
+  currentApproval: PlanningApprovalSummary | null;
   materialization: PlanningMaterializationSummary | null;
   messageCount: number;
   createdAt: string;

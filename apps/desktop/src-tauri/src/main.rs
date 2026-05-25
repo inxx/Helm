@@ -5,13 +5,13 @@ mod models;
 use crate::models::{
     AgentRunSummary, AiConnectionCheckResult, AiModelRefreshResult, AppSettings, ApprovalSummary,
     CommandError, CommandResult, CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput,
-    EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary, GitFileStatus,
-    GitRepositoryState, NodeRuntimeSummary, OrchestratorSettings, PlannerConversationInput,
-    PlannerConversationResult, PlanningMaterializationSummary, PlanningSessionDetail,
-    PlanningSessionSummary, ProjectContext, ProjectSettingsPatch, ProjectSnapshot, ProjectSummary,
-    RunEventSummary, RunnerCheckResult, RunnerTemplateSummary, SavePlanDraftRevisionInput,
-    TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary, TaskTimelineEntry,
-    TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
+    DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary,
+    GitFileStatus, GitRepositoryState, NodeRuntimeSummary, OrchestratorSettings,
+    PlannerConversationInput, PlannerConversationResult, PlanningMaterializationSummary,
+    PlanningSessionDetail, PlanningSessionSummary, ProjectContext, ProjectSettingsPatch,
+    ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult, RunnerTemplateSummary,
+    SavePlanDraftRevisionInput, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
+    TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -463,7 +463,37 @@ fn save_plan_draft_revision(
 ) -> CommandResult<PlanningSessionDetail> {
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
-    db::save_plan_draft_revision(&mut conn, &project_id, &session_id, input)
+    db::save_plan_draft_revision(
+        &mut conn,
+        &context.root_path,
+        &project_id,
+        &session_id,
+        input,
+    )
+}
+
+#[tauri::command]
+fn approve_plan_draft(
+    project_id: String,
+    draft_id: String,
+    input: DecidePlanDraftInput,
+    state: State<'_, AppState>,
+) -> CommandResult<PlanningSessionDetail> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::approve_plan_draft(&mut conn, &project_id, &draft_id, input)
+}
+
+#[tauri::command]
+fn reject_plan_draft(
+    project_id: String,
+    draft_id: String,
+    input: DecidePlanDraftInput,
+    state: State<'_, AppState>,
+) -> CommandResult<PlanningSessionDetail> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::reject_plan_draft(&mut conn, &project_id, &draft_id, input)
 }
 
 #[tauri::command]
@@ -2974,6 +3004,10 @@ fn build_planner_prompt(project_root: &Path, input: &PlannerConversationInput) -
 - tasks 배열은 절대 비우지 않는다. 범위가 모호하면 "범위 확정" 같은 작은 확인 Task를 1개 이상 넣는다.
 - executablePlan은 반드시 채운다. taskGraph, taskCards, ownershipMap, barriers, verificationGates는 Helm이 실제 실행 가능한 계획으로 검증한다.
 - 병렬 가능한 작업은 taskGraph.dependsOn을 비워 같은 batch에 놓고, 직렬 작업은 dependsOn으로 선행 Task id를 명시한다.
+- 각 taskCard에는 ownedFiles, sharedFiles, generatedFiles, generatedFilePolicy, reportContract를 채운다.
+- 병렬 가능한 taskCard끼리는 ownedFiles가 겹치면 안 되고, 한 task의 sharedFiles는 병렬 task의 ownedFiles에 들어가면 안 된다.
+- generatedFiles가 있으면 generatedFilePolicy에 직접 수정 금지 또는 generation command 정책을 명시한다.
+- reportContract는 작업자가 완료 보고에 포함해야 하는 필드를 slash로 나열한다. 기본값은 "taskId/status/changedFiles/verification/blockers"다.
 - barriers에는 blocker/approval/manual decision을, verificationGates에는 실행할 명령 또는 수동 검증 기준과 필요한 evidence를 넣는다.
 - UI 문구/카피 수정 목표라면 각 관련 task에 copyChanges를 넣어 사용자가 승인 전 "현재 문구 -> 제안 문구 -> 이유"를 볼 수 있게 한다.
 - 문구만 수정하라는 목표는 구현 범위를 파일/화면/문구로 좁히고, 레이아웃/로직 변경을 acceptanceCriteria와 risks에서 명시적으로 제외한다.
@@ -3022,6 +3056,11 @@ JSON schema:
         "goal": "string",
         "inputs": ["string"],
         "outputs": ["string"],
+        "ownedFiles": ["repo-relative path"],
+        "sharedFiles": ["repo-relative read-only/shared path"],
+        "generatedFiles": ["repo-relative generated path"],
+        "generatedFilePolicy": "string",
+        "reportContract": "taskId/status/changedFiles/verification/blockers",
         "acceptanceCriteria": ["string"],
         "verificationGates": ["gate-id"]
       }}
@@ -4440,8 +4479,9 @@ fn create_terminal_startup_dir(
     let startup_dir =
         env::temp_dir().join(format!("helm-zdotdir-{}-{safe_id}", std::process::id()));
     if startup_dir.exists() {
-        fs::remove_dir_all(&startup_dir)
-            .map_err(|err| CommandError::io("터미널 startup 디렉토리를 초기화하지 못했습니다.", err))?;
+        fs::remove_dir_all(&startup_dir).map_err(|err| {
+            CommandError::io("터미널 startup 디렉토리를 초기화하지 못했습니다.", err)
+        })?;
     }
     fs::create_dir_all(&startup_dir)
         .map_err(|err| CommandError::io("터미널 startup 디렉토리를 만들지 못했습니다.", err))?;
@@ -5348,6 +5388,8 @@ fn main() {
             create_planning_session,
             get_planning_session,
             save_plan_draft_revision,
+            approve_plan_draft,
+            reject_plan_draft,
             materialize_plan_draft,
             list_runner_templates,
             apply_runner_template,

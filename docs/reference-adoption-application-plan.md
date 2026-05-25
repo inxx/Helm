@@ -100,9 +100,11 @@ Helm backend가 상태, 승인, 다음 role, artifact, gate, audit의 source of 
 
 ### 현재 Helm 상태
 
-- `PlanningScreen`은 DB-backed planning session list/revision/materialization을 사용하기 시작했다. 단, 컴포넌트 내부 이름과 일부 optimistic local mutation은 아직 `PlanningSessionStub`로 남아 있다.
+- `PlanningScreen`은 DB-backed planning session list/revision/materialization을 사용하고, draft approval을 `approve_plan_draft -> materialize_plan_draft`로 분리했다. 단, 컴포넌트 내부 이름과 일부 optimistic local mutation은 아직 `PlanningSessionStub`로 남아 있다.
 - `docs/ai-plan-conversation-approval-feature.md`에 DB-backed planning session 설계가 이미 있다.
 - 생성된 Task는 `planning_materializations`/`planning_materialization_items` relation과 external ref로 draft provenance를 남긴다.
+- migration `0009_planning_approvals_artifacts.sql`로 `planning_approvals`, draft `artifact_path`, `content_hash`가 추가됐다.
+- materialize는 승인되지 않은 draft를 `PlanDraftApprovalRequired`로 차단하고, 기존 materialization의 Task 누락은 `MaterializationBroken`으로 멈춘다.
 
 ### 적용 단계
 
@@ -1013,18 +1015,17 @@ Command return:
 트랜잭션 경계:
 
 - `create_planning_session`: session + first user message + audit를 하나의 transaction으로 묶는다.
-- `save_plan_draft_revision`: artifact temp write 준비 후 next version 계산 + draft insert + session active_draft_id update를 DB transaction으로 묶고, commit 뒤 temp file을 final path로 rename한다.
+- `save_plan_draft_revision`: artifact `.tmp -> final` 파일 쓰기를 먼저 성공시킨 뒤 next version 계산 + draft insert + pending approval + session active_draft_id update를 DB transaction으로 묶는다.
 - `approve_plan_draft`: pending planning approval update + draft status update + session status update + audit를 묶는다.
 - `materialize_plan_draft`: draft status update + task/epic create + materialization batch/items + external refs + audit를 하나의 transaction으로 묶는다.
 
 주의점:
 
-- artifact file write와 DB transaction은 완전 atomic하지 않다. Planning draft는 `.tmp` 파일을 쓰고 DB commit 후 rename한다. commit 실패 시 `.tmp`만 cleanup한다.
-- DB commit 후 final rename이 실패하면 DB에는 artifact path가 있는데 파일이 없는 상태가 된다. P0에서는 rename 실패 시 draft row를 `Draft`로 되돌리거나 `artifact_path=NULL`로 보정하는 recovery transaction을 실행하고, 사용자에게 `ArtifactFinalizeFailed` error를 보여준다.
+- artifact file write와 DB transaction은 완전 atomic하지 않다. 현재 구현은 `.tmp -> final` 파일 쓰기를 DB insert 전에 끝내 DB row가 missing artifact를 가리키는 상태를 피한다. DB commit 실패 시 orphan artifact가 남을 수 있으므로 cleanup/retention job은 후속으로 둔다.
 - draft artifact path는 `validate_relative_artifact_path`와 같은 방어를 재사용한다.
 - `save_plan_draft_revision`이 `ReadyForApproval` draft를 만들 때 pending `planning_approvals` row를 함께 만든다. 같은 draft에 이미 approval이 있으면 새 approval을 만들지 않는다.
-- `approve_plan_draft`는 draft status가 `ReadyForApproval`이고 pending planning approval이 있을 때만 성공한다.
-- `materialize_plan_draft`는 draft status가 `Approved`일 때만 성공한다.
+- `approve_plan_draft`는 pending planning approval이 있을 때만 성공한다.
+- `materialize_plan_draft`는 planning approval이 `Approved`일 때만 성공한다.
 - draft JSON에서 task 후보가 0개면 `EmptyPlanDraft`를 반환하고 Task를 만들지 않는다.
 - `materialize_plan_draft`는 idempotency를 가져야 한다. 같은 approved/materialized draft를 두 번 materialize하면 기존 `planning_materializations` batch와 item Task 목록을 반환하고 새 Task를 만들지 않는다.
 - 기존 materialization batch/item row가 있는데 item의 `task_id`가 `NULL`이거나 task lookup에 실패하면 자동으로 새 Task를 만들지 않는다. `MaterializationBroken`을 반환하고, 별도 `repair_planning_materialization` command에서 사용자 확인 후 복구한다.
@@ -1067,7 +1068,7 @@ materializePlanDraft(projectId, draftId)
 2. 화면 진입 시 `listPlanningSessions`.
 3. session 선택 시 `getPlanningSession`.
 4. user message append 후 `runPlannerConversation`은 기존 command를 임시 사용하되, 결과를 `planning_messages`와 `plan_draft_revisions`에 저장한다.
-5. "Task로 만들기"는 `materializePlanDraft`를 호출한다.
+5. "Task 생성 승인"은 `approvePlanDraft`를 호출한 뒤 `materializePlanDraft`를 호출한다.
 
 상태 저장 원칙:
 
@@ -1807,7 +1808,7 @@ Planning:
 - materialize same multi-task draft twice is idempotent
 - `planning_materializations.UNIQUE(draft_id)` and `planning_materialization_items.UNIQUE(materialization_id, source_index)` prevent duplicate Task creation
 - broken materialization with missing task returns `MaterializationBroken`
-- artifact final rename failure leaves no DB row pointing at a missing file
+- artifact write succeeds before DB row points at the artifact path
 - materialize draft creates task and relation
 - draft artifact path validation
 

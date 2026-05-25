@@ -1,7 +1,7 @@
 # Helm Reference Product Quality Upgrade Plan
 
 작성일: 2026-05-25
-상태: In progress (Q1 vertical slice implemented 2026-05-25)
+상태: In progress (Q1 durable approval/artifact follow-up implemented 2026-05-25)
 
 ## 목적
 
@@ -31,8 +31,8 @@ Helm은 AI 작업자 실행 앱이 아니라, 로컬 repo에서 계획 -> 실행
 
 현재 코드와 문서 기준의 주요 gap:
 
-- Planning은 2026-05-25 Q1 vertical slice로 DB-backed session/revision/materialization을 갖기 시작했다. 남은 gap은 `planning_approvals`, artifact file export/hash, frontend optimistic local mutation 제거다.
-- `Executable Planning Contract`는 2026-05-25 Q1 vertical slice에서 planner prompt/schema/frontend type/backend validation에 연결됐다. 남은 gap은 `ownedFiles` overlap, report contract, richer graph validation이다.
+- Planning은 2026-05-25 Q1 vertical slice로 DB-backed session/revision/materialization을 갖고, follow-up으로 `planning_approvals`, draft artifact path/hash, 승인 후 materialize gate까지 연결됐다. 남은 gap은 materialization repair command와 frontend local stub 제거다.
+- `Executable Planning Contract`는 2026-05-25 Q1 vertical slice에서 planner prompt/schema/frontend type/backend validation에 연결됐다. follow-up으로 새 contract field가 있는 draft의 `ownedFiles/sharedFiles` overlap, `generatedFilePolicy`, `reportContract` 검증이 추가됐다. 남은 gap은 report result 저장과 richer graph view다.
 - automation policy가 project setting이 아니라 backend helper에 하드코딩되어 있다.
 - run lifecycle metadata는 일부 있으나 claim/start/running/stale 구분이 충분하지 않다.
 - blocker/evidence UI는 생겼지만 backend evidence feed DTO가 없어 raw artifact parsing이 frontend에 남아 있다.
@@ -112,18 +112,23 @@ Helm은 AI 작업자 실행 앱이 아니라, 로컬 repo에서 계획 -> 실행
 
 - 완료:
   - migration `apps/desktop/src-tauri/migrations/0008_planning_workspace.sql` 추가.
+  - migration `apps/desktop/src-tauri/migrations/0009_planning_approvals_artifacts.sql` 추가.
   - `planning_sessions`, `planning_messages`, `plan_draft_revisions`, `planning_materializations`, `planning_materialization_items` 생성.
-  - Tauri command 추가: `list_planning_sessions`, `create_planning_session`, `get_planning_session`, `save_plan_draft_revision`, `materialize_plan_draft`.
+  - `planning_approvals` 생성 및 기존 current draft approval backfill.
+  - Tauri command 추가: `list_planning_sessions`, `create_planning_session`, `get_planning_session`, `save_plan_draft_revision`, `approve_plan_draft`, `reject_plan_draft`, `materialize_plan_draft`.
   - `build_planner_prompt` JSON schema에 `executablePlan.taskGraph/taskCards/ownershipMap/barriers/verificationGates` 추가.
+  - `build_planner_prompt` JSON schema에 `taskCards.ownedFiles/sharedFiles/generatedFiles/generatedFilePolicy/reportContract` 추가.
   - backend draft 저장 시 `executablePlan` presence/count validation 추가.
+  - 새 contract field가 있는 draft에 대해 parallel `ownedFiles` overlap, `sharedFiles` vs parallel `ownedFiles`, graph/card id consistency, missing report/generated policy validation 추가.
+  - draft markdown artifact를 `.helm/planning/{session_id}/draft-v{n}.md`에 저장하고 DB row에 `artifact_path`, `content_hash`를 남김.
+  - `materialize_plan_draft`는 승인되지 않은 draft를 `PlanDraftApprovalRequired`로 차단하고, 기존 materialization의 Task가 사라졌으면 `MaterializationBroken`을 반환.
   - Planning UI가 DB session list를 로드하고 draft revision을 저장한 뒤 `materializePlanDraft`로 Task를 생성한다.
+  - Planning UI 승인 흐름이 `approvePlanDraft -> materializePlanDraft` 순서로 분리됐다.
   - Plan preview에 Task Graph, Barriers, Verification Gates 요약을 표시한다.
 - 남음:
-  - `planning_approvals` table과 DraftApproval approve/reject command.
-  - `.helm/planning/{session_id}/draft-v{n}.md` artifact export/hash/atomic write.
-  - `ownedFiles/sharedFiles/generated file policy/reportContract` deep validation.
-  - materialized Task 삭제 시 `MaterializationBroken` repair path.
+  - `MaterializationBroken`을 사용자가 확인하고 복구하는 `repair_planning_materialization` command/UX.
   - `PlanningSessionStub` 이름과 일부 optimistic local mutation 제거.
+  - report result를 `reportContract` 기준으로 저장/표시하는 evidence DTO.
   - browser smoke 및 frontend automated smoke.
 
 Backend 작업:
@@ -182,7 +187,7 @@ Frontend 작업:
 | planner가 executablePlan 없는 JSON을 반환할 수 있음 | validation status `Invalid`, approve disabled |
 | 기존 prompt schema와 문서 contract 불일치 | `build_planner_prompt` JSON schema에 `executablePlan` 추가 |
 | 여러 Task materialize 중 일부 실패 | transaction으로 묶고 실패 시 rollback |
-| artifact write와 DB transaction atomicity | artifact temp write 후 DB commit, 실패 시 cleanup 또는 orphan marker |
+| artifact write와 DB transaction atomicity | 현재는 `.tmp -> final` 파일 쓰기를 먼저 성공시킨 뒤 DB row를 저장해 DB가 missing artifact를 가리키는 상태를 피한다. DB 실패 시 orphan artifact가 남을 수 있으므로 retention/cleanup은 후속으로 둔다. |
 
 완료 기준:
 

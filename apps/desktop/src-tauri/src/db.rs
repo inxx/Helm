@@ -1,12 +1,13 @@
 use crate::git;
 use crate::models::{
     AgentRunSummary, ApprovalSummary, AuditLogEntry, CommandError, CommandResult, CreateEpicInput,
-    CreatePlanningSessionInput, CreateTaskInput, EffectiveSettings, EpicSummary, GitFileStatus,
-    PlanDraftRevisionSummary, PlanningMaterializationSummary, PlanningMessageSummary,
-    PlanningSessionDetail, PlanningSessionSummary, ProjectSettingsPatch, ProjectSummary,
-    RunEventSummary, SavePlanDraftRevisionInput, TaskCounts, TaskExternalRefInput,
-    TaskExternalRefSummary, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
-    TaskTimelineEntry, TaskWorktreeSummary,
+    CreatePlanningSessionInput, CreateTaskInput, DecidePlanDraftInput, EffectiveSettings,
+    EpicSummary, GitFileStatus, PlanDraftRevisionSummary, PlanningApprovalSummary,
+    PlanningMaterializationSummary, PlanningMessageSummary, PlanningSessionDetail,
+    PlanningSessionSummary, ProjectSettingsPatch, ProjectSummary, RunEventSummary,
+    SavePlanDraftRevisionInput, TaskCounts, TaskExternalRefInput, TaskExternalRefSummary,
+    TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary, TaskTimelineEntry,
+    TaskWorktreeSummary,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -23,7 +24,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 8;
+const SUPPORTED_SCHEMA_VERSION: i64 = 9;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
@@ -32,6 +33,7 @@ const PHASE5_MIGRATION: &str = include_str!("../migrations/0005_run_events.sql")
 const PHASE6_MIGRATION: &str = include_str!("../migrations/0006_run_lifecycle.sql");
 const PHASE7_MIGRATION: &str = include_str!("../migrations/0007_repair_run_links.sql");
 const PHASE8_MIGRATION: &str = include_str!("../migrations/0008_planning_workspace.sql");
+const PHASE9_MIGRATION: &str = include_str!("../migrations/0009_planning_approvals_artifacts.sql");
 const TASK_STATUS_ORDER: &[&str] = &[
     "Planned",
     "Ready",
@@ -121,6 +123,18 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
     } else if !table_exists(conn, "planning_sessions")? {
         apply_schema_patch(conn, PHASE8_MIGRATION)?;
     }
+    if current_version < 9 {
+        apply_migration(
+            conn,
+            9,
+            "phase9_planning_approvals_artifacts",
+            PHASE9_MIGRATION,
+        )?;
+    } else if !table_exists(conn, "planning_approvals")?
+        || !table_has_column(conn, "plan_draft_revisions", "artifact_path")?
+    {
+        apply_phase9_schema_patch(conn)?;
+    }
     Ok(())
 }
 
@@ -151,6 +165,85 @@ fn apply_schema_patch(conn: &mut Connection, sql: &str) -> CommandResult<()> {
         .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
     tx.execute_batch(sql)
         .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
+    tx.commit()
+        .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
+    Ok(())
+}
+
+fn apply_phase9_schema_patch(conn: &mut Connection) -> CommandResult<()> {
+    let tx = conn
+        .transaction()
+        .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
+    if !table_has_column(&tx, "plan_draft_revisions", "artifact_path")? {
+        tx.execute_batch("ALTER TABLE plan_draft_revisions ADD COLUMN artifact_path TEXT;")
+            .map_err(|err| {
+                CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err)
+            })?;
+    }
+    if !table_has_column(&tx, "plan_draft_revisions", "content_hash")? {
+        tx.execute_batch("ALTER TABLE plan_draft_revisions ADD COLUMN content_hash TEXT;")
+            .map_err(|err| {
+                CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err)
+            })?;
+    }
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS planning_approvals (
+           id TEXT PRIMARY KEY,
+           project_id TEXT NOT NULL,
+           session_id TEXT NOT NULL,
+           draft_id TEXT NOT NULL UNIQUE,
+           status TEXT NOT NULL,
+           requested_reason TEXT NOT NULL,
+           decision_reason TEXT,
+           requested_at TEXT NOT NULL,
+           decided_at TEXT,
+           created_at TEXT NOT NULL,
+           updated_at TEXT NOT NULL,
+           CHECK (status IN ('Pending', 'Approved', 'Rejected')),
+           FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+           FOREIGN KEY (session_id) REFERENCES planning_sessions(id) ON DELETE CASCADE,
+           FOREIGN KEY (draft_id) REFERENCES plan_draft_revisions(id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_planning_approvals_session_status
+           ON planning_approvals(session_id, status);
+
+         INSERT INTO planning_approvals (
+           id,
+           project_id,
+           session_id,
+           draft_id,
+           status,
+           requested_reason,
+           decision_reason,
+           requested_at,
+           decided_at,
+           created_at,
+           updated_at
+         )
+         SELECT
+           lower(hex(randomblob(16))),
+           drafts.project_id,
+           drafts.session_id,
+           drafts.id,
+           CASE WHEN sessions.status = 'Approved' THEN 'Approved' ELSE 'Pending' END,
+           'Backfilled approval request for existing Plan Document revision',
+           CASE WHEN sessions.status = 'Approved' THEN 'Backfilled from approved planning session' ELSE NULL END,
+           drafts.created_at,
+           CASE WHEN sessions.status = 'Approved' THEN sessions.updated_at ELSE NULL END,
+           drafts.created_at,
+           sessions.updated_at
+         FROM plan_draft_revisions AS drafts
+         JOIN planning_sessions AS sessions
+           ON sessions.id = drafts.session_id
+          AND sessions.project_id = drafts.project_id
+         WHERE sessions.current_draft_id = drafts.id
+           AND NOT EXISTS (
+             SELECT 1
+             FROM planning_approvals AS approvals
+             WHERE approvals.draft_id = drafts.id
+           );",
+    )
+    .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
     tx.commit()
         .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
     Ok(())
@@ -596,6 +689,7 @@ pub fn get_planning_session(
 
 pub fn save_plan_draft_revision(
     conn: &mut Connection,
+    root: &Path,
     project_id: &str,
     session_id: &str,
     input: SavePlanDraftRevisionInput,
@@ -623,6 +717,11 @@ pub fn save_plan_draft_revision(
     let revision = next_plan_draft_revision(conn, session_id)?;
     let id = new_id();
     let timestamp = now();
+    let plan_markdown = input
+        .plan_markdown
+        .unwrap_or_else(|| plan_markdown_from_draft_json(&input.draft_json, &session.goal_text));
+    let artifact_path = planning_draft_artifact_path(session_id, revision);
+    let content_hash = stable_content_hash(&plan_markdown);
     let draft_json = serde_json::to_string(&input.draft_json).map_err(|err| {
         CommandError::with_details(
             "ValidationFailed",
@@ -638,16 +737,28 @@ pub fn save_plan_draft_revision(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
+    write_planning_artifact(root, &artifact_path, &plan_markdown)?;
+
     let tx = conn.transaction().map_err(|err| {
         CommandError::database("Plan Document revision을 저장하지 못했습니다.", err)
     })?;
     tx.execute(
+        "UPDATE planning_approvals
+         SET status = 'Rejected',
+             decision_reason = 'Superseded by newer Plan Document revision',
+             decided_at = ?1,
+             updated_at = ?1
+         WHERE project_id = ?2 AND session_id = ?3 AND status = 'Pending'",
+        params![timestamp, project_id, session_id],
+    )
+    .map_err(|err| CommandError::database("이전 계획 승인 요청을 정리하지 못했습니다.", err))?;
+    tx.execute(
         "INSERT INTO plan_draft_revisions (
            id, project_id, session_id, revision, title, summary, plan_markdown,
-           draft_json, validation_json, task_count, task_graph_count, barrier_count,
-           verification_gate_count, created_at
+           artifact_path, content_hash, draft_json, validation_json, task_count,
+           task_graph_count, barrier_count, verification_gate_count, created_at
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             id,
             project_id,
@@ -655,7 +766,9 @@ pub fn save_plan_draft_revision(
             revision,
             title,
             summary,
-            input.plan_markdown,
+            plan_markdown,
+            artifact_path,
+            content_hash,
             draft_json,
             validation_json,
             validation.task_count,
@@ -666,6 +779,22 @@ pub fn save_plan_draft_revision(
         ],
     )
     .map_err(|err| CommandError::database("Plan Document revision을 저장하지 못했습니다.", err))?;
+    tx.execute(
+        "INSERT INTO planning_approvals (
+           id, project_id, session_id, draft_id, status, requested_reason,
+           decision_reason, requested_at, decided_at, created_at, updated_at
+         )
+         VALUES (?1, ?2, ?3, ?4, 'Pending', ?5, NULL, ?6, NULL, ?6, ?6)",
+        params![
+            new_id(),
+            project_id,
+            session_id,
+            id,
+            format!("Plan Document revision {revision} ready for approval"),
+            timestamp
+        ],
+    )
+    .map_err(|err| CommandError::database("계획 승인 요청을 저장하지 못했습니다.", err))?;
     tx.execute(
         "UPDATE planning_sessions
          SET title = ?1,
@@ -709,12 +838,31 @@ pub fn save_plan_draft_revision(
     get_planning_session(conn, project_id, session_id)
 }
 
+pub fn approve_plan_draft(
+    conn: &mut Connection,
+    project_id: &str,
+    draft_id: &str,
+    input: DecidePlanDraftInput,
+) -> CommandResult<PlanningSessionDetail> {
+    decide_plan_draft(conn, project_id, draft_id, input, "Approved")
+}
+
+pub fn reject_plan_draft(
+    conn: &mut Connection,
+    project_id: &str,
+    draft_id: &str,
+    input: DecidePlanDraftInput,
+) -> CommandResult<PlanningSessionDetail> {
+    decide_plan_draft(conn, project_id, draft_id, input, "Rejected")
+}
+
 pub fn materialize_plan_draft(
     conn: &mut Connection,
     project_id: &str,
     draft_id: &str,
 ) -> CommandResult<PlanningMaterializationSummary> {
     if let Some(existing) = get_materialization_by_draft(conn, project_id, draft_id)? {
+        ensure_materialization_tasks_exist(conn, &existing)?;
         return Ok(existing);
     }
 
@@ -725,6 +873,7 @@ pub fn materialize_plan_draft(
         ));
     }
     validate_plan_draft_json(&draft.draft_json)?;
+    ensure_plan_draft_approved(conn, project_id, draft_id)?;
     let session = get_planning_session(conn, project_id, &draft.session_id)?.session;
     let draft_tasks = plan_draft_task_values(&draft.draft_json);
     if draft_tasks.is_empty() {
@@ -3737,6 +3886,15 @@ struct PlanDraftValidationStats {
     verification_gate_count: i64,
 }
 
+struct PlanTaskCardContract {
+    id: String,
+    owned_files: BTreeSet<String>,
+    shared_files: BTreeSet<String>,
+    has_generated_file_policy: bool,
+    has_report_contract: bool,
+    uses_deep_contract: bool,
+}
+
 fn planning_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanningSessionRow> {
     Ok(PlanningSessionRow {
         id: row.get(0)?,
@@ -3761,6 +3919,12 @@ fn hydrate_planning_session_summary(
         .as_deref()
         .map(|draft_id| get_plan_draft_revision(conn, draft_id))
         .transpose()?;
+    let current_approval = row
+        .current_draft_id
+        .as_deref()
+        .map(|draft_id| get_planning_approval_by_draft(conn, &row.project_id, draft_id))
+        .transpose()?
+        .flatten();
     let materialization = get_latest_materialization_for_session(conn, &row.project_id, &row.id)?;
     let message_count = planning_message_count(conn, &row.id)?;
     Ok(PlanningSessionSummary {
@@ -3773,6 +3937,7 @@ fn hydrate_planning_session_summary(
         jira_state: row.jira_state,
         current_draft_id: row.current_draft_id,
         current_draft,
+        current_approval,
         materialization,
         message_count,
         created_at: row.created_at,
@@ -3825,8 +3990,8 @@ fn get_plan_draft_revision(
     let row = conn
         .query_row(
             "SELECT id, project_id, session_id, revision, title, summary, plan_markdown,
-                    draft_json, validation_json, task_count, task_graph_count, barrier_count,
-                    verification_gate_count, created_at
+                    artifact_path, content_hash, draft_json, validation_json, task_count,
+                    task_graph_count, barrier_count, verification_gate_count, created_at
              FROM plan_draft_revisions
              WHERE id = ?1",
             params![draft_id],
@@ -3839,13 +4004,15 @@ fn get_plan_draft_revision(
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
                     row.get::<_, i64>(11)?,
                     row.get::<_, i64>(12)?,
-                    row.get::<_, String>(13)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, String>(15)?,
                 ))
             },
         )
@@ -3856,14 +4023,14 @@ fn get_plan_draft_revision(
                 err,
             )
         })?;
-    let draft_json = serde_json::from_str(&row.7).map_err(|err| {
+    let draft_json = serde_json::from_str(&row.9).map_err(|err| {
         CommandError::with_details(
             "ValidationFailed",
             "Plan Document JSON을 읽지 못했습니다.",
             err,
         )
     })?;
-    let validation = serde_json::from_str(&row.8).map_err(|err| {
+    let validation = serde_json::from_str(&row.10).map_err(|err| {
         CommandError::with_details(
             "ValidationFailed",
             "Plan Document 검증 정보를 읽지 못했습니다.",
@@ -3878,14 +4045,187 @@ fn get_plan_draft_revision(
         title: row.4,
         summary: row.5,
         plan_markdown: row.6,
+        artifact_path: row.7,
+        content_hash: row.8,
         draft_json,
         validation,
-        task_count: row.9,
-        task_graph_count: row.10,
-        barrier_count: row.11,
-        verification_gate_count: row.12,
-        created_at: row.13,
+        task_count: row.11,
+        task_graph_count: row.12,
+        barrier_count: row.13,
+        verification_gate_count: row.14,
+        created_at: row.15,
     })
+}
+
+fn get_planning_approval_by_draft(
+    conn: &Connection,
+    project_id: &str,
+    draft_id: &str,
+) -> CommandResult<Option<PlanningApprovalSummary>> {
+    conn.query_row(
+        "SELECT id, project_id, session_id, draft_id, status, requested_reason,
+                decision_reason, requested_at, decided_at, created_at, updated_at
+         FROM planning_approvals
+         WHERE project_id = ?1 AND draft_id = ?2",
+        params![project_id, draft_id],
+        map_planning_approval,
+    )
+    .optional()
+    .map_err(|err| CommandError::database("계획 승인 요청을 읽지 못했습니다.", err))
+}
+
+fn get_planning_approval_required(
+    conn: &Connection,
+    project_id: &str,
+    draft_id: &str,
+) -> CommandResult<PlanningApprovalSummary> {
+    get_planning_approval_by_draft(conn, project_id, draft_id)?
+        .ok_or_else(|| CommandError::validation("대상 Plan Document 승인 요청을 찾을 수 없습니다."))
+}
+
+fn map_planning_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanningApprovalSummary> {
+    Ok(PlanningApprovalSummary {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        session_id: row.get(2)?,
+        draft_id: row.get(3)?,
+        status: row.get(4)?,
+        requested_reason: row.get(5)?,
+        decision_reason: row.get(6)?,
+        requested_at: row.get(7)?,
+        decided_at: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+fn decide_plan_draft(
+    conn: &mut Connection,
+    project_id: &str,
+    draft_id: &str,
+    input: DecidePlanDraftInput,
+    decision: &str,
+) -> CommandResult<PlanningSessionDetail> {
+    if decision != "Approved" && decision != "Rejected" {
+        return Err(CommandError::validation(
+            "지원하지 않는 계획 승인 결정입니다.",
+        ));
+    }
+    let draft = get_plan_draft_revision(conn, draft_id)?;
+    if draft.project_id != project_id {
+        return Err(CommandError::validation(
+            "대상 Plan Document를 찾을 수 없습니다.",
+        ));
+    }
+    let approval = get_planning_approval_required(conn, project_id, draft_id)?;
+    if approval.status == decision {
+        return get_planning_session(conn, project_id, &draft.session_id);
+    }
+    if approval.status != "Pending" {
+        return Err(CommandError::validation(
+            "이미 결정된 Plan Document 승인 요청입니다.",
+        ));
+    }
+
+    let reason = input
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(if decision == "Approved" {
+            "Plan Document approved"
+        } else {
+            "Plan Document rejected"
+        })
+        .to_string();
+    let timestamp = now();
+    let tx = conn
+        .transaction()
+        .map_err(|err| CommandError::database("계획 승인 결정을 저장하지 못했습니다.", err))?;
+    tx.execute(
+        "UPDATE planning_approvals
+         SET status = ?1, decision_reason = ?2, decided_at = ?3, updated_at = ?3
+         WHERE id = ?4 AND project_id = ?5 AND status = 'Pending'",
+        params![decision, reason, timestamp, approval.id, project_id],
+    )
+    .map_err(|err| CommandError::database("계획 승인 결정을 저장하지 못했습니다.", err))?;
+    if decision == "Rejected" {
+        tx.execute(
+            "UPDATE planning_sessions
+             SET status = 'Drafting', updated_at = ?1
+             WHERE id = ?2 AND project_id = ?3 AND current_draft_id = ?4",
+            params![timestamp, draft.session_id, project_id, draft_id],
+        )
+        .map_err(|err| CommandError::database("계획 세션 상태를 저장하지 못했습니다.", err))?;
+    }
+    insert_audit(
+        &tx,
+        project_id,
+        "PlanDraftRevision",
+        Some(draft_id),
+        if decision == "Approved" {
+            "plan_draft.approved"
+        } else {
+            "plan_draft.rejected"
+        },
+        json!({
+            "sessionId": draft.session_id,
+            "draftId": draft_id,
+            "approvalId": approval.id,
+            "decision": decision,
+            "reason": reason
+        }),
+    )?;
+    tx.commit()
+        .map_err(|err| CommandError::database("계획 승인 결정을 저장하지 못했습니다.", err))?;
+    get_planning_session(conn, project_id, &draft.session_id)
+}
+
+fn ensure_plan_draft_approved(
+    conn: &Connection,
+    project_id: &str,
+    draft_id: &str,
+) -> CommandResult<()> {
+    let approval = get_planning_approval_required(conn, project_id, draft_id)?;
+    if approval.status == "Approved" {
+        return Ok(());
+    }
+    Err(CommandError::new(
+        "PlanDraftApprovalRequired",
+        "Plan Document 승인 후 Task로 변환할 수 있습니다.",
+    ))
+}
+
+fn ensure_materialization_tasks_exist(
+    conn: &Connection,
+    materialization: &PlanningMaterializationSummary,
+) -> CommandResult<()> {
+    if materialization.task_ids.is_empty() {
+        return Err(CommandError::new(
+            "MaterializationBroken",
+            "계획 materialization에 연결된 Task 목록이 비어 있습니다.",
+        ));
+    }
+    for task_id in &materialization.task_ids {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM tasks WHERE id = ?1 AND project_id = ?2",
+                params![task_id, materialization.project_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|err| {
+                CommandError::database("계획 materialization Task 상태를 확인하지 못했습니다.", err)
+            })?;
+        if exists.is_none() {
+            return Err(CommandError::with_details(
+                "MaterializationBroken",
+                "계획 materialization에 연결된 Task를 찾을 수 없습니다.",
+                task_id,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn get_materialization(
@@ -4034,6 +4374,7 @@ fn validate_plan_draft_json(draft: &Value) -> CommandResult<PlanDraftValidationS
     if verification_gate_count == 0 {
         errors.push("executablePlan.verificationGates에 최소 1개 gate가 필요합니다.".to_string());
     }
+    validate_executable_plan_contract(executable_plan, &mut errors);
 
     plan_validation_result(
         errors,
@@ -4042,6 +4383,243 @@ fn validate_plan_draft_json(draft: &Value) -> CommandResult<PlanDraftValidationS
         barrier_count,
         verification_gate_count,
     )
+}
+
+fn validate_executable_plan_contract(executable_plan: &Value, errors: &mut Vec<String>) {
+    let graph_nodes = plan_array_values(executable_plan, &["taskGraph", "task_graph"]);
+    let mut graph_ids = BTreeSet::new();
+    let mut dependencies: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for (index, node) in graph_nodes.iter().enumerate() {
+        let Some(id) = plan_string_field(node, &["id", "taskId", "task_id"]) else {
+            errors.push(format!(
+                "executablePlan.taskGraph[{index}].id가 필요합니다."
+            ));
+            continue;
+        };
+        if !graph_ids.insert(id.clone()) {
+            errors.push(format!("executablePlan.taskGraph id `{id}`가 중복됩니다."));
+        }
+        let depends_on = plan_string_list(node, &["dependsOn", "depends_on", "dependencies"])
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if depends_on.contains(&id) {
+            errors.push(format!(
+                "executablePlan.taskGraph `{id}`가 자기 자신에 의존합니다."
+            ));
+        }
+        dependencies.insert(id, depends_on);
+    }
+    for (id, depends_on) in &dependencies {
+        for dependency in depends_on {
+            if !graph_ids.contains(dependency) {
+                errors.push(format!(
+                    "executablePlan.taskGraph `{id}`의 dependsOn `{dependency}`를 찾을 수 없습니다."
+                ));
+            }
+        }
+    }
+
+    let task_cards = plan_array_values(executable_plan, &["taskCards", "task_cards"]);
+    let mut card_ids = BTreeSet::new();
+    let mut cards = Vec::new();
+    let mut uses_deep_contract = false;
+    for (index, card) in task_cards.iter().enumerate() {
+        let Some(id) = plan_string_field(card, &["id", "taskId", "task_id"]) else {
+            errors.push(format!(
+                "executablePlan.taskCards[{index}].id가 필요합니다."
+            ));
+            continue;
+        };
+        if !card_ids.insert(id.clone()) {
+            errors.push(format!("executablePlan.taskCards id `{id}`가 중복됩니다."));
+        }
+        if !graph_ids.is_empty() && !graph_ids.contains(&id) {
+            errors.push(format!(
+                "executablePlan.taskCards `{id}`에 대응하는 taskGraph node가 없습니다."
+            ));
+        }
+
+        let has_ownership_fields = plan_has_field(card, &["ownedFiles", "owned_files"])
+            || plan_has_field(
+                card,
+                &[
+                    "sharedFiles",
+                    "shared_files",
+                    "readOnlyFiles",
+                    "read_only_files",
+                ],
+            )
+            || plan_has_field(card, &["generatedFiles", "generated_files"]);
+        let has_report_contract = plan_string_field(
+            card,
+            &[
+                "reportContract",
+                "report_contract",
+                "reportFormat",
+                "report_format",
+            ],
+        )
+        .is_some();
+        let has_generated_file_policy = plan_string_field(
+            card,
+            &[
+                "generatedFilePolicy",
+                "generated_file_policy",
+                "generatedPolicy",
+                "generated_policy",
+            ],
+        )
+        .is_some();
+        let card_uses_deep_contract =
+            has_ownership_fields || has_report_contract || has_generated_file_policy;
+        uses_deep_contract |= card_uses_deep_contract;
+
+        let owned_files = plan_file_set(
+            card,
+            &["ownedFiles", "owned_files"],
+            "ownedFiles",
+            &id,
+            errors,
+        );
+        let shared_files = plan_file_set(
+            card,
+            &[
+                "sharedFiles",
+                "shared_files",
+                "readOnlyFiles",
+                "read_only_files",
+            ],
+            "sharedFiles",
+            &id,
+            errors,
+        );
+        let _generated_files = plan_file_set(
+            card,
+            &["generatedFiles", "generated_files"],
+            "generatedFiles",
+            &id,
+            errors,
+        );
+        cards.push(PlanTaskCardContract {
+            id,
+            owned_files,
+            shared_files,
+            has_generated_file_policy,
+            has_report_contract,
+            uses_deep_contract: card_uses_deep_contract,
+        });
+    }
+
+    if uses_deep_contract {
+        for card in &cards {
+            if !card.has_report_contract {
+                errors.push(format!(
+                    "executablePlan.taskCards `{}`에는 reportContract 또는 reportFormat이 필요합니다.",
+                    card.id
+                ));
+            }
+            if !card.has_generated_file_policy {
+                errors.push(format!(
+                    "executablePlan.taskCards `{}`에는 generatedFilePolicy가 필요합니다.",
+                    card.id
+                ));
+            }
+        }
+    }
+    for graph_id in &graph_ids {
+        if !card_ids.contains(graph_id) {
+            errors.push(format!(
+                "executablePlan.taskGraph `{graph_id}`에 대응하는 taskCard가 없습니다."
+            ));
+        }
+    }
+    for i in 0..cards.len() {
+        for j in (i + 1)..cards.len() {
+            let left = &cards[i];
+            let right = &cards[j];
+            if !left.uses_deep_contract && !right.uses_deep_contract {
+                continue;
+            }
+            if !task_cards_are_parallel(&left.id, &right.id, &dependencies) {
+                continue;
+            }
+            if let Some(path) = first_set_intersection(&left.owned_files, &right.owned_files) {
+                errors.push(format!(
+                    "parallel taskCards `{}`와 `{}`의 ownedFiles가 겹칩니다: {path}",
+                    left.id, right.id
+                ));
+            }
+            if let Some(path) = first_set_intersection(&left.shared_files, &right.owned_files) {
+                errors.push(format!(
+                    "taskCards `{}`의 sharedFiles가 병렬 task `{}`의 ownedFiles와 겹칩니다: {path}",
+                    left.id, right.id
+                ));
+            }
+            if let Some(path) = first_set_intersection(&right.shared_files, &left.owned_files) {
+                errors.push(format!(
+                    "taskCards `{}`의 sharedFiles가 병렬 task `{}`의 ownedFiles와 겹칩니다: {path}",
+                    right.id, left.id
+                ));
+            }
+        }
+    }
+}
+
+fn plan_file_set(
+    value: &Value,
+    keys: &[&str],
+    field_name: &str,
+    card_id: &str,
+    errors: &mut Vec<String>,
+) -> BTreeSet<String> {
+    let mut files = BTreeSet::new();
+    for path in plan_string_list(value, keys) {
+        if path.starts_with('/') || path.split('/').any(|part| part == "..") {
+            errors.push(format!(
+                "executablePlan.taskCards `{card_id}`의 {field_name} 경로는 repo-relative여야 합니다: {path}"
+            ));
+            continue;
+        }
+        files.insert(path);
+    }
+    files
+}
+
+fn task_cards_are_parallel(
+    left: &str,
+    right: &str,
+    dependencies: &HashMap<String, BTreeSet<String>>,
+) -> bool {
+    let mut seen = BTreeSet::new();
+    if has_dependency_path(left, right, dependencies, &mut seen) {
+        return false;
+    }
+    seen.clear();
+    !has_dependency_path(right, left, dependencies, &mut seen)
+}
+
+fn has_dependency_path(
+    task_id: &str,
+    dependency_id: &str,
+    dependencies: &HashMap<String, BTreeSet<String>>,
+    seen: &mut BTreeSet<String>,
+) -> bool {
+    if !seen.insert(task_id.to_string()) {
+        return false;
+    }
+    let Some(depends_on) = dependencies.get(task_id) else {
+        return false;
+    };
+    if depends_on.contains(dependency_id) {
+        return true;
+    }
+    depends_on
+        .iter()
+        .any(|dependency| has_dependency_path(dependency, dependency_id, dependencies, seen))
+}
+
+fn first_set_intersection(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Option<String> {
+    left.intersection(right).next().cloned()
 }
 
 fn plan_validation_result(
@@ -4078,6 +4656,17 @@ fn plan_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
 
 fn plan_has_array(value: &Value, keys: &[&str]) -> bool {
     plan_field(value, keys).is_some_and(Value::is_array)
+}
+
+fn plan_has_field(value: &Value, keys: &[&str]) -> bool {
+    plan_field(value, keys).is_some()
+}
+
+fn plan_array_values<'a>(value: &'a Value, keys: &[&str]) -> Vec<&'a Value> {
+    plan_field(value, keys)
+        .and_then(Value::as_array)
+        .map(|items| items.iter().collect())
+        .unwrap_or_default()
 }
 
 fn plan_array_len(value: &Value, keys: &[&str]) -> i64 {
@@ -4276,6 +4865,56 @@ fn planning_title_from_goal(goal: &str) -> String {
         return trimmed.to_string();
     }
     format!("{}...", trimmed.chars().take(42).collect::<String>())
+}
+
+fn planning_draft_artifact_path(session_id: &str, revision: i64) -> String {
+    format!(".helm/planning/{session_id}/draft-v{revision}.md")
+}
+
+fn write_planning_artifact(root: &Path, relative_path: &str, content: &str) -> CommandResult<()> {
+    validate_relative_artifact_path(relative_path)?;
+    let path = root.join(relative_path);
+    let parent = path.parent().ok_or_else(|| {
+        CommandError::validation("Plan Document artifact 경로가 올바르지 않습니다.")
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|err| CommandError::io("Plan Document artifact 폴더를 만들지 못했습니다.", err))?;
+    let tmp_path = path.with_extension("md.tmp");
+    fs::write(&tmp_path, content)
+        .map_err(|err| CommandError::io("Plan Document artifact를 저장하지 못했습니다.", err))?;
+    fs::rename(&tmp_path, &path)
+        .map_err(|err| CommandError::io("Plan Document artifact를 교체하지 못했습니다.", err))?;
+    Ok(())
+}
+
+fn stable_content_hash(content: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in content.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn plan_markdown_from_draft_json(draft: &Value, goal_text: &str) -> String {
+    let title = plan_string_field(draft, &["title"]).unwrap_or_else(|| "Plan Document".to_string());
+    let summary = plan_string_field(draft, &["summary"]).unwrap_or_default();
+    let mut lines = vec![
+        format!("# {title}"),
+        String::new(),
+        summary,
+        String::new(),
+        "## Goal".to_string(),
+        goal_text.to_string(),
+        String::new(),
+        "## Tasks".to_string(),
+    ];
+    for (index, task) in plan_draft_task_values(draft).iter().enumerate() {
+        let task_title =
+            plan_string_field(task, &["title"]).unwrap_or_else(|| format!("Task {}", index + 1));
+        lines.push(format!("{}. {}", index + 1, task_title));
+    }
+    lines.join("\n")
 }
 
 fn get_approval(conn: &Connection, id: &str) -> CommandResult<ApprovalSummary> {
@@ -7424,6 +8063,7 @@ mod tests {
 
         let saved = save_plan_draft_revision(
             &mut conn,
+            &repo.root,
             &project.id,
             &session.session.id,
             SavePlanDraftRevisionInput {
@@ -7438,12 +8078,53 @@ mod tests {
         assert_eq!(draft.task_count, 1);
         assert_eq!(draft.task_graph_count, 1);
         assert_eq!(draft.verification_gate_count, 1);
+        assert_eq!(
+            saved
+                .session
+                .current_approval
+                .as_ref()
+                .map(|approval| approval.status.as_str()),
+            Some("Pending")
+        );
+        assert!(draft
+            .artifact_path
+            .as_ref()
+            .is_some_and(|path| path.ends_with("/draft-v1.md")));
+        assert!(draft
+            .content_hash
+            .as_ref()
+            .is_some_and(|hash| hash.starts_with("fnv1a64:")));
+        assert!(repo
+            .root
+            .join(draft.artifact_path.as_ref().expect("artifact path"))
+            .exists());
 
         let sessions = list_planning_sessions(&conn, &project.id).expect("list sessions");
         assert_eq!(sessions.len(), 1);
         assert_eq!(
             sessions[0].current_draft_id.as_deref(),
             Some(draft.id.as_str())
+        );
+
+        let approval_error = materialize_plan_draft(&mut conn, &project.id, &draft.id)
+            .expect_err("materialization requires approval");
+        assert_eq!(approval_error.code, "PlanDraftApprovalRequired");
+        let approved = approve_plan_draft(
+            &mut conn,
+            &project.id,
+            &draft.id,
+            DecidePlanDraftInput {
+                reason: Some("test approval".to_string()),
+            },
+        )
+        .expect("approve draft");
+        assert_eq!(
+            approved
+                .session
+                .current_approval
+                .as_ref()
+                .map(|approval| approval.status.as_str()),
+            Some("Approved")
         );
 
         let materialized =
@@ -7485,6 +8166,7 @@ mod tests {
 
         let error = save_plan_draft_revision(
             &mut conn,
+            &repo.root,
             &project.id,
             &session.session.id,
             SavePlanDraftRevisionInput {
@@ -7500,6 +8182,113 @@ mod tests {
         .expect_err("invalid executablePlan rejected");
         assert_eq!(error.code, "ValidationFailed");
         assert!(error.details.unwrap_or_default().contains("executablePlan"));
+    }
+
+    #[test]
+    fn parallel_owned_files_overlap_is_rejected() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let session = create_planning_session(
+            &mut conn,
+            &project.id,
+            CreatePlanningSessionInput {
+                title: None,
+                goal_text: "parallel ownership 검증".to_string(),
+                jira_ref: None,
+                jira_state: None,
+            },
+        )
+        .expect("create planning session");
+
+        let error = save_plan_draft_revision(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &session.session.id,
+            SavePlanDraftRevisionInput {
+                draft_json: json!({
+                    "title": "Parallel overlap",
+                    "summary": "병렬 task ownership 충돌을 검증한다.",
+                    "tasks": [
+                        {"title": "Task A"},
+                        {"title": "Task B"}
+                    ],
+                    "executablePlan": {
+                        "taskGraph": [
+                            {
+                                "id": "task-a",
+                                "title": "Task A",
+                                "dependsOn": [],
+                                "parallelizable": true,
+                                "batch": "batch-1"
+                            },
+                            {
+                                "id": "task-b",
+                                "title": "Task B",
+                                "dependsOn": [],
+                                "parallelizable": true,
+                                "batch": "batch-1"
+                            }
+                        ],
+                        "taskCards": [
+                            {
+                                "id": "task-a",
+                                "title": "Task A",
+                                "ownerRole": "coder",
+                                "goal": "A를 구현한다.",
+                                "inputs": ["Plan Document"],
+                                "outputs": ["A evidence"],
+                                "ownedFiles": ["apps/desktop/src/App.tsx"],
+                                "sharedFiles": [],
+                                "generatedFiles": [],
+                                "generatedFilePolicy": "Generated files are read-only unless a generator command is listed.",
+                                "reportContract": "taskId/status/changedFiles/verification/blockers",
+                                "acceptanceCriteria": ["A 완료"],
+                                "verificationGates": ["gate-a"]
+                            },
+                            {
+                                "id": "task-b",
+                                "title": "Task B",
+                                "ownerRole": "coder",
+                                "goal": "B를 구현한다.",
+                                "inputs": ["Plan Document"],
+                                "outputs": ["B evidence"],
+                                "ownedFiles": ["apps/desktop/src/App.tsx"],
+                                "sharedFiles": [],
+                                "generatedFiles": [],
+                                "generatedFilePolicy": "Generated files are read-only unless a generator command is listed.",
+                                "reportContract": "taskId/status/changedFiles/verification/blockers",
+                                "acceptanceCriteria": ["B 완료"],
+                                "verificationGates": ["gate-a"]
+                            }
+                        ],
+                        "ownershipMap": [
+                            {
+                                "ownerRole": "coder",
+                                "responsibilities": ["병렬 task ownership 유지"],
+                                "artifacts": ["code diff"],
+                                "approver": "code_reviewer"
+                            }
+                        ],
+                        "barriers": [],
+                        "verificationGates": [
+                            {
+                                "id": "gate-a",
+                                "title": "Typecheck",
+                                "type": "command",
+                                "command": "pnpm --dir apps/desktop typecheck",
+                                "requiredEvidence": ["typecheck output"]
+                            }
+                        ]
+                    }
+                }),
+                plan_markdown: None,
+                planner_message: None,
+            },
+        )
+        .expect_err("parallel ownedFiles overlap rejected");
+        assert_eq!(error.code, "ValidationFailed");
+        assert!(error.details.unwrap_or_default().contains("ownedFiles"));
     }
 
     fn run_prepared_host_role(
