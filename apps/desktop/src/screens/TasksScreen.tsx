@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Search } from "lucide-react";
-import type { AgentRunSummary, ProjectSnapshot, TaskSummary } from "../lib/types";
+import type { AgentRunSummary, ProjectSnapshot, TaskStatus, TaskSummary } from "../lib/types";
 import { AgentUsageBar } from "../components/AgentUsageBar";
 import { ApprovalInbox } from "../components/ApprovalInbox";
-import { RuntimeReadinessBar } from "../components/RuntimeReadinessBar";
 import { TaskBoard } from "../components/TaskBoard";
 import { TaskDetail } from "../components/TaskDetail";
 import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
+import { TASK_STATUS_LABEL } from "../lib/status";
 
 interface TasksScreenProps {
   snapshot: ProjectSnapshot | null;
@@ -35,17 +34,14 @@ export function TasksScreen({
   const [taskRuns, setTaskRuns] = useState<Record<string, AgentRunSummary[]>>({});
   const [runRefreshKey, setRunRefreshKey] = useState(0);
   const [taskGraphBusy, setTaskGraphBusy] = useState<"export" | "open" | null>(null);
-  const [historyQuery, setHistoryQuery] = useState("");
   const taskRunKey = useMemo(
     () => snapshot?.tasks.map((task) => task.id).join(":") ?? "",
     [snapshot?.tasks],
   );
-  const filteredTasks = useMemo(() => {
-    if (!snapshot) return [];
-    const query = historyQuery.trim().toLowerCase();
-    if (!query) return snapshot.tasks;
-    return snapshot.tasks.filter((task) => taskSearchText(task, taskRuns[task.id] ?? []).includes(query));
-  }, [historyQuery, snapshot, taskRuns]);
+  const planTaskGroups = useMemo(
+    () => (snapshot ? groupTasksByPlan(snapshot.tasks, taskRuns) : []),
+    [snapshot, taskRuns],
+  );
 
   useEffect(() => {
     if (!snapshot) return;
@@ -189,30 +185,55 @@ export function TasksScreen({
           </div>
         </div>
 
-        <RuntimeReadinessBar snapshot={snapshot} onGoSettings={onGoSettings} />
-
-        <div className="task-history-search" role="search">
-          <Search size={14} aria-hidden />
-          <input
-            aria-label="Task history search"
-            placeholder="Task, run status, blocker, failure kind 검색"
-            value={historyQuery}
-            onChange={(event) => setHistoryQuery(event.target.value)}
-          />
-          {historyQuery.trim() ? <span>{filteredTasks.length}/{snapshot.tasks.length}</span> : null}
-        </div>
-
         {snapshot.tasks.length === 0 ? (
           <div className="empty-inline">계획에서 승인된 태스크가 아직 없습니다.</div>
-        ) : filteredTasks.length === 0 ? (
-          <div className="empty-inline">검색 결과가 없습니다.</div>
         ) : (
-          <TaskBoard
-            tasks={filteredTasks}
-            taskRuns={taskRuns}
-            selectedTaskId={selectedTaskId}
-            onSelectTask={onSelectTask}
-          />
+          <div className={planTaskGroups.length > 1 ? "plan-task-groups" : "plan-task-groups single"}>
+            {planTaskGroups.map((group) => (
+              <section className="plan-task-group" key={group.id}>
+                <header className="plan-task-group-header">
+                  <div className="plan-task-group-title">
+                    <span>{group.caption}</span>
+                    <h3>{group.title}</h3>
+                    <p>{group.description}</p>
+                  </div>
+                  <div className="plan-task-group-metrics" aria-label="Plan progress summary">
+                    <span>
+                      <strong>{group.tasks.length}</strong>
+                      Task
+                    </span>
+                    <span>
+                      <strong>{group.subtaskCounts.total}</strong>
+                      Subtask
+                    </span>
+                    <span>
+                      <strong>{group.statusSummary}</strong>
+                      현재 단계
+                    </span>
+                  </div>
+                </header>
+                {group.subtasks.length > 0 ? (
+                  <div className="plan-subtask-strip" aria-label="Subtask progress">
+                    {group.subtasks.slice(0, 8).map((subtask) => (
+                      <span className={`plan-subtask-chip ${subtask.tone}`} key={subtask.id}>
+                        <strong>{subtask.state}</strong>
+                        {subtask.title}
+                      </span>
+                    ))}
+                    {group.subtasks.length > 8 ? (
+                      <span className="plan-subtask-chip muted">+{group.subtasks.length - 8}개 더</span>
+                    ) : null}
+                  </div>
+                ) : null}
+                <TaskBoard
+                  tasks={group.tasks}
+                  taskRuns={taskRuns}
+                  selectedTaskId={selectedTaskId}
+                  onSelectTask={onSelectTask}
+                />
+              </section>
+            ))}
+          </div>
         )}
         <AgentUsageBar snapshot={snapshot} />
         <ApprovalInbox snapshot={snapshot} onRefresh={onRefresh} />
@@ -231,27 +252,191 @@ export function TasksScreen({
   );
 }
 
-function taskSearchText(task: TaskSummary, runs: AgentRunSummary[]): string {
-  const refs = task.externalRefs.map((ref) => `${ref.refType} ${ref.refValue} ${ref.refTitle ?? ""}`).join(" ");
-  const runText = runs
-    .map((run) =>
-      [
-        run.roleId,
-        run.status,
-        run.lifecyclePhase,
-        run.failureKind,
-        run.failureReason,
-        run.resultStatus,
-        run.repairRequestId,
-      ]
-        .filter(Boolean)
-        .join(" "),
-    )
-    .join(" ");
-  return [task.title, task.description, task.status, task.statusReason, refs, runText]
+interface PlanTaskGroup {
+  id: string;
+  title: string;
+  caption: string;
+  description: string;
+  tasks: TaskSummary[];
+  subtasks: PlanSubtask[];
+  subtaskCounts: Record<PlanProgressTone, number> & { total: number };
+  statusSummary: string;
+}
+
+interface PlanSubtask {
+  id: string;
+  title: string;
+  state: string;
+  tone: PlanProgressTone;
+}
+
+type PlanProgressTone = "waiting" | "active" | "done" | "blocked";
+
+function groupTasksByPlan(tasks: TaskSummary[], taskRuns: Record<string, AgentRunSummary[]>): PlanTaskGroup[] {
+  const groups = new Map<
+    string,
+    {
+      title: string;
+      caption: string;
+      description: string;
+      tasks: TaskSummary[];
+      latestAt: number;
+    }
+  >();
+
+  for (const task of tasks) {
+    const plan = planIdentityForTask(task);
+    const group = groups.get(plan.id) ?? {
+      title: plan.title,
+      caption: plan.caption,
+      description: plan.description,
+      tasks: [],
+      latestAt: 0,
+    };
+    group.tasks.push(task);
+    group.latestAt = Math.max(group.latestAt, Date.parse(task.updatedAt) || Date.parse(task.createdAt) || 0);
+    groups.set(plan.id, group);
+  }
+
+  return Array.from(groups.entries())
+    .map(([id, group]) => {
+      const sortedTasks = [...group.tasks].sort(
+        (a, b) => a.sortOrder - b.sortOrder || Date.parse(a.createdAt) - Date.parse(b.createdAt),
+      );
+      const subtasks = sortedTasks.flatMap((task) => {
+        const progress = taskProgressForPlan(task, taskRuns[task.id] ?? []);
+        return extractSubtasks(task.description).map((title, index) => ({
+          id: `${task.id}:${index}`,
+          title,
+          state: progress.label,
+          tone: progress.tone,
+        }));
+      });
+      const subtaskCounts = countSubtaskProgress(subtasks);
+      return {
+        id,
+        title: group.title,
+        caption: group.caption,
+        description: group.description,
+        tasks: sortedTasks,
+        subtasks,
+        subtaskCounts,
+        statusSummary: summarizePlanStatus(sortedTasks),
+        latestAt: group.latestAt,
+      };
+    })
+    .sort((a, b) => b.latestAt - a.latestAt)
+    .map(({ latestAt: _latestAt, ...group }) => group);
+}
+
+function planIdentityForTask(task: TaskSummary): { id: string; title: string; caption: string; description: string } {
+  const goalRef = task.externalRefs.find((ref) => ref.refTitle === "Planning goal");
+  const draftRef = task.externalRefs.find((ref) => ref.refTitle === "Planner draft task");
+  const jiraRef = task.externalRefs.find((ref) => ref.refTitle === "Jira reference");
+  const draftVersion = draftRef?.refValue.match(/^Planner draft v\d+/)?.[0] ?? null;
+
+  if (goalRef) {
+    return {
+      id: ["planning", goalRef.refValue, draftVersion ?? ""].join(":"),
+      title: goalRef.refValue,
+      caption: draftVersion ?? "Plan document",
+      description: jiraRef ? `Jira reference · ${jiraRef.refValue}` : "Helm Planning에서 승인된 계획",
+    };
+  }
+
+  if (task.epicId) {
+    return {
+      id: `epic:${task.epicId}`,
+      title: task.epicId,
+      caption: "Epic",
+      description: "Epic 기준으로 묶인 Task",
+    };
+  }
+
+  return {
+    id: "unplanned",
+    title: "계획 연결 없는 Task",
+    caption: "No plan",
+    description: "Planning goal 참조가 없는 Task",
+  };
+}
+
+function extractSubtasks(description: string): string[] {
+  const section = extractSection(description, "Subtasks", ["Acceptance Criteria", "Risks", "Test Plan"]);
+  return section
+    .split("\n")
+    .map((line) => line.trim())
     .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
+    .map((line) => line.replace(/^[-*]\s*/, "").trim())
+    .filter(Boolean);
+}
+
+function extractSection(description: string, startHeading: string, endHeadings: string[]): string {
+  const start = description.indexOf(startHeading);
+  if (start < 0) return "";
+  const bodyStart = start + startHeading.length;
+  const end = endHeadings
+    .map((heading) => description.indexOf(heading, bodyStart))
+    .filter((index) => index >= 0)
+    .sort((a, b) => a - b)[0];
+  return description.slice(bodyStart, end ?? description.length);
+}
+
+function taskProgressForPlan(
+  task: TaskSummary,
+  runs: AgentRunSummary[],
+): { label: string; tone: PlanProgressTone } {
+  const activeRun =
+    runs.find((run) => run.status === "Running") ??
+    runs.find((run) => run.status === "Queued") ??
+    runs.find((run) => isAttentionRun(run.status)) ??
+    null;
+
+  if (task.status === "Blocked" || (activeRun && isAttentionRun(activeRun.status))) {
+    return { label: "막힘", tone: "blocked" };
+  }
+  if (task.status === "MergeWaiting" || task.status === "Merged" || task.status === "Done") {
+    return { label: "완료", tone: "done" };
+  }
+  if (activeRun?.status === "Running" || isActiveTaskStatus(task.status)) {
+    return { label: "진행중", tone: "active" };
+  }
+  return { label: "대기", tone: "waiting" };
+}
+
+function isActiveTaskStatus(status: TaskStatus): boolean {
+  return status === "Coding" || status === "PlanVerification" || status === "CodeReview" || status === "Testing";
+}
+
+function isAttentionRun(status: string): boolean {
+  return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
+}
+
+function countSubtaskProgress(subtasks: PlanSubtask[]): Record<PlanProgressTone, number> & { total: number } {
+  return subtasks.reduce(
+    (counts, subtask) => {
+      counts[subtask.tone] += 1;
+      counts.total += 1;
+      return counts;
+    },
+    { waiting: 0, active: 0, done: 0, blocked: 0, total: 0 },
+  );
+}
+
+function summarizePlanStatus(tasks: TaskSummary[]): string {
+  const counts = tasks.reduce(
+    (acc, task) => {
+      acc[task.status] = (acc[task.status] ?? 0) + 1;
+      return acc;
+    },
+    {} as Partial<Record<TaskStatus, number>>,
+  );
+  const mostCommon = Object.entries(counts).sort(([, a], [, b]) => (b ?? 0) - (a ?? 0))[0] as
+    | [TaskStatus, number]
+    | undefined;
+  if (!mostCommon) return "-";
+  const [status, count] = mostCommon;
+  return count === tasks.length ? TASK_STATUS_LABEL[status] : `${TASK_STATUS_LABEL[status]} ${count}/${tasks.length}`;
 }
 
 function messageFromError(error: unknown, fallback: string): string {

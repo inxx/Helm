@@ -817,6 +817,171 @@ textarea {
 }
 
 /* Board */
+.plan-task-groups {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--bg);
+  padding: 14px;
+}
+
+.plan-task-groups.single {
+  align-content: stretch;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.plan-task-group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 420px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.plan-task-groups.single .plan-task-group {
+  height: 100%;
+  min-height: 0;
+}
+
+.plan-task-group-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.plan-task-group-title {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.plan-task-group-title > span {
+  color: var(--brand);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.plan-task-group-title h3 {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.plan-task-group-title p {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.plan-task-group-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 360px;
+}
+
+.plan-task-group-metrics span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.plan-task-group-metrics strong {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.plan-subtask-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  overflow: visible;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  padding: 8px 10px;
+}
+
+.plan-subtask-chip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  min-height: 24px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--soft);
+  padding: 0 8px;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-subtask-chip strong {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.plan-subtask-chip.active {
+  border-color: var(--brand);
+  background: var(--brand-weak);
+  color: var(--brand);
+}
+
+.plan-subtask-chip.active strong {
+  color: var(--brand);
+}
+
+.plan-subtask-chip.done {
+  border-color: var(--green);
+  background: var(--green-weak);
+  color: var(--green);
+}
+
+.plan-subtask-chip.done strong {
+  color: var(--green);
+}
+
+.plan-subtask-chip.blocked {
+  border-color: var(--red);
+  background: var(--red-weak);
+  color: var(--red);
+}
+
+.plan-subtask-chip.blocked strong {
+  color: var(--red);
+}
+
+.plan-subtask-chip.muted {
+  color: var(--text-muted);
+}
+
 .task-board {
   display: grid;
   grid-auto-flow: column;
@@ -826,6 +991,12 @@ textarea {
   overflow-y: hidden;
   min-height: 0;
   background: var(--bg);
+}
+
+.plan-task-group .task-board {
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--surface);
 }
 
 .task-column {
@@ -1197,9 +1368,7 @@ textarea {
 .runtime-readiness-panel {
   display: grid;
   gap: 8px;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
+  background: var(--surface-2);
   padding: 8px 10px;
 }
 
@@ -1305,38 +1474,6 @@ textarea {
   font-family: var(--mono);
   font-size: 10.5px;
   line-height: 1.35;
-}
-
-.task-history-search {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 36px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
-  padding: 6px 10px;
-  color: var(--text-muted);
-}
-
-.task-history-search input {
-  min-width: 0;
-  flex: 1 1 auto;
-  border: 0;
-  outline: none;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-}
-
-.task-history-search input::placeholder {
-  color: var(--text-muted);
-}
-
-.task-history-search span {
-  flex: 0 0 auto;
-  color: var(--soft);
-  font-family: var(--mono);
-  font-size: 11px;
 }
 
 /* ============================================================
@@ -5189,6 +5326,69 @@ textarea {
   padding: 2px 8px;
 }
 
+.planner-executable-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.planner-executable-summary section {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 8px 10px;
+}
+
+.planner-executable-summary h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.planner-executable-summary ul {
+  display: grid;
+  gap: 5px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.planner-executable-summary li {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 5px;
+}
+
+.planner-executable-summary li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.planner-executable-summary strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planner-executable-summary span,
+.planner-executable-summary p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .plan-preview-actions {
   display: flex;
   align-items: center;
@@ -5245,6 +5445,15 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .plan-task-group-header {
+    grid-template-columns: 1fr;
+  }
+
+  .plan-task-group-metrics {
+    justify-content: flex-start;
+    max-width: none;
+  }
+
   .git-screen-header,
   .git-changes-view,
   .git-selected-content {
@@ -5276,6 +5485,10 @@ textarea {
   }
 
   .planner-task-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .planner-executable-summary {
     grid-template-columns: 1fr;
   }
 
