@@ -7,6 +7,7 @@ import { TaskBoard } from "../components/TaskBoard";
 import { TaskDetail } from "../components/TaskDetail";
 import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
+import { deriveRunLiveState, isRunActiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
 import { TASK_STATUS_LABEL } from "../lib/status";
 
 interface TasksScreenProps {
@@ -33,7 +34,7 @@ export function TasksScreen({
   const { showToast } = useToast();
   const [taskRuns, setTaskRuns] = useState<Record<string, AgentRunSummary[]>>({});
   const [runRefreshKey, setRunRefreshKey] = useState(0);
-  const [taskGraphBusy, setTaskGraphBusy] = useState<"export" | "open" | null>(null);
+  const [taskGraphBusy, setTaskGraphBusy] = useState<"export" | "open" | "coordination" | null>(null);
   const taskRunKey = useMemo(
     () => snapshot?.tasks.map((task) => task.id).join(":") ?? "",
     [snapshot?.tasks],
@@ -157,6 +158,27 @@ export function TasksScreen({
     }
   }
 
+  async function exportCoordinationSnapshot() {
+    if (!snapshot) return;
+    setTaskGraphBusy("coordination");
+    try {
+      const exported = await api.exportCoordinationSnapshot(snapshot.project.id);
+      showToast({
+        tone: "success",
+        title: "coordination export 완료",
+        description: `${exported.taskCount} Task · ${exported.runCount} Run · ${exported.messageCount} Message를 ${exported.path}에 저장했습니다.`,
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "coordination export 실패",
+        description: messageFromError(error, "coordination snapshot을 저장하지 못했습니다."),
+      });
+    } finally {
+      setTaskGraphBusy(null);
+    }
+  }
+
   return (
     <div className={selectedTask ? "tasks-layout with-detail" : "tasks-layout"}>
       <section className="task-workspace">
@@ -181,6 +203,14 @@ export function TasksScreen({
               type="button"
             >
               {taskGraphBusy === "export" ? "재생성 중..." : "tasks.md 재생성"}
+            </button>
+            <button
+              className="secondary-button"
+              disabled={taskGraphBusy !== null}
+              onClick={exportCoordinationSnapshot}
+              type="button"
+            >
+              {taskGraphBusy === "coordination" ? "내보내는 중..." : "coordination export"}
             </button>
           </div>
         </div>
@@ -386,19 +416,19 @@ function taskProgressForPlan(
   task: TaskSummary,
   runs: AgentRunSummary[],
 ): { label: string; tone: PlanProgressTone } {
-  const activeRun =
-    runs.find((run) => run.status === "Running") ??
-    runs.find((run) => run.status === "Queued") ??
-    runs.find((run) => isAttentionRun(run.status)) ??
-    null;
+  const activeRun = selectVisibleRun(runs);
+  const live = activeRun ? deriveRunLiveState(activeRun) : null;
 
-  if (task.status === "Blocked" || (activeRun && isAttentionRun(activeRun.status))) {
+  if (task.status === "Blocked" || (activeRun && isRunAttentionState(activeRun))) {
     return { label: "막힘", tone: "blocked" };
   }
   if (task.status === "MergeWaiting" || task.status === "Merged" || task.status === "Done") {
     return { label: "완료", tone: "done" };
   }
-  if (activeRun?.status === "Running" || isActiveTaskStatus(task.status)) {
+  if (activeRun && isRunActiveState(activeRun)) {
+    return { label: live?.state === "approval_pending" ? "승인대기" : "진행중", tone: "active" };
+  }
+  if (isActiveTaskStatus(task.status)) {
     return { label: "진행중", tone: "active" };
   }
   return { label: "대기", tone: "waiting" };
@@ -406,10 +436,6 @@ function taskProgressForPlan(
 
 function isActiveTaskStatus(status: TaskStatus): boolean {
   return status === "Coding" || status === "PlanVerification" || status === "CodeReview" || status === "Testing";
-}
-
-function isAttentionRun(status: string): boolean {
-  return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
 }
 
 function countSubtaskProgress(subtasks: PlanSubtask[]): Record<PlanProgressTone, number> & { total: number } {

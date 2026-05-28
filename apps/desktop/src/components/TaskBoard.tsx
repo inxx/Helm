@@ -1,4 +1,5 @@
 import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
+import { deriveRunLiveState, selectVisibleRun } from "../lib/runLiveState";
 import { roleLabel } from "../lib/runnerReadiness";
 import type { AgentRunSummary, TaskStatus, TaskSummary } from "../lib/types";
 
@@ -163,54 +164,31 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask }
 }
 
 function activeRunForTask(runs: AgentRunSummary[]): AgentRunSummary | null {
-  return (
-    runs.find((run) => run.status === "Running") ??
-    runs.find((run) => run.status === "Queued") ??
-    runs.find((run) => isAttentionRun(run.status)) ??
-    null
-  );
+  return selectVisibleRun(runs);
 }
 
 function runFlowLabel(run: AgentRunSummary): string {
-  if (run.status === "Running") return `${roleLabel(run.roleId)} 진행 중`;
-  if (run.status === "Queued") return `${roleLabel(run.roleId)} 대기`;
-  if (run.failureKind) return `${roleLabel(run.roleId)} · ${failureKindLabel(run.failureKind)}`;
-  return `${roleLabel(run.roleId)} 점검`;
+  const live = deriveRunLiveState(run);
+  return `${roleLabel(run.roleId)} · ${live.label}`;
 }
 
 function runHint(run: AgentRunSummary): string {
-  if (run.status === "Running") {
-    return run.heartbeatAt ? `heartbeat ${relativeTime(run.heartbeatAt)}` : "report가 올 때까지 실행 중";
-  }
-  if (run.status === "Queued") return "worker queue 대기";
+  const live = deriveRunLiveState(run);
+  if (live.state === "running") return live.summary;
+  if (live.state === "approval_pending") return "승인 전에는 다음 단계로 진행하지 않습니다.";
+  if (live.state === "quiet" || live.state === "stalled_candidate") return `${live.summary} · ${live.ageLabel}`;
+  if (live.state === "queued" || live.state === "starting") return live.summary;
   if (run.failureKind) return humanizedFailureReason(run) ?? `${failureKindLabel(run.failureKind)} · 재시도 가능`;
-  return run.resultStatus ? `${run.resultStatus} · 재시도 가능` : "상세에서 근거 확인";
+  return live.summary || (run.resultStatus ? `${run.resultStatus} · 재시도 가능` : "상세에서 근거 확인");
 }
 
 function runStatusLabel(run: AgentRunSummary): string {
-  const status = runStatusKoreanLabel(run.status);
-  return run.lifecyclePhase ? `${status} · ${lifecyclePhaseKoreanLabel(run.lifecyclePhase)}` : status;
+  const live = deriveRunLiveState(run);
+  return run.lifecyclePhase ? `${live.label} · ${lifecyclePhaseKoreanLabel(run.lifecyclePhase)}` : live.label;
 }
 
-function runTone(run: AgentRunSummary): "running" | "queued" | "attention" {
-  if (run.status === "Running") return "running";
-  if (run.status === "Queued") return "queued";
-  return "attention";
-}
-
-function isAttentionRun(status: string): boolean {
-  return status === "Failed" || status === "TimedOut" || status === "NeedsInspection" || status === "Canceled";
-}
-
-function runStatusKoreanLabel(status: string): string {
-  if (status === "NeedsInspection") return "점검 필요";
-  if (status === "Failed") return "실패";
-  if (status === "TimedOut") return "시간 초과";
-  if (status === "Canceled") return "취소됨";
-  if (status === "Running") return "실행 중";
-  if (status === "Queued") return "대기 중";
-  if (status === "Succeeded") return "성공";
-  return status;
+function runTone(run: AgentRunSummary): "running" | "queued" | "attention" | "done" {
+  return deriveRunLiveState(run).tone;
 }
 
 function failureKindLabel(kind: string): string {

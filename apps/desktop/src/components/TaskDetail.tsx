@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { useToast } from "./ToastProvider";
 import { api } from "../lib/api";
+import { deriveRunLiveState, selectVisibleRun } from "../lib/runLiveState";
 import { runnerReadinessFor, roleLabel, type RoleId } from "../lib/runnerReadiness";
 import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
 import type {
@@ -81,7 +82,6 @@ const DETAIL_TABS: Array<{ id: DetailTab; label: string }> = [
 ];
 
 const ROLE_IDS: RoleId[] = ["planner", "coder", "plan_verifier", "code_reviewer", "tester"];
-const RUN_STALE_NOTICE_MS = 5 * 60 * 1000;
 
 interface TaskDetailProps {
   snapshot: ProjectSnapshot;
@@ -599,7 +599,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
   const activeRetryableRun = activeRoleId
     ? runs.find((run) => run.roleId === activeRoleId && isRetryableRunStatus(run.status)) ?? null
     : null;
-  const visibleRun = runs.find((run) => run.status === "Running" || run.status === "Queued") ?? runs[0] ?? null;
+  const visibleRun = selectVisibleRun(runs);
   const visibleRunEvents = visibleRun ? runEvents[visibleRun.id] ?? [] : [];
   const visibleRunActivity = visibleRun ? runActivityFor(visibleRun, visibleRunEvents) : null;
   const taskBlockers = taskBlockersFor({
@@ -1441,11 +1441,31 @@ function NextAction({
 
   if (runningRun) {
     const cancelBusy = busyAction?.key === `cancel:${runningRun.id}`;
+    const live = deriveRunLiveState(runningRun);
+    if (live.state === "approval_pending") {
+      return (
+        <div className="next-action-card waiting">
+          <div>
+            <strong>{roleLabel(runningRun.roleId)} 승인 대기</strong>
+            <p>이 run은 사용자 승인이 필요합니다. 승인 전에는 다음 단계로 진행하지 않습니다.</p>
+          </div>
+          <button
+            aria-busy={cancelBusy ? true : undefined}
+            className="primary-button"
+            disabled={busy}
+            onClick={() => void onCancelHost(runningRun.id)}
+            type="button"
+          >
+            {cancelBusy ? "중지 요청 중..." : "실행 중지"}
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="next-action-card">
         <div>
-          <strong>{roleLabel(runningRun.roleId)} 실행 중</strong>
-          <p>조용해 보여도 실행은 계속 유지합니다. 완료/실패 전환은 structured result나 명시 report가 도착했을 때만 처리합니다.</p>
+          <strong>{roleLabel(runningRun.roleId)} {live.label}</strong>
+          <p>{live.summary}</p>
         </div>
         <button
           aria-busy={cancelBusy ? true : undefined}
@@ -1588,7 +1608,8 @@ function isRetryableRunStatus(status: AgentRunSummary["status"]): boolean {
 }
 
 function runStatusSummary(run: AgentRunSummary): string {
-  const parts = [run.status];
+  const live = deriveRunLiveState(run);
+  const parts = [live.label];
   if (run.lifecyclePhase) parts.push(run.lifecyclePhase);
   if (run.failureKind) parts.push(run.failureKind);
   else if (run.resultStatus) parts.push(run.resultStatus);
@@ -1873,53 +1894,67 @@ function hasSchemaProblem(message: string): boolean {
 }
 
 function runActivityFor(run: AgentRunSummary, events: RunEventSummary[]): {
-  tone: "live" | "quiet" | "queued" | "done";
+  tone: "live" | "quiet" | "queued" | "done" | "attention";
   title: string;
   description: string;
 } {
   const latestEvent = events.length > 0 ? events[events.length - 1] : null;
-  const anchor = latestEvent?.createdAt ?? run.heartbeatAt ?? run.startedAt ?? run.updatedAt ?? run.createdAt;
-  const ageMs = ageFromNow(anchor);
-  const ageLabel = formatRelativeAge(anchor);
+  const runWithEvent = latestEvent
+    ? {
+        ...run,
+        latestEventAt: latestEvent.createdAt,
+        latestEventKind: latestEvent.kind,
+        latestEventMessage: latestEvent.message,
+      }
+    : run;
+  const live = deriveRunLiveState(runWithEvent);
 
-  if (run.status === "Queued") {
+  if (live.state === "queued") {
     return {
       tone: "queued",
       title: "Worker queue 대기",
-      description: `Context Pack은 준비됐고 실행 순서를 기다립니다. 마지막 상태 변경은 ${ageLabel}입니다.`,
+      description: `Context Pack은 준비됐고 실행 순서를 기다립니다. 마지막 상태 변경은 ${live.ageLabel}입니다.`,
     };
   }
 
-  if (run.status === "Running") {
-    if (!latestEvent) {
-      return {
-        tone: "quiet",
-        title: "실행 이벤트 대기",
-        description: "PTY 실행은 시작됐지만 아직 기록된 이벤트가 없습니다. 완료 여부는 report가 올 때까지 추정하지 않습니다.",
-      };
-    }
+  if (live.state === "approval_pending") {
+    return {
+      tone: "attention",
+      title: "승인 대기",
+      description: "이 run은 사용자 승인이 필요합니다. 승인 전에는 다음 단계로 진행하지 않습니다.",
+    };
+  }
 
-    if (ageMs > RUN_STALE_NOTICE_MS) {
-      return {
-        tone: "quiet",
-        title: "조용하지만 실행 중",
-        description: `마지막 이벤트는 ${ageLabel}입니다. Hive 방식처럼 프로세스 활동만으로 완료를 추정하지 않고, structured result/report를 기다립니다.`,
-      };
-    }
+  if (live.state === "starting") {
+    return {
+      tone: "quiet",
+      title: "시작 중",
+      description: "agent process를 준비하고 있습니다. 준비가 끝나면 실행 로그가 표시됩니다.",
+    };
+  }
 
+  if (live.state === "quiet" || live.state === "stalled_candidate") {
+    return {
+      tone: live.state === "stalled_candidate" ? "attention" : "quiet",
+      title: live.label,
+      description: `${live.summary} 마지막 신호는 ${live.ageLabel}입니다.`,
+    };
+  }
+
+  if (live.state === "running") {
     return {
       tone: "live",
       title: "실행 신호 수신 중",
-      description: `마지막 이벤트는 ${ageLabel}입니다. 결과 report가 오면 다음 gate로 이동합니다.`,
+      description: `마지막 신호는 ${live.ageLabel}입니다. 결과 report가 오면 다음 gate로 이동합니다.`,
     };
   }
 
   return {
     tone: "done",
-    title: "명시 report로 종료",
+    title: live.label,
     description: run.finishedAt
       ? `실행은 ${formatRelativeAge(run.finishedAt)}에 종료됐습니다. 상태 전환은 저장된 result를 기준으로 처리했습니다.`
-      : "실행이 종료됐습니다. 상세 근거는 events와 structured-result.json에서 확인할 수 있습니다.",
+      : `${live.summary} 상세 근거는 events와 structured-result.json에서 확인할 수 있습니다.`,
   };
 }
 

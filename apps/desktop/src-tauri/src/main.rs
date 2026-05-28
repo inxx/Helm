@@ -4,14 +4,15 @@ mod models;
 
 use crate::models::{
     AgentRunSummary, AiConnectionCheckResult, AiModelRefreshResult, AppSettings, ApprovalSummary,
-    CommandError, CommandResult, CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput,
-    DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary,
-    GitFileStatus, GitRepositoryState, NodeRuntimeSummary, OrchestratorSettings,
-    PlannerConversationInput, PlannerConversationResult, PlanningMaterializationSummary,
-    PlanningSessionDetail, PlanningSessionSummary, ProjectContext, ProjectSettingsPatch,
-    ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult, RunnerTemplateSummary,
-    SavePlanDraftRevisionInput, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
-    TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
+    CommandError, CommandResult, CoordinationExportSummary, CreateEpicInput,
+    CreatePlanningSessionInput, CreateTaskInput, DecidePlanDraftInput, EffectiveSettings,
+    EpicSummary, GitBranchSummary, GitCommitSummary, GitFileStatus, GitRepositoryState,
+    NodeRuntimeSummary, OrchestratorSettings, PlannerConversationInput, PlannerConversationResult,
+    PlanningMaterializationSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectContext,
+    ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult,
+    RunnerTemplateSummary, SavePlanDraftRevisionInput, TaskGraphConflictSummary,
+    TaskGraphExportSummary, TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
+    TerminalCommandResult, TerminalDirectoryEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -842,6 +843,16 @@ fn export_task_graph(
         &project_id,
         force.unwrap_or(false),
     )
+}
+
+#[tauri::command]
+fn export_coordination_snapshot(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<CoordinationExportSummary> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::export_coordination_snapshot(&conn, &context.root_path, &project_id)
 }
 
 #[tauri::command]
@@ -5406,6 +5417,7 @@ fn main() {
             get_task_worktree,
             ensure_task_worktree,
             export_task_graph,
+            export_coordination_snapshot,
             read_task_graph,
             check_task_graph_conflict,
             open_task_graph,

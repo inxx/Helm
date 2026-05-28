@@ -223,6 +223,21 @@ pub struct TaskGraphExportSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CoordinationExportSummary {
+    pub path: String,
+    pub manifest_path: String,
+    pub schema_version: i64,
+    pub task_count: usize,
+    pub run_count: usize,
+    pub message_count: usize,
+    pub file_count: usize,
+    pub export_content_hash: String,
+    pub warnings: Vec<String>,
+    pub written_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuditLogEntry {
     pub id: String,
     pub project_id: String,
@@ -539,6 +554,10 @@ pub struct AgentRunSummary {
     pub failure_kind: Option<String>,
     pub failure_reason: Option<String>,
     pub attempt: i64,
+    pub pending_run_approval_id: Option<String>,
+    pub latest_event_kind: Option<String>,
+    pub latest_event_message: Option<String>,
+    pub latest_event_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

@@ -1213,6 +1213,11 @@ textarea {
   color: var(--red);
 }
 
+.task-card-run.done span {
+  background: var(--green-weak);
+  color: var(--green);
+}
+
 .task-card-topline {
   display: flex;
   align-items: center;
@@ -1777,6 +1782,11 @@ textarea {
 .run-liveness-card.quiet {
   border-left-color: var(--amber);
   background: var(--amber-weak);
+}
+
+.run-liveness-card.attention {
+  border-left-color: var(--red);
+  background: var(--red-weak);
 }
 
 .run-liveness-card.done {

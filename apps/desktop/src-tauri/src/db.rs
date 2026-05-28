@@ -1,16 +1,17 @@
 use crate::git;
 use crate::models::{
-    AgentRunSummary, ApprovalSummary, AuditLogEntry, CommandError, CommandResult, CreateEpicInput,
-    CreatePlanningSessionInput, CreateTaskInput, DecidePlanDraftInput, EffectiveSettings,
-    EpicSummary, GitFileStatus, PlanDraftRevisionSummary, PlanningApprovalSummary,
-    PlanningMaterializationSummary, PlanningMessageSummary, PlanningSessionDetail,
-    PlanningSessionSummary, ProjectSettingsPatch, ProjectSummary, RunEventSummary,
-    SavePlanDraftRevisionInput, TaskCounts, TaskExternalRefInput, TaskExternalRefSummary,
-    TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary, TaskTimelineEntry,
-    TaskWorktreeSummary,
+    AgentRunSummary, ApprovalSummary, AuditLogEntry, CommandError, CommandResult,
+    CoordinationExportSummary, CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput,
+    DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitFileStatus, PlanDraftRevisionSummary,
+    PlanningApprovalSummary, PlanningMaterializationSummary, PlanningMessageSummary,
+    PlanningSessionDetail, PlanningSessionSummary, ProjectSettingsPatch, ProjectSummary,
+    RunEventSummary, SavePlanDraftRevisionInput, TaskCounts, TaskExternalRefInput,
+    TaskExternalRefSummary, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
+    TaskTimelineEntry, TaskWorktreeSummary,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -2519,6 +2520,33 @@ pub fn list_agent_runs(
             "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
                     stdout_log_path, stderr_log_path, repair_request_id, exit_code, result_status, started_at, finished_at,
                     lifecycle_phase, claimed_at, heartbeat_at, failure_kind, failure_reason, attempt,
+                    (SELECT approvals.id
+                       FROM approvals
+                      WHERE approvals.project_id = agent_runs.project_id
+                        AND approvals.entity_type = 'AgentRun'
+                        AND approvals.entity_id = agent_runs.id
+                        AND approvals.approval_type = 'RunApproval'
+                        AND approvals.status = 'Pending'
+                      ORDER BY approvals.created_at DESC
+                      LIMIT 1),
+                    (SELECT run_events.kind
+                       FROM run_events
+                      WHERE run_events.run_id = agent_runs.id
+                        AND run_events.kind NOT IN ('stdout', 'stderr')
+                      ORDER BY run_events.seq DESC
+                      LIMIT 1),
+                    (SELECT run_events.message
+                       FROM run_events
+                      WHERE run_events.run_id = agent_runs.id
+                        AND run_events.kind NOT IN ('stdout', 'stderr')
+                      ORDER BY run_events.seq DESC
+                      LIMIT 1),
+                    (SELECT run_events.created_at
+                       FROM run_events
+                      WHERE run_events.run_id = agent_runs.id
+                        AND run_events.kind NOT IN ('stdout', 'stderr')
+                      ORDER BY run_events.seq DESC
+                      LIMIT 1),
                     created_at, updated_at
              FROM agent_runs WHERE project_id = ?1 AND task_id = ?2 ORDER BY created_at DESC",
         )
@@ -2612,6 +2640,238 @@ pub fn export_task_graph(
         written_at: now(),
         conflict: check_task_graph_conflict(root)?,
     })
+}
+
+pub fn coordination_export_path(root: &Path) -> PathBuf {
+    root.join(".helm").join("coordination")
+}
+
+pub fn export_coordination_snapshot(
+    conn: &Connection,
+    root: &Path,
+    project_id: &str,
+) -> CommandResult<CoordinationExportSummary> {
+    let exported_at = now();
+    let project = get_project(conn, project_id)?;
+    let settings = effective_settings(conn, project_id)?;
+    let tasks = list_tasks(conn, project_id)?;
+    let mut runs = Vec::new();
+    for task in &tasks {
+        runs.extend(list_agent_runs(conn, project_id, &task.id)?);
+    }
+    runs.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let messages = list_coordination_events(conn, project_id)?;
+    let db_schema_version = conn
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or(SUPPORTED_SCHEMA_VERSION);
+    let export_dir = coordination_export_path(root);
+    let tasks_dir = export_dir.join("tasks");
+    let runs_dir = export_dir.join("runs");
+    let messages_dir = export_dir.join("messages");
+    clear_coordination_managed_paths(&export_dir)?;
+    fs::create_dir_all(&tasks_dir)
+        .map_err(|err| CommandError::io("coordination tasks 폴더를 만들지 못했습니다.", err))?;
+    fs::create_dir_all(&runs_dir)
+        .map_err(|err| CommandError::io("coordination runs 폴더를 만들지 못했습니다.", err))?;
+    fs::create_dir_all(&messages_dir)
+        .map_err(|err| CommandError::io("coordination messages 폴더를 만들지 못했습니다.", err))?;
+
+    let mut files = Vec::new();
+    let agents = json!({
+        "schemaVersion": 1,
+        "projectId": project_id,
+        "aiConnections": settings.ai_connections,
+        "roleAssignments": settings.role_assignments,
+        "conductorConfig": settings.conductor_config
+    });
+    files.push(write_coordination_json(
+        &export_dir,
+        "agents.json",
+        &agents,
+    )?);
+
+    for task in &tasks {
+        files.push(write_coordination_json(
+            &export_dir,
+            &format!("tasks/{}.json", task.id),
+            task,
+        )?);
+    }
+    for run in &runs {
+        files.push(write_coordination_json(
+            &export_dir,
+            &format!("runs/{}.json", run.id),
+            run,
+        )?);
+    }
+    for event in &messages {
+        files.push(write_coordination_json(
+            &export_dir,
+            &format!("messages/{}.json", event.id),
+            event,
+        )?);
+    }
+
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    let export_content_hash = coordination_content_hash(&files);
+    let manifest = CoordinationManifest {
+        schema_version: 1,
+        exported_at: &exported_at,
+        project_id,
+        project_name: &project.name,
+        db_schema_version,
+        source_db_relative_path: ".helm/helm.sqlite",
+        counts: CoordinationCounts {
+            tasks: tasks.len(),
+            runs: runs.len(),
+            messages: messages.len(),
+            files: files.len() + 1,
+        },
+        files: &files,
+        warnings: &[] as &[String],
+        export_content_hash: &export_content_hash,
+    };
+    let manifest_file = write_coordination_json(&export_dir, "manifest.json", &manifest)?;
+
+    Ok(CoordinationExportSummary {
+        path: export_dir.to_string_lossy().to_string(),
+        manifest_path: manifest_file.absolute_path,
+        schema_version: 1,
+        task_count: tasks.len(),
+        run_count: runs.len(),
+        message_count: messages.len(),
+        file_count: files.len() + 1,
+        export_content_hash,
+        warnings: Vec::new(),
+        written_at: exported_at,
+    })
+}
+
+fn clear_coordination_managed_paths(export_dir: &Path) -> CommandResult<()> {
+    for relative in ["tasks", "runs", "messages"] {
+        let path = export_dir.join(relative);
+        if path.exists() {
+            fs::remove_dir_all(&path).map_err(|err| {
+                CommandError::io("coordination export 이전 파일을 정리하지 못했습니다.", err)
+            })?;
+        }
+    }
+    for relative in ["agents.json", "manifest.json"] {
+        let path = export_dir.join(relative);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|err| {
+                CommandError::io("coordination export 이전 파일을 정리하지 못했습니다.", err)
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CoordinationManifest<'a> {
+    schema_version: i64,
+    exported_at: &'a str,
+    project_id: &'a str,
+    project_name: &'a str,
+    db_schema_version: i64,
+    source_db_relative_path: &'a str,
+    counts: CoordinationCounts,
+    files: &'a [CoordinationFileRecord],
+    warnings: &'a [String],
+    export_content_hash: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CoordinationCounts {
+    tasks: usize,
+    runs: usize,
+    messages: usize,
+    files: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CoordinationFileRecord {
+    path: String,
+    absolute_path: String,
+    size_bytes: usize,
+    content_hash: String,
+}
+
+fn list_coordination_events(
+    conn: &Connection,
+    project_id: &str,
+) -> CommandResult<Vec<RunEventSummary>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, project_id, task_id, run_id, seq, kind, message, payload_json, created_at
+             FROM run_events
+             WHERE project_id = ?1
+               AND kind IN ('status', 'approval', 'result', 'artifact', 'system')
+             ORDER BY run_id ASC, seq ASC, id ASC",
+        )
+        .map_err(|err| CommandError::database("coordination events를 읽지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id], map_run_event)
+        .map_err(|err| CommandError::database("coordination events를 읽지 못했습니다.", err))?;
+    collect_rows(rows, "coordination events를 읽지 못했습니다.")
+}
+
+fn write_coordination_json<T: Serialize>(
+    export_dir: &Path,
+    relative_path: &str,
+    value: &T,
+) -> CommandResult<CoordinationFileRecord> {
+    let path = export_dir.join(relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            CommandError::io("coordination export 폴더를 만들지 못했습니다.", err)
+        })?;
+    }
+    let mut content = serde_json::to_string_pretty(value).map_err(|err| {
+        CommandError::with_details(
+            "SerializationFailed",
+            "coordination JSON을 만들지 못했습니다.",
+            err,
+        )
+    })?;
+    content.push('\n');
+    let tmp_path = path.with_extension(format!(
+        "{}tmp",
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| format!("{ext}."))
+            .unwrap_or_default()
+    ));
+    fs::write(&tmp_path, content.as_bytes())
+        .map_err(|err| CommandError::io("coordination export 임시 파일을 쓰지 못했습니다.", err))?;
+    fs::rename(&tmp_path, &path)
+        .map_err(|err| CommandError::io("coordination export 파일을 교체하지 못했습니다.", err))?;
+    Ok(CoordinationFileRecord {
+        path: relative_path.to_string(),
+        absolute_path: path.to_string_lossy().to_string(),
+        size_bytes: content.len(),
+        content_hash: stable_hash_hex(content.as_bytes()),
+    })
+}
+
+fn coordination_content_hash(files: &[CoordinationFileRecord]) -> String {
+    let mut content = String::new();
+    for file in files {
+        content.push_str(&file.path);
+        content.push('\0');
+        content.push_str(&file.content_hash);
+        content.push('\n');
+    }
+    stable_hash_hex(content.as_bytes())
 }
 
 fn render_task_graph(
@@ -3222,6 +3482,33 @@ pub fn next_queued_agent_run(
         "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
                 stdout_log_path, stderr_log_path, repair_request_id, exit_code, result_status, started_at, finished_at,
                 lifecycle_phase, claimed_at, heartbeat_at, failure_kind, failure_reason, attempt,
+                (SELECT approvals.id
+                   FROM approvals
+                  WHERE approvals.project_id = agent_runs.project_id
+                    AND approvals.entity_type = 'AgentRun'
+                    AND approvals.entity_id = agent_runs.id
+                    AND approvals.approval_type = 'RunApproval'
+                    AND approvals.status = 'Pending'
+                  ORDER BY approvals.created_at DESC
+                  LIMIT 1),
+                (SELECT run_events.kind
+                   FROM run_events
+                  WHERE run_events.run_id = agent_runs.id
+                    AND run_events.kind NOT IN ('stdout', 'stderr')
+                  ORDER BY run_events.seq DESC
+                  LIMIT 1),
+                (SELECT run_events.message
+                   FROM run_events
+                  WHERE run_events.run_id = agent_runs.id
+                    AND run_events.kind NOT IN ('stdout', 'stderr')
+                  ORDER BY run_events.seq DESC
+                  LIMIT 1),
+                (SELECT run_events.created_at
+                   FROM run_events
+                  WHERE run_events.run_id = agent_runs.id
+                    AND run_events.kind NOT IN ('stdout', 'stderr')
+                  ORDER BY run_events.seq DESC
+                  LIMIT 1),
                 created_at, updated_at
          FROM agent_runs
          WHERE project_id = ?1 AND status = 'Queued'
@@ -3474,6 +3761,33 @@ pub fn get_agent_run(conn: &Connection, run_id: &str) -> CommandResult<AgentRunS
         "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
                 stdout_log_path, stderr_log_path, repair_request_id, exit_code, result_status, started_at, finished_at,
                 lifecycle_phase, claimed_at, heartbeat_at, failure_kind, failure_reason, attempt,
+                (SELECT approvals.id
+                   FROM approvals
+                  WHERE approvals.project_id = agent_runs.project_id
+                    AND approvals.entity_type = 'AgentRun'
+                    AND approvals.entity_id = agent_runs.id
+                    AND approvals.approval_type = 'RunApproval'
+                    AND approvals.status = 'Pending'
+                  ORDER BY approvals.created_at DESC
+                  LIMIT 1),
+                (SELECT run_events.kind
+                   FROM run_events
+                  WHERE run_events.run_id = agent_runs.id
+                    AND run_events.kind NOT IN ('stdout', 'stderr')
+                  ORDER BY run_events.seq DESC
+                  LIMIT 1),
+                (SELECT run_events.message
+                   FROM run_events
+                  WHERE run_events.run_id = agent_runs.id
+                    AND run_events.kind NOT IN ('stdout', 'stderr')
+                  ORDER BY run_events.seq DESC
+                  LIMIT 1),
+                (SELECT run_events.created_at
+                   FROM run_events
+                  WHERE run_events.run_id = agent_runs.id
+                    AND run_events.kind NOT IN ('stdout', 'stderr')
+                  ORDER BY run_events.seq DESC
+                  LIMIT 1),
                 created_at, updated_at
          FROM agent_runs WHERE id = ?1",
         params![run_id],
@@ -3541,8 +3855,29 @@ pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> Comman
             params![timestamp, project_id],
         )
         .map_err(|err| CommandError::database("중단된 실행 상태를 정리하지 못했습니다.", err))?;
+    let expired_approvals = conn
+        .execute(
+            "UPDATE approvals
+             SET status = 'Expired',
+                 decision_reason = 'Helm app restarted before the host run finished.',
+                 decided_at = ?1,
+                 updated_at = ?1
+             WHERE project_id = ?2
+               AND entity_type = 'AgentRun'
+               AND approval_type = 'RunApproval'
+               AND status = 'Pending'
+               AND entity_id IN (
+                   SELECT id FROM agent_runs
+                    WHERE project_id = ?2
+                      AND status = 'NeedsInspection'
+                      AND lifecycle_phase = 'orphaned'
+                      AND failure_kind = 'orphaned_after_restart'
+               )",
+            params![timestamp, project_id],
+        )
+        .map_err(|err| CommandError::database("중단된 실행 승인을 정리하지 못했습니다.", err))?;
 
-    if count > 0 {
+    if count > 0 || expired_approvals > 0 {
         insert_audit(
             conn,
             project_id,
@@ -3553,6 +3888,7 @@ pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> Comman
                 "from": "Running",
                 "to": "NeedsInspection",
                 "count": count,
+                "expiredRunApprovals": expired_approvals,
                 "reason": "Helm app restarted before the host run finished"
             }),
         )?;
@@ -3665,7 +4001,22 @@ pub fn list_approvals(
             .prepare(
                 "SELECT id, project_id, entity_type, entity_id, approval_type, status,
                         requested_reason, decision_reason, requested_at, decided_at, created_at, updated_at
-                 FROM approvals WHERE project_id = ?1 AND status = ?2 ORDER BY requested_at DESC",
+                 FROM approvals
+                 WHERE project_id = ?1
+                   AND status = ?2
+                   AND NOT (
+                       status = 'Pending'
+                       AND entity_type = 'AgentRun'
+                       AND approval_type = 'RunApproval'
+                       AND entity_id IN (
+                           SELECT id FROM agent_runs
+                            WHERE project_id = ?1
+                              AND status = 'NeedsInspection'
+                              AND lifecycle_phase = 'orphaned'
+                              AND failure_kind = 'orphaned_after_restart'
+                       )
+                   )
+                 ORDER BY requested_at DESC",
             )
             .map_err(|err| CommandError::database("승인 요청을 읽지 못했습니다.", err))?;
         let rows = stmt
@@ -3677,7 +4028,21 @@ pub fn list_approvals(
         .prepare(
             "SELECT id, project_id, entity_type, entity_id, approval_type, status,
                     requested_reason, decision_reason, requested_at, decided_at, created_at, updated_at
-             FROM approvals WHERE project_id = ?1 ORDER BY requested_at DESC",
+             FROM approvals
+             WHERE project_id = ?1
+               AND NOT (
+                   status = 'Pending'
+                   AND entity_type = 'AgentRun'
+                   AND approval_type = 'RunApproval'
+                   AND entity_id IN (
+                       SELECT id FROM agent_runs
+                        WHERE project_id = ?1
+                          AND status = 'NeedsInspection'
+                          AND lifecycle_phase = 'orphaned'
+                          AND failure_kind = 'orphaned_after_restart'
+                   )
+               )
+             ORDER BY requested_at DESC",
         )
         .map_err(|err| CommandError::database("승인 요청을 읽지 못했습니다.", err))?;
     let rows = stmt
@@ -3813,8 +4178,12 @@ fn map_agent_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunSummary> {
         failure_kind: row.get(18)?,
         failure_reason: row.get(19)?,
         attempt: row.get(20)?,
-        created_at: row.get(21)?,
-        updated_at: row.get(22)?,
+        pending_run_approval_id: row.get(21)?,
+        latest_event_kind: row.get(22)?,
+        latest_event_message: row.get(23)?,
+        latest_event_at: row.get(24)?,
+        created_at: row.get(25)?,
+        updated_at: row.get(26)?,
     })
 }
 
@@ -8497,6 +8866,109 @@ mod tests {
     }
 
     #[test]
+    fn coordination_export_writes_manifest_and_compacted_events() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "planner")
+            .expect("context");
+        append_run_event(
+            &conn,
+            &project.id,
+            &task.id,
+            &run.id,
+            "stdout",
+            "noisy output",
+            json!({ "delta": "noisy output" }),
+        )
+        .expect("stdout event");
+        append_run_event(
+            &conn,
+            &project.id,
+            &task.id,
+            &run.id,
+            "system",
+            "semantic signal",
+            json!({ "type": "test.signal" }),
+        )
+        .expect("system event");
+
+        let exported =
+            export_coordination_snapshot(&conn, &repo.root, &project.id).expect("coordination");
+
+        assert_eq!(exported.task_count, 1);
+        assert_eq!(exported.run_count, 1);
+        assert!(exported.message_count >= 3);
+        assert!(coordination_export_path(&repo.root)
+            .join("manifest.json")
+            .exists());
+        assert!(coordination_export_path(&repo.root)
+            .join(format!("tasks/{}.json", task.id))
+            .exists());
+        assert!(coordination_export_path(&repo.root)
+            .join(format!("runs/{}.json", run.id))
+            .exists());
+        let manifest_raw =
+            fs::read_to_string(coordination_export_path(&repo.root).join("manifest.json"))
+                .expect("manifest");
+        let manifest: Value = serde_json::from_str(&manifest_raw).expect("manifest json");
+        assert_eq!(manifest["schemaVersion"], 1);
+        assert_eq!(manifest["projectId"], project.id);
+        assert!(manifest["exportContentHash"].as_str().unwrap_or("").len() >= 16);
+        let message_files = fs::read_dir(coordination_export_path(&repo.root).join("messages"))
+            .expect("messages")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("message entries");
+        let exported_messages = message_files
+            .iter()
+            .map(|entry| fs::read_to_string(entry.path()).expect("message"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(exported_messages.contains("semantic signal"));
+        assert!(!exported_messages.contains("noisy output"));
+    }
+
+    #[test]
+    fn coordination_export_removes_stale_entity_files() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "planner")
+            .expect("context");
+
+        export_coordination_snapshot(&conn, &repo.root, &project.id).expect("first export");
+        assert!(coordination_export_path(&repo.root)
+            .join(format!("tasks/{}.json", task.id))
+            .exists());
+        assert!(coordination_export_path(&repo.root)
+            .join(format!("runs/{}.json", run.id))
+            .exists());
+
+        conn.execute("DELETE FROM run_events WHERE run_id = ?1", params![run.id])
+            .expect("delete events");
+        conn.execute("DELETE FROM agent_runs WHERE id = ?1", params![run.id])
+            .expect("delete run");
+        conn.execute("DELETE FROM tasks WHERE id = ?1", params![task.id])
+            .expect("delete task");
+
+        let exported =
+            export_coordination_snapshot(&conn, &repo.root, &project.id).expect("second export");
+        assert_eq!(exported.task_count, 0);
+        assert_eq!(exported.run_count, 0);
+        assert!(!coordination_export_path(&repo.root)
+            .join(format!("tasks/{}.json", task.id))
+            .exists());
+        assert!(!coordination_export_path(&repo.root)
+            .join(format!("runs/{}.json", run.id))
+            .exists());
+        assert!(coordination_export_path(&repo.root)
+            .join("manifest.json")
+            .exists());
+    }
+
+    #[test]
     fn coder_is_blocked_before_plan_approval_and_allowed_after_approval() {
         let repo = test_repo();
         let (mut conn, project) = open_test_project(&repo);
@@ -9418,6 +9890,16 @@ mod tests {
             ],
         )
         .expect("insert running run");
+        conn.execute(
+            "INSERT INTO approvals (
+               id, project_id, entity_type, entity_id, approval_type, status,
+               requested_reason, decision_reason, requested_at, decided_at, created_at, updated_at
+             )
+             VALUES (?1, ?2, 'AgentRun', ?3, 'RunApproval', 'Pending',
+                     'test approval', NULL, ?4, NULL, ?4, ?4)",
+            params![new_id(), project.id, run_id, timestamp],
+        )
+        .expect("insert pending run approval");
 
         let count = reconcile_interrupted_runs(&conn, &project.id).expect("reconcile");
         assert_eq!(count, 1);
@@ -9427,5 +9909,55 @@ mod tests {
         assert_eq!(run.lifecycle_phase.as_deref(), Some("orphaned"));
         assert_eq!(run.failure_kind.as_deref(), Some("orphaned_after_restart"));
         assert!(run.finished_at.is_some());
+        let approval_status: String = conn
+            .query_row(
+                "SELECT status FROM approvals WHERE entity_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .expect("approval status");
+        assert_eq!(approval_status, "Expired");
+    }
+
+    #[test]
+    fn pending_run_approval_for_orphaned_run_is_hidden() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let timestamp = now();
+        let run_id = new_id();
+        conn.execute(
+            "INSERT INTO agent_runs (
+               id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+               stdout_log_path, stderr_log_path, result_status, started_at, finished_at,
+               lifecycle_phase, failure_kind, failure_reason, created_at, updated_at
+             )
+             VALUES (?1, ?2, ?3, 'coder', 'NeedsInspection', ?4, 'summary.md', 'structured-result.json',
+                     'stdout.log', 'stderr.log', 'needs_changes', ?5, ?5,
+                     'orphaned', 'orphaned_after_restart',
+                     'Helm app restarted before the host run finished.', ?5, ?5)",
+            params![
+                run_id,
+                project.id,
+                task.id,
+                ".helm/artifacts/runs/orphaned-approval-test",
+                timestamp
+            ],
+        )
+        .expect("insert orphaned run");
+        conn.execute(
+            "INSERT INTO approvals (
+               id, project_id, entity_type, entity_id, approval_type, status,
+               requested_reason, decision_reason, requested_at, decided_at, created_at, updated_at
+             )
+             VALUES (?1, ?2, 'AgentRun', ?3, 'RunApproval', 'Pending',
+                     'stale approval', NULL, ?4, NULL, ?4, ?4)",
+            params![new_id(), project.id, run_id, timestamp],
+        )
+        .expect("insert stale approval");
+
+        let pending =
+            list_approvals(&conn, &project.id, Some("Pending".to_string())).expect("approvals");
+        assert!(pending.is_empty());
     }
 }

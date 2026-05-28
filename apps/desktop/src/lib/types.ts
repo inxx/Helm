@@ -317,6 +317,19 @@ export interface TaskGraphExportSummary {
   conflict: TaskGraphConflictSummary;
 }
 
+export interface CoordinationExportSummary {
+  path: string;
+  manifestPath: string;
+  schemaVersion: number;
+  taskCount: number;
+  runCount: number;
+  messageCount: number;
+  fileCount: number;
+  exportContentHash: string;
+  warnings: string[];
+  writtenAt: string;
+}
+
 export interface TaskTimelineEntry {
   id: string;
   projectId: string;
@@ -508,6 +521,10 @@ export interface AgentRunSummary {
   failureKind: string | null;
   failureReason: string | null;
   attempt: number;
+  pendingRunApprovalId: string | null;
+  latestEventKind: RunEventSummary["kind"] | null;
+  latestEventMessage: string | null;
+  latestEventAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -6,6 +6,7 @@ import type {
   AiConnectionCheckResult,
   AiModelRefreshResult,
   ApprovalSummary,
+  CoordinationExportSummary,
   CreatePlanningSessionInput,
   CreateTaskInput,
   DecidePlanDraftInput,
@@ -142,6 +143,9 @@ export const api = {
   },
   exportTaskGraph(projectId: string, force = false) {
     return invoke<TaskGraphExportSummary>("export_task_graph", { projectId, force });
+  },
+  exportCoordinationSnapshot(projectId: string) {
+    return invoke<CoordinationExportSummary>("export_coordination_snapshot", { projectId });
   },
   readTaskGraph(projectId: string) {
     return invoke<string | null>("read_task_graph", { projectId });
