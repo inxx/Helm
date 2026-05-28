@@ -1,5 +1,10 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
+import { SerializeAddon } from "@xterm/addon-serialize";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import {
@@ -7,10 +12,14 @@ import {
   Folder,
   FolderOpen,
   GitBranch,
+  Play,
   Plus,
   RotateCcw,
+  Save,
+  Search,
   SplitSquareHorizontal,
   SquareTerminal,
+  Trash2,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -22,6 +31,7 @@ import type {
   TerminalDirectoryEntry,
   TerminalPtySnapshot,
   TerminalPtySummary,
+  TerminalSavedScriptSummary,
 } from "../lib/types";
 
 interface TerminalScreenProps {
@@ -63,6 +73,7 @@ interface TerminalAutocompleteSuggestion {
 
 const MAX_TERMINAL_COMMAND_HISTORY = 200;
 const MAX_TERMINAL_COMMAND_LENGTH = 500;
+const MAX_SAVED_TERMINAL_SCRIPT_LENGTH = 4000;
 
 function createPane(cwd: string, nodeBinPath: string | null): TerminalPaneState {
   return {
@@ -105,6 +116,9 @@ export function TerminalScreen({
   const paneRefs = useRef(new Map<string, HTMLElement>());
   const terminalRefs = useRef(new Map<string, HTMLDivElement>());
   const xtermRefs = useRef(new Map<string, XTerm>());
+  const fitAddonRefs = useRef(new Map<string, FitAddon>());
+  const searchAddonRefs = useRef(new Map<string, SearchAddon>());
+  const serializeAddonRefs = useRef(new Map<string, SerializeAddon>());
   const inputDisposers = useRef(new Map<string, { dispose: () => void }>());
   const resizeObservers = useRef(new Map<string, ResizeObserver>());
   const isActiveRef = useRef(isActive);
@@ -117,6 +131,9 @@ export function TerminalScreen({
   const [autocompleteByPane, setAutocompleteByPane] = useState<
     Record<string, TerminalAutocompleteSuggestion | null>
   >({});
+  const [savedScripts, setSavedScripts] = useState<TerminalSavedScriptSummary[]>([]);
+  const [savedScriptsBusy, setSavedScriptsBusy] = useState(false);
+  const [terminalSearchQuery, setTerminalSearchQuery] = useState("");
 
   const selectedPaneId = activePaneId ?? panes[0]?.id ?? null;
   const activePane = panes.find((pane) => pane.id === selectedPaneId) ?? panes[0] ?? null;
@@ -136,6 +153,19 @@ export function TerminalScreen({
     let cancelled = false;
     const restoredNodeBinPath = loadTerminalNodeSelection(snapshot.project.id);
     commandHistoryRef.current = loadTerminalCommandHistory(snapshot.project.id);
+    setSavedScripts([]);
+    setSavedScriptsBusy(true);
+    void api
+      .listTerminalSavedScripts(snapshot.project.id)
+      .then((scripts) => {
+        if (!cancelled) setSavedScripts(scripts);
+      })
+      .catch((err) => {
+        if (!cancelled) setControlError(errorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setSavedScriptsBusy(false);
+      });
     inputStateRefs.current.clear();
     autocompleteRefs.current.clear();
     setAutocompleteByPane({});
@@ -419,6 +449,87 @@ export function TerminalScreen({
     }
   }
 
+  async function saveScriptFromCurrentInput() {
+    if (!snapshot) return;
+    const candidate = savedScriptCandidateForPane(selectedPaneId);
+    const command = window.prompt("저장할 스크립트/명령어를 확인해주세요.", candidate);
+    if (command === null) return;
+    const normalizedCommand = normalizeSavedTerminalScript(command);
+    if (!normalizedCommand) {
+      setControlError("저장할 스크립트가 비어 있습니다.");
+      return;
+    }
+    if (!isSavedTerminalScriptCandidate(normalizedCommand)) {
+      setControlError("비밀값처럼 보이는 내용은 저장하지 않았습니다.");
+      return;
+    }
+    const suggestedName = savedScriptNameFromCommand(normalizedCommand);
+    const name = window.prompt("스크립트 이름", suggestedName);
+    if (name === null) return;
+    const normalizedName = name.trim().slice(0, 80) || suggestedName;
+    setSavedScriptsBusy(true);
+    try {
+      const saved = await api.saveTerminalSavedScript(snapshot.project.id, {
+        name: normalizedName,
+        command: normalizedCommand,
+        cwdMode: "active_pane",
+        nodeBinPath: activePane?.nodeBinPath ?? selectedNodeBinPath,
+      });
+      setSavedScripts((current) => [saved, ...current.filter((script) => script.id !== saved.id)]);
+      setControlError(null);
+    } catch (err) {
+      setControlError(errorMessage(err));
+    } finally {
+      setSavedScriptsBusy(false);
+    }
+  }
+
+  async function removeSavedScript(scriptId: string) {
+    if (!snapshot) return;
+    setSavedScriptsBusy(true);
+    try {
+      await api.deleteTerminalSavedScript(snapshot.project.id, scriptId);
+      setSavedScripts((current) => current.filter((script) => script.id !== scriptId));
+      setControlError(null);
+    } catch (err) {
+      setControlError(errorMessage(err));
+    } finally {
+      setSavedScriptsBusy(false);
+    }
+  }
+
+  async function runSavedScript(script: TerminalSavedScriptSummary) {
+    if (!activePane) {
+      setControlError("스크립트를 실행할 터미널 pane이 없습니다.");
+      return;
+    }
+    if (isDestructiveTerminalScript(script.command)) {
+      const confirmed = window.confirm(`위험할 수 있는 저장 스크립트입니다. 실행할까요?\n\n${script.command}`);
+      if (!confirmed) return;
+    }
+    setControlError(null);
+    setActivePaneId(activePane.id);
+    try {
+      await api.writeTerminalPty(activePane.id, `${script.command}\r`);
+      if (snapshot) {
+        const updated = await api.markTerminalSavedScriptUsed(snapshot.project.id, script.id);
+        setSavedScripts((current) => [updated, ...current.filter((candidate) => candidate.id !== updated.id)]);
+      }
+      xtermRefs.current.get(activePane.id)?.focus();
+    } catch (err) {
+      setControlError(errorMessage(err));
+    }
+  }
+
+  function savedScriptCandidateForPane(paneId: string | null): string {
+    if (paneId) {
+      const inputState = inputStateRefs.current.get(paneId);
+      const currentInput = inputState?.tracking ? normalizeSavedTerminalScript(inputState.value) : "";
+      if (currentInput) return currentInput;
+    }
+    return commandHistoryRef.current[0] ?? "";
+  }
+
   function ensureTerminal(pane: TerminalPaneState) {
     if (!snapshot || !isActiveRef.current || xtermRefs.current.has(pane.id)) return;
     const container = terminalRefs.current.get(pane.id);
@@ -457,8 +568,32 @@ export function TerminalScreen({
       },
     });
 
+    const fitAddon = new FitAddon();
+    const searchAddon = new SearchAddon();
+    const serializeAddon = new SerializeAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.loadAddon(searchAddon);
+    terminal.loadAddon(serializeAddon);
+
+    try {
+      const unicode11Addon = new Unicode11Addon();
+      terminal.loadAddon(unicode11Addon);
+      terminal.unicode.activeVersion = "11";
+    } catch {
+      // Unicode11 is an enhancement; the terminal should still open without it.
+    }
+
+    try {
+      terminal.loadAddon(new WebLinksAddon());
+    } catch {
+      // Web links are optional and should never prevent PTY startup.
+    }
+
     terminal.open(container);
     xtermRefs.current.set(pane.id, terminal);
+    fitAddonRefs.current.set(pane.id, fitAddon);
+    searchAddonRefs.current.set(pane.id, searchAddon);
+    serializeAddonRefs.current.set(pane.id, serializeAddon);
     inputDisposers.current.set(
       pane.id,
       terminal.onData((data) => {
@@ -557,8 +692,18 @@ export function TerminalScreen({
     if (!terminal || !container) return null;
     const rect = container.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return null;
-    const size = terminalSize(container);
-    terminal.resize(size.cols, size.rows);
+    const fitAddon = fitAddonRefs.current.get(id);
+    let size = terminalSize(container);
+    if (fitAddon) {
+      try {
+        fitAddon.fit();
+        size = { cols: terminal.cols, rows: terminal.rows };
+      } catch {
+        terminal.resize(size.cols, size.rows);
+      }
+    } else {
+      terminal.resize(size.cols, size.rows);
+    }
     void api.resizeTerminalPty(id, size).catch(() => {
       // 세션 시작 전 resize가 먼저 발생할 수 있어 무시한다.
     });
@@ -572,6 +717,9 @@ export function TerminalScreen({
     inputDisposers.current.delete(id);
     xtermRefs.current.get(id)?.dispose();
     xtermRefs.current.delete(id);
+    fitAddonRefs.current.delete(id);
+    searchAddonRefs.current.delete(id);
+    serializeAddonRefs.current.delete(id);
     lastOutputSeqRefs.current.delete(id);
     restoringPaneIds.current.delete(id);
     pendingOutputRefs.current.delete(id);
@@ -765,6 +913,21 @@ export function TerminalScreen({
     });
   }
 
+  function searchActivePane(direction: "next" | "previous") {
+    if (!selectedPaneId || !terminalSearchQuery.trim()) return;
+    const searchAddon = searchAddonRefs.current.get(selectedPaneId);
+    if (!searchAddon) return;
+    const query = terminalSearchQuery.trim();
+    const found =
+      direction === "next" ? searchAddon.findNext(query) : searchAddon.findPrevious(query);
+    if (!found) {
+      setControlError(`터미널에서 '${query}' 검색 결과가 없습니다.`);
+    } else {
+      setControlError(null);
+    }
+    xtermRefs.current.get(selectedPaneId)?.focus();
+  }
+
   return (
     <section className="terminal-screen">
       <div className="terminal-workbench">
@@ -813,6 +976,48 @@ export function TerminalScreen({
             <Plus size={14} aria-hidden="true" />
             <span>새 pane</span>
           </button>
+          <section className="terminal-scripts" aria-label="저장된 터미널 스크립트">
+            <div className="terminal-scripts-title">
+              <span>Saved scripts</span>
+              <button onClick={() => void saveScriptFromCurrentInput()} type="button" title="현재 입력 또는 최근 명령 저장" disabled={savedScriptsBusy}>
+                <Save size={12} aria-hidden="true" />
+                저장
+              </button>
+            </div>
+            {savedScriptsBusy && savedScripts.length === 0 ? (
+              <p>저장된 스크립트를 불러오는 중입니다.</p>
+            ) : savedScripts.length === 0 ? (
+              <p>자주 쓰는 명령을 저장하면 여기서 바로 실행할 수 있습니다.</p>
+            ) : (
+              <ul>
+                {savedScripts.map((script) => (
+                  <li key={script.id}>
+                    <button
+                      className="terminal-script-run"
+                      onClick={() => void runSavedScript(script)}
+                      title={script.command}
+                      type="button"
+                    >
+                      <Play size={11} aria-hidden="true" />
+                      <span>
+                        <strong>{script.name}</strong>
+                        <small>{singleLineScriptPreview(script.command)}</small>
+                      </span>
+                    </button>
+                    <button
+                      className="terminal-script-delete"
+                      onClick={() => void removeSavedScript(script.id)}
+                      title="저장된 스크립트 삭제"
+                      type="button"
+                      aria-label={`${script.name} 삭제`}
+                    >
+                      <Trash2 size={11} aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
           <div className="terminal-workspace-state">
             <span>branch</span>
             <strong>{repository.currentBranch ?? "detached"}</strong>
@@ -890,6 +1095,23 @@ export function TerminalScreen({
                     </option>
                   ))}
                 </select>
+              </label>
+
+              <label className="terminal-search-control">
+                <Search size={14} aria-hidden="true" />
+                <input
+                  value={terminalSearchQuery}
+                  onChange={(event) => setTerminalSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      searchActivePane(event.shiftKey ? "previous" : "next");
+                    }
+                  }}
+                  placeholder="터미널 검색"
+                />
+                <button onClick={() => searchActivePane("previous")} type="button">이전</button>
+                <button onClick={() => searchActivePane("next")} type="button">다음</button>
               </label>
 
               <div className="terminal-toolbar-stats" aria-label="working tree 상태">
@@ -1053,12 +1275,35 @@ function normalizeTerminalCommand(value: string): string {
   return value.trim().slice(0, MAX_TERMINAL_COMMAND_LENGTH);
 }
 
+function normalizeSavedTerminalScript(value: string): string {
+  return value.trim().replace(/\r\n/g, "\n").slice(0, MAX_SAVED_TERMINAL_SCRIPT_LENGTH);
+}
+
+function isSavedTerminalScriptCandidate(command: string): boolean {
+  return command.length > 0 && command.length <= MAX_SAVED_TERMINAL_SCRIPT_LENGTH && !containsSensitiveShellValue(command);
+}
+
 function isTerminalCommandHistoryCandidate(command: string): boolean {
   if (command.length === 0 || command.length > MAX_TERMINAL_COMMAND_LENGTH) return false;
+  return !containsSensitiveShellValue(command);
+}
+
+function containsSensitiveShellValue(command: string): boolean {
   const lowerCommand = command.toLowerCase();
-  return !/(password|passwd|token|secret|api[-_]?key|authorization)\s*=|bearer\s+\S+/i.test(
-    lowerCommand,
-  );
+  return /(password|passwd|token|secret|api[-_]?key|authorization)\s*=|bearer\s+\S+/i.test(lowerCommand);
+}
+
+function isDestructiveTerminalScript(command: string): boolean {
+  return /(^|\s)(rm\s+-rf|sudo\s+rm|mkfs|dd\s+if=|git\s+clean\s+-fd|docker\s+system\s+prune|kubectl\s+delete)\b/i.test(command);
+}
+
+function savedScriptNameFromCommand(command: string): string {
+  const firstLine = command.split("\n").find((line) => line.trim()) ?? "script";
+  return firstLine.replace(/\s+/g, " ").slice(0, 48);
+}
+
+function singleLineScriptPreview(command: string): string {
+  return command.replace(/\s+/g, " ").slice(0, 90);
 }
 
 function isPrintableTerminalInput(char: string): boolean {

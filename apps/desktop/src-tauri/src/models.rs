@@ -348,6 +348,32 @@ pub struct TerminalDirectoryEntry {
     pub kind: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSavedScriptSummary {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub command: String,
+    pub cwd_mode: String,
+    pub node_bin_path: Option<String>,
+    pub tags: Vec<String>,
+    pub last_used_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveTerminalScriptInput {
+    pub id: Option<String>,
+    pub name: String,
+    pub command: String,
+    pub cwd_mode: Option<String>,
+    pub node_bin_path: Option<String>,
+    pub tags: Option<Vec<String>>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateEpicInput {

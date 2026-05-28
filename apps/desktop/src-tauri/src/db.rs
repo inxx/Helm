@@ -5,12 +5,12 @@ use crate::models::{
     DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitFileStatus, PlanDraftRevisionSummary,
     PlanningApprovalSummary, PlanningMaterializationSummary, PlanningMessageSummary,
     PlanningSessionDetail, PlanningSessionSummary, ProjectSettingsPatch, ProjectSummary,
-    RunEventSummary, SavePlanDraftRevisionInput, TaskCounts, TaskExternalRefInput,
-    TaskExternalRefSummary, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
-    TaskTimelineEntry, TaskWorktreeSummary,
+    RunEventSummary, SavePlanDraftRevisionInput, SaveTerminalScriptInput, TaskCounts,
+    TaskExternalRefInput, TaskExternalRefSummary, TaskGraphConflictSummary, TaskGraphExportSummary,
+    TaskSummary, TaskTimelineEntry, TaskWorktreeSummary, TerminalSavedScriptSummary,
 };
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -25,7 +25,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 9;
+const SUPPORTED_SCHEMA_VERSION: i64 = 10;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
@@ -35,6 +35,7 @@ const PHASE6_MIGRATION: &str = include_str!("../migrations/0006_run_lifecycle.sq
 const PHASE7_MIGRATION: &str = include_str!("../migrations/0007_repair_run_links.sql");
 const PHASE8_MIGRATION: &str = include_str!("../migrations/0008_planning_workspace.sql");
 const PHASE9_MIGRATION: &str = include_str!("../migrations/0009_planning_approvals_artifacts.sql");
+const PHASE10_MIGRATION: &str = include_str!("../migrations/0010_terminal_orca_parity.sql");
 const TASK_STATUS_ORDER: &[&str] = &[
     "Planned",
     "Ready",
@@ -80,6 +81,239 @@ pub fn open_existing_db(db_path: &Path) -> CommandResult<Connection> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(|err| CommandError::database("Helm 데이터베이스 설정에 실패했습니다.", err))?;
     Ok(conn)
+}
+
+pub fn list_terminal_saved_scripts(
+    conn: &Connection,
+    project_id: &str,
+) -> CommandResult<Vec<TerminalSavedScriptSummary>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, project_id, name, command, cwd_mode, node_bin_path, tags_json,
+                    last_used_at, created_at, updated_at
+             FROM terminal_saved_scripts
+             WHERE project_id = ?1
+             ORDER BY COALESCE(last_used_at, updated_at) DESC, updated_at DESC",
+        )
+        .map_err(|err| CommandError::database("저장된 터미널 스크립트를 읽지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id], terminal_saved_script_from_row)
+        .map_err(|err| CommandError::database("저장된 터미널 스크립트를 읽지 못했습니다.", err))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|err| CommandError::database("저장된 터미널 스크립트를 읽지 못했습니다.", err))
+}
+
+pub fn save_terminal_saved_script(
+    conn: &mut Connection,
+    project_id: &str,
+    input: SaveTerminalScriptInput,
+) -> CommandResult<TerminalSavedScriptSummary> {
+    ensure_project_exists(conn, project_id)?;
+    let id = input
+        .id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(new_id);
+    if let Some(existing_project_id) = conn
+        .query_row(
+            "SELECT project_id FROM terminal_saved_scripts WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|err| {
+            CommandError::database("저장된 터미널 스크립트를 확인하지 못했습니다.", err)
+        })?
+    {
+        if existing_project_id != project_id {
+            return Err(CommandError::validation(
+                "다른 프로젝트의 터미널 스크립트는 수정할 수 없습니다.",
+            ));
+        }
+    }
+    let name = normalize_terminal_script_name(&input.name)?;
+    let command = normalize_terminal_script_command(&input.command)?;
+    validate_terminal_script_safety(&command)?;
+    let cwd_mode = input.cwd_mode.unwrap_or_else(|| "active_pane".to_string());
+    validate_terminal_script_cwd_mode(&cwd_mode)?;
+    let node_bin_path = input.node_bin_path.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let tags = input
+        .tags
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .take(16)
+        .collect::<Vec<_>>();
+    let tags_json = serde_json::to_string(&tags).map_err(|err| {
+        CommandError::with_details("SerializationFailed", "태그를 저장하지 못했습니다.", err)
+    })?;
+    let timestamp = now();
+    conn.execute(
+        "INSERT INTO terminal_saved_scripts (
+           id, project_id, name, command, cwd_mode, node_bin_path, tags_json,
+           last_used_at, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           command = excluded.command,
+           cwd_mode = excluded.cwd_mode,
+           node_bin_path = excluded.node_bin_path,
+           tags_json = excluded.tags_json,
+           updated_at = excluded.updated_at",
+        params![
+            id,
+            project_id,
+            name,
+            command,
+            cwd_mode,
+            node_bin_path,
+            tags_json,
+            timestamp
+        ],
+    )
+    .map_err(|err| CommandError::database("터미널 스크립트를 저장하지 못했습니다.", err))?;
+    get_terminal_saved_script(conn, project_id, &id)
+}
+
+pub fn mark_terminal_saved_script_used(
+    conn: &mut Connection,
+    project_id: &str,
+    script_id: &str,
+) -> CommandResult<TerminalSavedScriptSummary> {
+    let timestamp = now();
+    let changed = conn
+        .execute(
+            "UPDATE terminal_saved_scripts
+             SET last_used_at = ?3, updated_at = ?3
+             WHERE project_id = ?1 AND id = ?2",
+            params![project_id, script_id, timestamp],
+        )
+        .map_err(|err| {
+            CommandError::database("터미널 스크립트 사용 시간을 저장하지 못했습니다.", err)
+        })?;
+    if changed == 0 {
+        return Err(CommandError::validation(
+            "저장된 터미널 스크립트를 찾을 수 없습니다.",
+        ));
+    }
+    get_terminal_saved_script(conn, project_id, script_id)
+}
+
+pub fn delete_terminal_saved_script(
+    conn: &mut Connection,
+    project_id: &str,
+    script_id: &str,
+) -> CommandResult<()> {
+    conn.execute(
+        "DELETE FROM terminal_saved_scripts WHERE project_id = ?1 AND id = ?2",
+        params![project_id, script_id],
+    )
+    .map_err(|err| CommandError::database("터미널 스크립트를 삭제하지 못했습니다.", err))?;
+    Ok(())
+}
+
+fn get_terminal_saved_script(
+    conn: &Connection,
+    project_id: &str,
+    script_id: &str,
+) -> CommandResult<TerminalSavedScriptSummary> {
+    conn.query_row(
+        "SELECT id, project_id, name, command, cwd_mode, node_bin_path, tags_json,
+                last_used_at, created_at, updated_at
+         FROM terminal_saved_scripts
+         WHERE project_id = ?1 AND id = ?2",
+        params![project_id, script_id],
+        terminal_saved_script_from_row,
+    )
+    .optional()
+    .map_err(|err| CommandError::database("저장된 터미널 스크립트를 읽지 못했습니다.", err))?
+    .ok_or_else(|| CommandError::validation("저장된 터미널 스크립트를 찾을 수 없습니다."))
+}
+
+fn terminal_saved_script_from_row(row: &Row<'_>) -> rusqlite::Result<TerminalSavedScriptSummary> {
+    let tags_json: String = row.get(6)?;
+    let tags = serde_json::from_str::<Vec<String>>(&tags_json).unwrap_or_default();
+    Ok(TerminalSavedScriptSummary {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        name: row.get(2)?,
+        command: row.get(3)?,
+        cwd_mode: row.get(4)?,
+        node_bin_path: row.get(5)?,
+        tags,
+        last_used_at: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn ensure_project_exists(conn: &Connection, project_id: &str) -> CommandResult<()> {
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM projects WHERE id = ?1",
+            params![project_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|err| CommandError::database("프로젝트를 확인하지 못했습니다.", err))?;
+    exists.ok_or_else(|| CommandError::validation("프로젝트를 찾을 수 없습니다."))
+}
+
+fn normalize_terminal_script_name(value: &str) -> CommandResult<String> {
+    let name = value.trim().chars().take(80).collect::<String>();
+    if name.is_empty() {
+        return Err(CommandError::validation("스크립트 이름을 입력해주세요."));
+    }
+    Ok(name)
+}
+
+fn normalize_terminal_script_command(value: &str) -> CommandResult<String> {
+    let command = value
+        .trim()
+        .replace("\r\n", "\n")
+        .chars()
+        .take(4000)
+        .collect::<String>();
+    if command.is_empty() {
+        return Err(CommandError::validation("저장할 스크립트가 비어 있습니다."));
+    }
+    Ok(command)
+}
+
+fn validate_terminal_script_cwd_mode(value: &str) -> CommandResult<()> {
+    match value {
+        "active_pane" | "project_root" | "fixed_cwd" => Ok(()),
+        _ => Err(CommandError::validation(
+            "지원하지 않는 터미널 스크립트 cwd mode입니다.",
+        )),
+    }
+}
+
+fn validate_terminal_script_safety(command: &str) -> CommandResult<()> {
+    let lower = command.to_lowercase();
+    let secret_markers = [
+        "password=",
+        "passwd=",
+        "token=",
+        "secret=",
+        "api_key=",
+        "apikey=",
+        "authorization=",
+        "bearer ",
+    ];
+    if secret_markers.iter().any(|marker| lower.contains(marker)) {
+        return Err(CommandError::validation(
+            "비밀값처럼 보이는 내용은 저장된 터미널 스크립트에 넣을 수 없습니다.",
+        ));
+    }
+    Ok(())
 }
 
 pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
@@ -135,6 +369,13 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
         || !table_has_column(conn, "plan_draft_revisions", "artifact_path")?
     {
         apply_phase9_schema_patch(conn)?;
+    }
+    if current_version < 10 {
+        apply_migration(conn, 10, "phase10_terminal_orca_parity", PHASE10_MIGRATION)?;
+    } else if !table_exists(conn, "terminal_saved_scripts")?
+        || !table_exists(conn, "terminal_layouts")?
+    {
+        apply_schema_patch(conn, PHASE10_MIGRATION)?;
     }
     Ok(())
 }
@@ -8346,6 +8587,64 @@ mod tests {
             },
         )
         .expect("create task")
+    }
+
+    #[test]
+    fn terminal_saved_scripts_are_project_scoped_and_durable() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+
+        let script = save_terminal_saved_script(
+            &mut conn,
+            &project.id,
+            SaveTerminalScriptInput {
+                id: None,
+                name: "Run checks".to_string(),
+                command: "pnpm --dir apps/desktop typecheck".to_string(),
+                cwd_mode: Some("active_pane".to_string()),
+                node_bin_path: None,
+                tags: Some(vec!["verify".to_string(), "".to_string()]),
+            },
+        )
+        .expect("save script");
+
+        assert_eq!(script.project_id, project.id);
+        assert_eq!(script.tags, vec!["verify".to_string()]);
+
+        let listed = list_terminal_saved_scripts(&conn, &project.id).expect("list scripts");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, script.id);
+
+        let used =
+            mark_terminal_saved_script_used(&mut conn, &project.id, &script.id).expect("mark used");
+        assert!(used.last_used_at.is_some());
+
+        delete_terminal_saved_script(&mut conn, &project.id, &script.id).expect("delete script");
+        assert!(list_terminal_saved_scripts(&conn, &project.id)
+            .expect("list after delete")
+            .is_empty());
+    }
+
+    #[test]
+    fn terminal_saved_scripts_reject_secret_like_commands() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+
+        let error = save_terminal_saved_script(
+            &mut conn,
+            &project.id,
+            SaveTerminalScriptInput {
+                id: None,
+                name: "Bad script".to_string(),
+                command: "curl -H 'Authorization=Bearer abc' https://example.com".to_string(),
+                cwd_mode: Some("active_pane".to_string()),
+                node_bin_path: None,
+                tags: None,
+            },
+        )
+        .expect_err("secret-like script rejected");
+
+        assert_eq!(error.code, "ValidationFailed");
     }
 
     fn valid_planning_draft() -> Value {

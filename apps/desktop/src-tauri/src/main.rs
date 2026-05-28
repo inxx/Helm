@@ -10,9 +10,9 @@ use crate::models::{
     NodeRuntimeSummary, OrchestratorSettings, PlannerConversationInput, PlannerConversationResult,
     PlanningMaterializationSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectContext,
     ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult,
-    RunnerTemplateSummary, SavePlanDraftRevisionInput, TaskGraphConflictSummary,
-    TaskGraphExportSummary, TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
-    TerminalCommandResult, TerminalDirectoryEntry,
+    RunnerTemplateSummary, SavePlanDraftRevisionInput, SaveTerminalScriptInput,
+    TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary, TaskTimelineEntry,
+    TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry, TerminalSavedScriptSummary,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1221,6 +1221,49 @@ fn resize_terminal_pty(
 fn stop_terminal_pty(terminal_id: String, state: State<'_, AppState>) -> CommandResult<()> {
     stop_terminal_session(&state, &terminal_id);
     Ok(())
+}
+
+#[tauri::command]
+fn list_terminal_saved_scripts(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<TerminalSavedScriptSummary>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::list_terminal_saved_scripts(&conn, &project_id)
+}
+
+#[tauri::command]
+fn save_terminal_saved_script(
+    project_id: String,
+    input: SaveTerminalScriptInput,
+    state: State<'_, AppState>,
+) -> CommandResult<TerminalSavedScriptSummary> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::save_terminal_saved_script(&mut conn, &project_id, input)
+}
+
+#[tauri::command]
+fn mark_terminal_saved_script_used(
+    project_id: String,
+    script_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<TerminalSavedScriptSummary> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::mark_terminal_saved_script_used(&mut conn, &project_id, &script_id)
+}
+
+#[tauri::command]
+fn delete_terminal_saved_script(
+    project_id: String,
+    script_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::delete_terminal_saved_script(&mut conn, &project_id, &script_id)
 }
 
 #[tauri::command]
@@ -5438,6 +5481,10 @@ fn main() {
             write_terminal_pty,
             resize_terminal_pty,
             stop_terminal_pty,
+            list_terminal_saved_scripts,
+            save_terminal_saved_script,
+            mark_terminal_saved_script_used,
+            delete_terminal_saved_script,
             run_stub_role,
             prepare_role_context,
             prepare_repair_context,

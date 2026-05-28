@@ -455,6 +455,28 @@ export interface TerminalPtySnapshot extends TerminalPtySummary {
   history: string;
 }
 
+export interface TerminalSavedScriptSummary {
+  id: string;
+  projectId: string;
+  name: string;
+  command: string;
+  cwdMode: "active_pane" | "project_root" | "fixed_cwd" | string;
+  nodeBinPath: string | null;
+  tags: string[];
+  lastUsedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveTerminalScriptInput {
+  id?: string | null;
+  name: string;
+  command: string;
+  cwdMode?: "active_pane" | "project_root" | "fixed_cwd" | string;
+  nodeBinPath?: string | null;
+  tags?: string[];
+}
+
 export interface ProjectSnapshot {
   project: ProjectSummary;
   settings: EffectiveSettings;

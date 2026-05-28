@@ -36,8 +36,10 @@ import type {
   TaskWorktreeSummary,
   TerminalCommandResult,
   TerminalDirectoryEntry,
+  SaveTerminalScriptInput,
   TerminalPtySnapshot,
   TerminalPtySummary,
+  TerminalSavedScriptSummary,
 } from "./types";
 
 export const api = {
@@ -257,6 +259,18 @@ export const api = {
   },
   getTerminalPtySnapshot(terminalId: string) {
     return invoke<TerminalPtySnapshot | null>("get_terminal_pty_snapshot", { terminalId });
+  },
+  listTerminalSavedScripts(projectId: string) {
+    return invoke<TerminalSavedScriptSummary[]>("list_terminal_saved_scripts", { projectId });
+  },
+  saveTerminalSavedScript(projectId: string, input: SaveTerminalScriptInput) {
+    return invoke<TerminalSavedScriptSummary>("save_terminal_saved_script", { projectId, input });
+  },
+  markTerminalSavedScriptUsed(projectId: string, scriptId: string) {
+    return invoke<TerminalSavedScriptSummary>("mark_terminal_saved_script_used", { projectId, scriptId });
+  },
+  deleteTerminalSavedScript(projectId: string, scriptId: string) {
+    return invoke<void>("delete_terminal_saved_script", { projectId, scriptId });
   },
   writeTerminalPty(terminalId: string, data: string) {
     return invoke<void>("write_terminal_pty", { terminalId, data });
