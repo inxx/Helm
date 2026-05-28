@@ -17,6 +17,7 @@ interface TasksScreenProps {
   onSelectTask: (taskId: string | null) => void;
   onOpenProject: () => void;
   onRefresh: () => Promise<void>;
+  onGoPlanning: () => void;
   onGoGit: () => void;
   onGoSettings: () => void;
 }
@@ -28,6 +29,7 @@ export function TasksScreen({
   onSelectTask,
   onOpenProject,
   onRefresh,
+  onGoPlanning,
   onGoGit,
   onGoSettings,
 }: TasksScreenProps) {
@@ -165,14 +167,14 @@ export function TasksScreen({
       const exported = await api.exportCoordinationSnapshot(snapshot.project.id);
       showToast({
         tone: "success",
-        title: "coordination export 완료",
+        title: "조정 스냅샷 내보내기 완료",
         description: `${exported.taskCount} Task · ${exported.runCount} Run · ${exported.messageCount} Message를 ${exported.path}에 저장했습니다.`,
       });
     } catch (error) {
       showToast({
         tone: "error",
-        title: "coordination export 실패",
-        description: messageFromError(error, "coordination snapshot을 저장하지 못했습니다."),
+        title: "조정 스냅샷 내보내기 실패",
+        description: messageFromError(error, "조정 스냅샷을 저장하지 못했습니다."),
       });
     } finally {
       setTaskGraphBusy(null);
@@ -188,35 +190,53 @@ export function TasksScreen({
             <p>계획, 실행, 검토, 테스트, 머지까지 태스크 흐름을 추적합니다.</p>
           </div>
           <div className="section-header-actions">
-            <button
-              className="secondary-button"
-              disabled={taskGraphBusy !== null}
-              onClick={openTaskGraph}
-              type="button"
-            >
-              {taskGraphBusy === "open" ? "여는 중..." : "tasks.md 열기"}
-            </button>
-            <button
-              className="secondary-button"
-              disabled={taskGraphBusy !== null}
-              onClick={regenerateTaskGraph}
-              type="button"
-            >
-              {taskGraphBusy === "export" ? "재생성 중..." : "tasks.md 재생성"}
-            </button>
-            <button
-              className="secondary-button"
-              disabled={taskGraphBusy !== null}
-              onClick={exportCoordinationSnapshot}
-              type="button"
-            >
-              {taskGraphBusy === "coordination" ? "내보내는 중..." : "coordination export"}
-            </button>
+            <div className="header-action-primary">
+              <button className="primary-button" onClick={onGoPlanning} type="button">
+                계획 만들기
+              </button>
+            </div>
+            <div className="header-action-tools" aria-label="태스크 보드 관리 작업">
+              <button
+                className="secondary-button"
+                disabled={taskGraphBusy !== null}
+                onClick={openTaskGraph}
+                title="현재 태스크 보드를 Markdown 파일로 엽니다."
+                type="button"
+              >
+                {taskGraphBusy === "open" ? "여는 중..." : "tasks.md 열기"}
+              </button>
+              <button
+                className="secondary-button caution"
+                disabled={taskGraphBusy !== null}
+                onClick={regenerateTaskGraph}
+                title="Helm DB 기준으로 tasks.md를 다시 씁니다. 외부 편집이 있으면 확인 후 진행합니다."
+                type="button"
+              >
+                {taskGraphBusy === "export" ? "다시 쓰는 중..." : "tasks.md 다시 쓰기"}
+              </button>
+              <button
+                className="secondary-button"
+                disabled={taskGraphBusy !== null}
+                onClick={exportCoordinationSnapshot}
+                title="다른 에이전트가 읽을 수 있는 .helm/coordination 스냅샷을 내보냅니다."
+                type="button"
+              >
+                {taskGraphBusy === "coordination" ? "내보내는 중..." : "조정 스냅샷 내보내기"}
+              </button>
+            </div>
           </div>
         </div>
 
         {snapshot.tasks.length === 0 ? (
-          <div className="empty-inline">계획에서 승인된 태스크가 아직 없습니다.</div>
+          <div className="empty-board-callout">
+            <div>
+              <strong>아직 실행할 Task가 없습니다.</strong>
+              <span>계획을 승인하면 실행, 검토, 테스트 흐름이 이 보드에 나타납니다.</span>
+            </div>
+            <button className="primary-button" onClick={onGoPlanning} type="button">
+              계획 탭에서 시작
+            </button>
+          </div>
         ) : (
           <div className={planTaskGroups.length > 1 ? "plan-task-groups" : "plan-task-groups single"}>
             {planTaskGroups.map((group) => (

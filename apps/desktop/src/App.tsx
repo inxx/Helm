@@ -240,6 +240,7 @@ export function App() {
               onSelectTask={setSelectedTaskId}
               onOpenProject={openProject}
               onRefresh={refresh}
+              onGoPlanning={() => setScreen("planning")}
               onGoGit={() => setScreen("git")}
               onGoSettings={() => setScreen("settings")}
             />

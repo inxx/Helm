@@ -510,6 +510,16 @@ h3 {
   border-color: var(--line-strong);
 }
 
+.secondary-button.caution {
+  border-color: color-mix(in oklch, var(--amber) 44%, var(--line));
+  color: var(--amber);
+}
+
+.secondary-button.caution:hover:not(:disabled) {
+  background: var(--amber-weak);
+  border-color: var(--amber);
+}
+
 .approval-actions button:first-child {
   border-color: var(--brand);
   background: var(--brand);
@@ -809,6 +819,20 @@ textarea {
   min-width: 0;
 }
 
+.header-action-primary,
+.header-action-tools {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.header-action-tools {
+  border-left: 1px solid var(--line-soft);
+  padding-left: 8px;
+}
+
 .section-header-actions button {
   height: 28px;
   padding: 0 10px;
@@ -991,6 +1015,7 @@ textarea {
   overflow-y: hidden;
   min-height: 0;
   background: var(--bg);
+  scroll-behavior: smooth;
 }
 
 .plan-task-group .task-board {
@@ -1004,6 +1029,18 @@ textarea {
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   border-right: 1px solid var(--line);
+}
+
+.task-column[data-tone="attention"] .task-column-header {
+  background: var(--amber-weak);
+}
+
+.task-column[data-tone="attention"] .task-column-header span::before {
+  background: var(--red);
+}
+
+.task-column[data-tone="active"] .task-column-header {
+  background: var(--brand-weak);
 }
 
 .task-column-header {
@@ -1086,19 +1123,20 @@ textarea {
 }
 
 .task-card-list.empty {
-  align-content: stretch;
+  align-content: start;
+  padding: 8px;
 }
 
 .task-column-empty {
   display: grid;
   align-content: center;
-  gap: 6px;
-  min-height: 128px;
+  gap: 3px;
+  min-height: 64px;
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius);
   background: var(--surface);
   color: var(--text-muted);
-  padding: 14px 12px;
+  padding: 10px;
 }
 
 .task-column-empty strong {
@@ -1111,8 +1149,8 @@ textarea {
 
 .task-column-empty span {
   color: var(--text-muted);
-  font-size: 11.5px;
-  line-height: 1.45;
+  font-size: 10.5px;
+  line-height: 1.35;
 }
 
 .task-card {
@@ -5463,6 +5501,35 @@ textarea {
   font-size: 12.5px;
 }
 
+.empty-board-callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 14px 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--surface), var(--surface-2));
+  padding: 18px 20px;
+}
+
+.empty-board-callout > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.empty-board-callout strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.empty-board-callout span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 /* ============================================================
    Responsive
    ============================================================ */
@@ -5471,6 +5538,22 @@ textarea {
   .tasks-layout.with-detail,
   .git-layout {
     grid-template-columns: 1fr;
+  }
+
+  .section-header,
+  .empty-board-callout {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .section-header-actions,
+  .header-action-tools {
+    justify-content: flex-start;
+  }
+
+  .header-action-tools {
+    border-left: 0;
+    padding-left: 0;
   }
 
   .plan-task-group-header {

@@ -1610,10 +1610,19 @@ function isRetryableRunStatus(status: AgentRunSummary["status"]): boolean {
 function runStatusSummary(run: AgentRunSummary): string {
   const live = deriveRunLiveState(run);
   const parts = [live.label];
-  if (run.lifecyclePhase) parts.push(run.lifecyclePhase);
-  if (run.failureKind) parts.push(run.failureKind);
-  else if (run.resultStatus) parts.push(run.resultStatus);
+  const rawDetail = run.failureKind ?? run.resultStatus ?? null;
+  if (rawDetail && !statusPartAlreadyCovered(live.label, rawDetail)) parts.push(rawDetail);
   return parts.join(" · ");
+}
+
+function statusPartAlreadyCovered(label: string, rawDetail: string): boolean {
+  const normalized = rawDetail.toLowerCase();
+  if (normalized.includes("orphaned") && label.includes("점검 필요")) return true;
+  if (normalized.includes("timeout") && label.includes("시간 초과")) return true;
+  if (normalized.includes("canceled") && label.includes("취소")) return true;
+  if (normalized.includes("failed") && label.includes("실패")) return true;
+  if (normalized.includes("needs_inspection") && label.includes("점검 필요")) return true;
+  return false;
 }
 
 function repairRequestsFromTimeline(timeline: TaskTimelineEntry[]): RepairRequestView[] {

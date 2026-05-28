@@ -63,7 +63,7 @@ export function deriveRunLiveState(run: AgentRunSummary, now = Date.now()): RunL
     return terminalAttention(
       run,
       orphaned ? "orphaned_after_restart" : "needs_inspection",
-      orphaned ? "점검 필요 · orphaned" : "점검 필요",
+      "점검 필요",
       orphaned ? "앱 재시작 후 실행 프로세스를 확인할 수 없습니다." : "결과와 gate 근거 확인이 필요합니다.",
       ageLabel,
     );
@@ -73,7 +73,7 @@ export function deriveRunLiveState(run: AgentRunSummary, now = Date.now()): RunL
     return {
       state: "queued",
       label: "대기 중",
-      summary: "runner가 작업을 가져가길 기다립니다.",
+      summary: "실행 담당자가 작업을 가져가길 기다립니다.",
       tone: "queued",
       ageLabel,
       attention: false,
@@ -98,7 +98,7 @@ export function deriveRunLiveState(run: AgentRunSummary, now = Date.now()): RunL
       return {
         state: "starting",
         label: "시작 중",
-        summary: "agent process를 준비하고 있습니다.",
+        summary: "실행 환경을 준비하고 있습니다.",
         tone: "running",
         ageLabel,
         attention: false,

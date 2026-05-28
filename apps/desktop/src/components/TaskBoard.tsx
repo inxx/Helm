@@ -1,5 +1,6 @@
+import { useEffect, useMemo, useRef } from "react";
 import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
-import { deriveRunLiveState, selectVisibleRun } from "../lib/runLiveState";
+import { deriveRunLiveState, isRunActiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
 import { roleLabel } from "../lib/runnerReadiness";
 import type { AgentRunSummary, TaskStatus, TaskSummary } from "../lib/types";
 
@@ -93,14 +94,26 @@ interface TaskBoardProps {
 
 export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask }: TaskBoardProps) {
   const tasksByStatus = groupTasksByStatus(tasks);
+  const boardRef = useRef<HTMLDivElement | null>(null);
+  const focusStatus = useMemo(
+    () => focusStatusForBoard(tasks, taskRuns, selectedTaskId),
+    [tasks, taskRuns, selectedTaskId],
+  );
+
+  useEffect(() => {
+    if (!focusStatus) return;
+    const column = boardRef.current?.querySelector<HTMLElement>(`[data-status="${focusStatus}"]`);
+    column?.scrollIntoView({ block: "nearest", inline: "start" });
+  }, [focusStatus]);
 
   return (
-    <div className="task-board">
+    <div className="task-board" data-focus-status={focusStatus ?? undefined} ref={boardRef}>
       {TASK_STATUS_ORDER.map((status) => {
         const columnTasks = tasksByStatus[status];
         const stage = STATUS_STAGE[status];
+        const columnTone = columnToneForTasks(columnTasks, taskRuns);
         return (
-          <section className="task-column" data-status={status} key={status}>
+          <section className="task-column" data-status={status} data-tone={columnTone} key={status}>
             <header className="task-column-header">
               <div>
                 <span>{TASK_STATUS_LABEL[status]}</span>
@@ -120,12 +133,15 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask }
                 const activeRun = activeRunForTask(taskRuns[task.id] ?? []);
                 const flowLabel = activeRun ? runFlowLabel(activeRun) : stage.next;
                 const flowCaption = activeRun ? "run" : "next";
+                const taskAriaLabel = taskCardAriaLabel(task, activeRun, flowLabel);
                 return (
                   <button
+                    aria-label={taskAriaLabel}
                     aria-pressed={task.id === selectedTaskId}
                     className={task.id === selectedTaskId ? "task-card selected" : "task-card"}
                     key={task.id}
                     onClick={() => onSelectTask(task.id === selectedTaskId ? null : task.id)}
+                    title={task.title}
                     type="button"
                   >
                     <div className="task-card-topline">
@@ -183,8 +199,7 @@ function runHint(run: AgentRunSummary): string {
 }
 
 function runStatusLabel(run: AgentRunSummary): string {
-  const live = deriveRunLiveState(run);
-  return run.lifecyclePhase ? `${live.label} · ${lifecyclePhaseKoreanLabel(run.lifecyclePhase)}` : live.label;
+  return deriveRunLiveState(run).label;
 }
 
 function runTone(run: AgentRunSummary): "running" | "queued" | "attention" | "done" {
@@ -202,19 +217,6 @@ function failureKindLabel(kind: string): string {
   return kind;
 }
 
-function lifecyclePhaseKoreanLabel(phase: string): string {
-  if (phase === "queued") return "대기";
-  if (phase === "running") return "실행 중";
-  if (phase === "completed") return "완료";
-  if (phase === "succeeded") return "성공";
-  if (phase === "failed") return "실패";
-  if (phase === "timed_out") return "시간 초과";
-  if (phase === "canceled") return "취소됨";
-  if (phase === "needs_inspection") return "점검 필요";
-  if (phase === "blocked") return "막힘";
-  return phase;
-}
-
 function humanizedFailureReason(run: AgentRunSummary): string | null {
   if (!run.failureReason) return null;
   if (run.failureKind === "needs_inspection") {
@@ -224,6 +226,45 @@ function humanizedFailureReason(run: AgentRunSummary): string | null {
     return "차단 이슈가 감지되어 다음 단계로 진행되지 않았습니다.";
   }
   return run.failureReason;
+}
+
+function taskCardAriaLabel(task: TaskSummary, activeRun: AgentRunSummary | null, flowLabel: string): string {
+  const parts = [`${task.title}`, `현재 단계 ${TASK_STATUS_LABEL[task.status]}`];
+  if (activeRun) {
+    const live = deriveRunLiveState(activeRun);
+    parts.push(`${roleLabel(activeRun.roleId)} ${live.label}`);
+  } else {
+    parts.push(`다음 액션 ${flowLabel}`);
+  }
+  return parts.join(". ");
+}
+
+function columnToneForTasks(
+  tasks: TaskSummary[],
+  taskRuns: Record<string, AgentRunSummary[]>,
+): "attention" | "active" | "idle" {
+  if (tasks.some((task) => (taskRuns[task.id] ?? []).some(isRunAttentionState) || task.status === "Blocked")) {
+    return "attention";
+  }
+  if (tasks.some((task) => (taskRuns[task.id] ?? []).some(isRunActiveState))) {
+    return "active";
+  }
+  return "idle";
+}
+
+function focusStatusForBoard(
+  tasks: TaskSummary[],
+  taskRuns: Record<string, AgentRunSummary[]>,
+  selectedTaskId: string | null,
+): TaskStatus | null {
+  const selectedTask = selectedTaskId ? tasks.find((task) => task.id === selectedTaskId) : null;
+  if (selectedTask) return selectedTask.status;
+
+  const attentionTask = tasks.find((task) => (taskRuns[task.id] ?? []).some(isRunAttentionState) || task.status === "Blocked");
+  if (attentionTask) return attentionTask.status;
+
+  const activeTask = tasks.find((task) => (taskRuns[task.id] ?? []).some(isRunActiveState));
+  return activeTask?.status ?? null;
 }
 
 function groupTasksByStatus(tasks: TaskSummary[]): Record<TaskStatus, TaskSummary[]> {
