@@ -53,7 +53,7 @@ const CATEGORIES: Array<{
 }> = [
   { id: "orchestrator", label: "오케스트레이터", hint: "모든 프로젝트에 적용되는 지휘자 AI", icon: BrainCircuit },
   { id: "templates", label: "Runner Templates", hint: "역할 프리셋과 AI CLI 연결을 한 번에 적용", icon: Layers },
-  { id: "connections", label: "AI CLI 연결", hint: "Codex · Claude Code · 기타 LLM 경로", icon: Plug },
+  { id: "connections", label: "AI CLI 연결", hint: "Codex · Claude Code · Gemini · 기타 LLM 경로", icon: Plug },
   { id: "assignments", label: "작업별 CLI 선택", hint: "계획 · 구현 · 검수 · 테스트 매핑", icon: Workflow },
   { id: "jira", label: "Jira", hint: "프로젝트 키와 기본 이슈 타입", icon: CheckCircle2 },
   { id: "worktree", label: "Worktree", hint: "병렬 작업 디렉터리 위치", icon: FolderTree },
@@ -517,7 +517,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     }
   }
 
-  function addConnection(provider: "codex" | "claude" | "custom") {
+  function addConnection(provider: "codex" | "claude" | "gemini" | "custom") {
     const candidate =
       provider === "custom"
         ? customConnection(nextCustomConnectionId())
@@ -532,13 +532,15 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     });
   }
 
-  function setOrchestratorConnectionProvider(provider: "codex" | "claude" | "custom") {
+  function setOrchestratorConnectionProvider(provider: "codex" | "claude" | "gemini" | "custom") {
     const connection =
       provider === "codex"
         ? codexConnection()
         : provider === "claude"
           ? claudeConnection()
-          : customConnection("orchestrator-custom");
+          : provider === "gemini"
+            ? geminiConnection()
+            : customConnection("orchestrator-custom");
     setAppSettings((current) =>
       normalizeAppSettings({
         ...current,
@@ -816,6 +818,14 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                       <button
                         className="secondary-button"
                         disabled={appSettingsBusy}
+                        onClick={() => setOrchestratorConnectionProvider("gemini")}
+                        type="button"
+                      >
+                        Gemini 사용
+                      </button>
+                      <button
+                        className="secondary-button"
+                        disabled={appSettingsBusy}
                         onClick={() => setOrchestratorConnectionProvider("custom")}
                         type="button"
                       >
@@ -920,7 +930,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                           <label className="connection-env-field">
                             <span>환경 변수</span>
                             <textarea
-                              placeholder="CODEX_HOME=/path/to/.codex"
+                              placeholder={envPlaceholder(orchestratorConnection.provider)}
                               rows={3}
                               value={formatConnectionEnv(orchestratorConnection.env)}
                               onChange={(event) =>
@@ -1053,7 +1063,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               <section className="settings-section">
                 <div className="settings-section-head">
                   <h3>AI CLI 연결</h3>
-                  <p className="muted">Codex, Claude Code, 기타 로컬 LLM CLI를 이름과 실행 경로로 등록합니다.</p>
+                  <p className="muted">Codex, Claude Code, Gemini, 기타 로컬 LLM CLI를 이름과 실행 경로로 등록합니다.</p>
                 </div>
                 <div className="settings-actions">
                   <button
@@ -1071,6 +1081,14 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                     type="button"
                   >
                     + Claude Code
+                  </button>
+                  <button
+                    className="secondary-button"
+                    disabled={busy}
+                    onClick={() => addConnection("gemini")}
+                    type="button"
+                  >
+                    + Gemini
                   </button>
                   <button
                     className="secondary-button"
@@ -1191,7 +1209,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                               <label className="connection-env-field">
                                 <span>환경 변수</span>
                                 <textarea
-                                  placeholder="CODEX_HOME=/path/to/.codex"
+                                  placeholder={envPlaceholder(connection.provider)}
                                   rows={3}
                                   value={formatConnectionEnv(connection.env)}
                                   onChange={(event) =>
@@ -1775,7 +1793,7 @@ function normalizeModelList(provider: string, models: string[]): string[] {
 
 function normalizeModelName(provider: string, model: string): string {
   const trimmed = model.trim();
-  if (provider === "codex" || provider === "claude") {
+  if (provider === "codex" || provider === "claude" || provider === "gemini") {
     return trimmed.toLowerCase();
   }
   return trimmed;
@@ -1799,16 +1817,20 @@ function isKnownProviderModel(provider: string, model: string): boolean {
         model.split(/[-._]/).some((part) => part === "sonnet" || part === "opus" || part === "haiku"))
     );
   }
+  if (provider === "gemini") {
+    return model.startsWith("gemini-") || model.startsWith("gemma-");
+  }
   return true;
 }
 
 function canRefreshModels(provider: string): boolean {
-  return provider === "codex" || provider === "claude";
+  return provider === "codex" || provider === "claude" || provider === "gemini";
 }
 
 function defaultModelPlaceholder(provider: string): string {
   if (provider === "codex") return "예: gpt-5.2";
   if (provider === "claude") return "예: sonnet";
+  if (provider === "gemini") return "예: gemini-2.5-pro";
   return "선택 사항";
 }
 
@@ -1821,6 +1843,7 @@ function modelOptions(connection: AiConnection, selectedModel: string): string[]
 function providerLabel(provider: string): string {
   if (provider === "codex") return "Codex";
   if (provider === "claude") return "Claude Code";
+  if (provider === "gemini") return "Gemini";
   if (provider === "custom") return "기타";
   if (provider === "fixture") return "Fixture";
   return provider;
@@ -1829,7 +1852,14 @@ function providerLabel(provider: string): string {
 function cliPathPlaceholder(provider: string): string {
   if (provider === "codex") return "codex 또는 /path/to/codex";
   if (provider === "claude") return "claude 또는 /path/to/claude";
+  if (provider === "gemini") return "gemini 또는 /path/to/gemini";
   return "/path/to/llm";
+}
+
+function envPlaceholder(provider: string): string {
+  if (provider === "codex") return "CODEX_HOME=/path/to/.codex";
+  if (provider === "gemini") return "GEMINI_API_KEY=...";
+  return "KEY=value";
 }
 
 function connectionCliPath(connection: AiConnection): string {
@@ -1867,6 +1897,7 @@ function firstNonEmpty(values: Array<string | null | undefined>): string | null 
 function defaultCliPath(provider: string): string {
   if (provider === "codex") return "codex";
   if (provider === "claude") return "claude";
+  if (provider === "gemini") return "gemini";
   if (provider === "fixture") return "node";
   return "llm";
 }
@@ -1875,11 +1906,13 @@ function defaultsForProvider(provider: string, cliPath: string) {
   const path = cliPath || defaultCliPath(provider);
   if (provider === "codex") return codexConnection(path);
   if (provider === "claude") return claudeConnection(path);
+  if (provider === "gemini") return geminiConnection(path);
   return customConnection("custom-template", path);
 }
 
-function nextProviderConnection(provider: "codex" | "claude", connections: AiConnection[]): AiConnection {
-  const connection = provider === "codex" ? codexConnection() : claudeConnection();
+function nextProviderConnection(provider: "codex" | "claude" | "gemini", connections: AiConnection[]): AiConnection {
+  const connection =
+    provider === "codex" ? codexConnection() : provider === "claude" ? claudeConnection() : geminiConnection();
   if (!connections.some((item) => item.id === connection.id)) {
     return connection;
   }
@@ -1970,6 +2003,41 @@ function claudeConnection(cliPath = "claude"): AiConnection {
     enabled: true,
     defaultModel: "sonnet",
     availableModels: ["sonnet", "opus"],
+  };
+}
+
+function geminiConnection(cliPath = "gemini"): AiConnection {
+  return {
+    id: "gemini-local",
+    label: "Gemini CLI",
+    provider: "gemini",
+    commandArgs: [
+      cliPath,
+      "--skip-trust",
+      "--approval-mode",
+      "yolo",
+      "--include-directories",
+      "{artifactDir}",
+      "--prompt",
+      "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}.",
+    ],
+    planningCommandArgs: [
+      cliPath,
+      "--skip-trust",
+      "--approval-mode",
+      "plan",
+      "--prompt",
+      "{planPrompt}",
+    ],
+    planningMode: "native_plan",
+    planningModel: null,
+    env: {},
+    healthCheckArgs: [cliPath, "--version"],
+    timeoutSeconds: 1800,
+    planningTimeoutSeconds: 600,
+    enabled: true,
+    defaultModel: null,
+    availableModels: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
   };
 }
 

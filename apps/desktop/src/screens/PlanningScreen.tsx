@@ -1713,6 +1713,16 @@ function plannerFailureMessage(result: PlannerConversationResult): string {
     return "Claude CLI는 설치되어 있지만 현재 로그인된 조직에 Claude Code 접근 권한이 없어 planner를 실행하지 못했습니다. 설정에서 Codex를 planner로 선택하거나 Claude 계정/조직 권한을 확인하세요.";
   }
 
+  if (
+    result.provider === "gemini" &&
+    (normalized.includes("not authenticated") ||
+      normalized.includes("authentication") ||
+      normalized.includes("api key") ||
+      normalized.includes("login"))
+  ) {
+    return "Gemini CLI는 설치되어 있지만 인증 정보를 찾지 못했습니다. 터미널에서 gemini 로그인을 확인하거나 GEMINI_API_KEY를 설정한 뒤 다시 실행하세요.";
+  }
+
   return rawMessage || `planner plan mode가 exit code ${result.exitCode}로 종료되었습니다.`;
 }
 
@@ -1721,7 +1731,14 @@ function plannerMessageFromResult(
   draft: PlannerDraft,
   note: string | null = null,
 ): string {
-  const mode = result.provider === "claude" ? "native plan mode" : result.provider === "codex" ? "read-only plan mode" : "planning mode";
+  const mode =
+    result.provider === "claude"
+      ? "native plan mode"
+      : result.provider === "codex"
+        ? "read-only plan mode"
+        : result.provider === "gemini"
+          ? "Gemini plan mode"
+          : "planning mode";
   const elapsed = formatElapsed(result.elapsedMs);
   return [
     `${result.connectionId} ${mode} 응답을${elapsed ? ` ${elapsed} 후` : ""} Plan Document draft로 반영했습니다.`,
@@ -1732,7 +1749,14 @@ function plannerMessageFromResult(
 }
 
 function plannerFallbackMessage(result: PlannerConversationResult, fallbackDraft: PlannerDraft): string {
-  const mode = result.provider === "claude" ? "native plan mode" : result.provider === "codex" ? "read-only plan mode" : "planning mode";
+  const mode =
+    result.provider === "claude"
+      ? "native plan mode"
+      : result.provider === "codex"
+        ? "read-only plan mode"
+        : result.provider === "gemini"
+          ? "Gemini plan mode"
+          : "planning mode";
   const elapsed = formatElapsed(result.elapsedMs);
   const prefix = `${result.connectionId} ${mode} 응답을${elapsed ? ` ${elapsed} 후` : ""} 받았지만 Plan Document schema와 맞지 않아 로컬 초안을 유지했습니다.`;
   const taskSummary = `${fallbackDraft.tasks.length}개의 로컬 Task 후보는 계속 사용할 수 있습니다.`;

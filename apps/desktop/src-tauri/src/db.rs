@@ -6476,6 +6476,9 @@ fn inject_provider_options(
         (Some("claude"), Some(model)) if !has_arg(&args, &["--model"]) => {
             insert_after_index(args, 0, ["--model".to_string(), model.to_string()])
         }
+        (Some("gemini"), Some(model)) if !has_arg(&args, &["-m", "--model"]) => {
+            insert_after_index(args, 0, ["--model".to_string(), model.to_string()])
+        }
         _ => args,
     };
 
@@ -6492,6 +6495,18 @@ fn inject_provider_options(
                 with_effort,
                 0,
                 ["--add-dir".to_string(), artifact_dir.to_string()],
+            )
+        }
+        (Some("gemini"), Some(artifact_dir))
+            if !has_arg(&with_effort, &["--include-directories"]) =>
+        {
+            insert_after_index(
+                with_effort,
+                0,
+                [
+                    "--include-directories".to_string(),
+                    artifact_dir.to_string(),
+                ],
             )
         }
         _ => with_effort,
@@ -10202,6 +10217,66 @@ mod tests {
                 "--model",
                 "sonnet",
                 "-p",
+                "run coder"
+            ]
+        );
+    }
+
+    #[test]
+    fn role_assignment_command_adds_gemini_model_and_artifact_dir() {
+        let settings = EffectiveSettings {
+            role_presets: default_role_presets(),
+            ai_connections: json!([
+                {
+                    "id": "gemini-local",
+                    "label": "Gemini CLI",
+                    "provider": "gemini",
+                    "commandArgs": ["gemini", "--skip-trust", "--approval-mode", "yolo", "--prompt", "run {roleId}"],
+                    "timeoutSeconds": 120,
+                    "enabled": true,
+                    "defaultModel": "gemini-2.5-pro"
+                }
+            ]),
+            role_assignments: json!([
+                {
+                    "roleId": "coder",
+                    "selectionMode": "single",
+                    "connectionIds": ["gemini-local"],
+                    "selections": [{ "connectionId": "gemini-local", "model": null }],
+                    "aggregationPolicy": null
+                }
+            ]),
+            conductor_config: None,
+            worktree_root: None,
+            worktree_setup: None,
+            jira_config: None,
+            obsidian_vault_path: None,
+            token_budget: None,
+            artifact_retention_days: Some(30),
+        };
+        let placeholders = HashMap::from([
+            (
+                "artifactDir".to_string(),
+                "/tmp/helm-artifacts/run-1".to_string(),
+            ),
+            ("roleId".to_string(), "coder".to_string()),
+        ]);
+
+        let command =
+            resolve_host_runner_command(&settings, "coder", &placeholders).expect("command");
+
+        assert_eq!(
+            command.args,
+            vec![
+                "gemini",
+                "--include-directories",
+                "/tmp/helm-artifacts/run-1",
+                "--model",
+                "gemini-2.5-pro",
+                "--skip-trust",
+                "--approval-mode",
+                "yolo",
+                "--prompt",
                 "run coder"
             ]
         );

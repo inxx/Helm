@@ -705,6 +705,8 @@ fn check_connection_with_cwd(
                         "AI CLI smoke prompt가 exit code {}로 실패했습니다.",
                         output.exit_code
                     )
+                } else if message.starts_with("ERROR:") {
+                    message
                 } else {
                     format!(
                         "AI CLI smoke prompt가 exit code {}로 실패했습니다. {hint}",
@@ -2517,6 +2519,14 @@ fn runner_templates() -> Vec<RunnerTemplate> {
             connections: claude_ai_connections,
             assignments: claude_role_assignments,
         },
+        RunnerTemplate {
+            id: "gemini",
+            label: "Gemini CLI",
+            description: "설치된 gemini CLI를 role runner로 사용합니다. 로컬 인증 또는 GEMINI_API_KEY가 필요합니다.",
+            presets: gemini_role_presets,
+            connections: gemini_ai_connections,
+            assignments: gemini_role_assignments,
+        },
     ]
 }
 
@@ -2682,6 +2692,69 @@ fn claude_ai_connections() -> Value {
 
 fn claude_role_assignments() -> Value {
     assignments_for_connection("claude-local")
+}
+
+fn gemini_role_presets() -> Value {
+    json!(role_ids()
+        .into_iter()
+        .map(|(role_id, label)| json!({
+            "roleId": role_id,
+            "label": label,
+            "provider": "gemini",
+            "commandArgs": [
+                "gemini",
+                "--skip-trust",
+                "--approval-mode",
+                "yolo",
+                "--include-directories",
+                "{artifactDir}",
+                "--prompt",
+                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+            ],
+            "timeoutSeconds": 1800
+        }))
+        .collect::<Vec<_>>())
+}
+
+fn gemini_ai_connections() -> Value {
+    json!([
+        {
+            "id": "gemini-local",
+            "label": "Gemini CLI",
+            "provider": "gemini",
+            "commandArgs": [
+                "gemini",
+                "--skip-trust",
+                "--approval-mode",
+                "yolo",
+                "--include-directories",
+                "{artifactDir}",
+                "--prompt",
+                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+            ],
+            "planningCommandArgs": [
+                "gemini",
+                "--skip-trust",
+                "--approval-mode",
+                "plan",
+                "--prompt",
+                "{planPrompt}"
+            ],
+            "planningMode": "native_plan",
+            "healthCheckArgs": ["gemini", "--version"],
+            "timeoutSeconds": 1800,
+            "planningTimeoutSeconds": 600,
+            "planningModel": null,
+            "enabled": true,
+            "defaultModel": null,
+            "availableModels": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
+            "defaultEffort": null
+        }
+    ])
+}
+
+fn gemini_role_assignments() -> Value {
+    assignments_for_connection("gemini-local")
 }
 
 fn assignments_for_connection(connection_id: &str) -> Value {
@@ -3044,6 +3117,17 @@ fn planning_command_args(
         .into_iter()
         .map(|arg| apply_planning_placeholders(&arg, placeholders))
         .collect()),
+        Some("gemini") => Ok(vec![
+            "gemini".to_string(),
+            "--skip-trust".to_string(),
+            "--approval-mode".to_string(),
+            "plan".to_string(),
+            "--prompt".to_string(),
+            "{planPrompt}".to_string(),
+        ]
+        .into_iter()
+        .map(|arg| apply_planning_placeholders(&arg, placeholders))
+        .collect()),
         _ => Ok(Vec::new()),
     }
 }
@@ -3203,6 +3287,9 @@ fn inject_planning_provider_options(
         (Some("claude"), Some(model)) if !has_command_arg(&args, &["--model"]) => {
             insert_after_arg_index(args, 0, ["--model".to_string(), model.to_string()])
         }
+        (Some("gemini"), Some(model)) if !has_command_arg(&args, &["-m", "--model"]) => {
+            insert_after_arg_index(args, 0, ["--model".to_string(), model.to_string()])
+        }
         _ => args,
     };
 
@@ -3353,9 +3440,10 @@ fn connection_check_timeout_seconds(connection: &Value) -> u64 {
 fn command_output_message(output: &ShellOutput) -> String {
     let stderr = output.stderr.trim();
     if !stderr.is_empty() {
-        return stderr.to_string();
+        return compact_ai_cli_error(stderr).unwrap_or_else(|| stderr.to_string());
     }
-    output.stdout.trim().to_string()
+    let stdout = output.stdout.trim();
+    compact_ai_cli_error(stdout).unwrap_or_else(|| stdout.to_string())
 }
 
 fn smoke_output_contains_sentinel(output: &ShellOutput) -> bool {
@@ -3363,6 +3451,10 @@ fn smoke_output_contains_sentinel(output: &ShellOutput) -> bool {
 }
 
 fn ai_cli_failure_hint(provider: Option<&str>, raw_message: &str) -> String {
+    if let Some(message) = compact_ai_cli_error(raw_message) {
+        return message;
+    }
+
     let trimmed = raw_message.trim();
     let normalized = trimmed.to_lowercase();
 
@@ -3374,11 +3466,70 @@ fn ai_cli_failure_hint(provider: Option<&str>, raw_message: &str) -> String {
         return "Claude CLI는 설치되어 있지만 현재 로그인된 조직에 Claude Code 접근 권한이 없습니다. 올바른 조직으로 다시 로그인하거나 관리자에게 권한을 요청해야 합니다.".to_string();
     }
 
+    if provider == Some("gemini")
+        && (normalized.contains("not authenticated")
+            || normalized.contains("authentication")
+            || normalized.contains("api key")
+            || normalized.contains("login"))
+    {
+        return "Gemini CLI는 설치되어 있지만 인증 정보를 찾지 못했습니다. 터미널에서 gemini 로그인을 확인하거나 GEMINI_API_KEY를 환경 변수에 등록한 뒤 다시 확인하세요.".to_string();
+    }
+
     if trimmed.is_empty() {
         "응답 출력이 없습니다.".to_string()
     } else {
         trimmed.to_string()
     }
+}
+
+fn compact_ai_cli_error(raw_message: &str) -> Option<String> {
+    let text = strip_terminal_controls(raw_message);
+    let normalized = text.to_lowercase();
+    if normalized.contains("you've hit your usage limit")
+        || normalized.contains("you have hit your usage limit")
+    {
+        return Some(compact_usage_limit_error(&text));
+    }
+
+    let mut error_lines = Vec::new();
+    for line in text.lines() {
+        let Some(error_index) = line.find("ERROR:") else {
+            continue;
+        };
+        let error = line[error_index..].trim();
+        if error.is_empty() || error_lines.iter().any(|item| item == error) {
+            continue;
+        }
+        error_lines.push(error.to_string());
+        if error_lines.len() >= 3 {
+            break;
+        }
+    }
+
+    if error_lines.is_empty() {
+        None
+    } else {
+        Some(error_lines.join("\n"))
+    }
+}
+
+fn compact_usage_limit_error(text: &str) -> String {
+    let retry = retry_after_fragment(text)
+        .map(|value| format!("try again at {value}."))
+        .unwrap_or_else(|| "try again later".to_string());
+    format!("ERROR: You've hit your usage limit.\n{retry}")
+}
+
+fn retry_after_fragment(text: &str) -> Option<String> {
+    let normalized = text.to_lowercase();
+    let marker = "try again at ";
+    let start = normalized.find(marker)? + marker.len();
+    let rest = text.get(start..)?.trim_start();
+    let end = rest
+        .find(|ch| matches!(ch, '.' | '\n' | '\r'))
+        .unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 struct ModelRefreshResult {
@@ -3397,6 +3548,10 @@ fn refresh_available_models(connection: &Value, cwd: &Path) -> ModelRefreshResul
     let api_refresh = match provider {
         "codex" => refresh_openai_models(),
         "claude" => refresh_anthropic_models(),
+        "gemini" => ModelRefreshResult {
+            models: Some(gemini_cli_model_aliases()),
+            message: Some("Gemini CLI 기본 모델 alias를 사용합니다.".to_string()),
+        },
         _ => ModelRefreshResult {
             models: None,
             message: Some("지원하지 않는 provider라 모델 목록을 갱신하지 않았습니다.".to_string()),
@@ -3886,6 +4041,12 @@ fn cli_model_command(connection: &Value, provider: &str, cwd: &Path) -> Option<V
             "--permission-mode".to_string(),
             "plan".to_string(),
         ]),
+        "gemini" => Some(vec![
+            binary.to_string(),
+            "--skip-trust".to_string(),
+            "--approval-mode".to_string(),
+            "plan".to_string(),
+        ]),
         _ => None,
     }
 }
@@ -3994,6 +4155,7 @@ fn extract_cli_model_ids(provider: &str, text: &str) -> Vec<String> {
     let keep = match provider {
         "codex" => is_openai_agent_model,
         "claude" => is_anthropic_cli_model,
+        "gemini" => is_gemini_cli_model,
         _ => return Vec::new(),
     };
     let mut models = Vec::new();
@@ -4019,6 +4181,7 @@ fn extract_model_ids_from_bytes(provider: &str, bytes: &[u8]) -> Vec<String> {
     let keep = match provider {
         "codex" => is_openai_agent_model,
         "claude" => is_anthropic_cli_model,
+        "gemini" => is_gemini_cli_model,
         _ => return Vec::new(),
     };
     let mut models = Vec::new();
@@ -4129,8 +4292,20 @@ fn is_anthropic_cli_model(id: &str) -> bool {
                 .any(|part| matches!(part, "sonnet" | "opus" | "haiku")))
 }
 
+fn is_gemini_cli_model(id: &str) -> bool {
+    id.starts_with("gemini-") || id.starts_with("gemma-")
+}
+
 fn claude_cli_model_aliases() -> Vec<String> {
     vec!["sonnet".to_string(), "opus".to_string()]
+}
+
+fn gemini_cli_model_aliases() -> Vec<String> {
+    vec![
+        "gemini-2.5-flash".to_string(),
+        "gemini-2.5-flash-lite".to_string(),
+        "gemini-2.5-pro".to_string(),
+    ]
 }
 
 fn string_array(args: &[Value], message: &str) -> CommandResult<Vec<String>> {
@@ -5440,6 +5615,23 @@ mod tests {
         let result = codex_debug_models_from_output(&output);
 
         assert_eq!(result.models, Some(vec!["gpt-5.5".to_string()]));
+    }
+
+    #[test]
+    fn ai_cli_error_compacts_usage_limit_output() {
+        let output = shell_output(
+            "",
+            r#"Reading additional input from stdin...
+2026-05-29T01:42:24.063087Z WARN codex_core_skills::loader: ignoring interface.icon_large
+ERROR: You've hit your usage limit. To get more access now, send a request to your admin or try again at Jun 1st, 2026 9:00 AM.
+ERROR: You've hit your usage limit. To get more access now, send a request to your admin or try again at Jun 1st, 2026 9:00 AM."#,
+            1,
+        );
+
+        assert_eq!(
+            command_output_message(&output),
+            "ERROR: You've hit your usage limit.\ntry again at Jun 1st, 2026 9:00 AM."
+        );
     }
 
     #[test]

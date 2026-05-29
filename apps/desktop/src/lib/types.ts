@@ -68,7 +68,7 @@ export interface EffectiveSettings {
 export interface AiConnection {
   id: string;
   label: string;
-  provider: "fixture" | "codex" | "claude" | string;
+  provider: "fixture" | "codex" | "claude" | "gemini" | string;
   runnerAdapter?: "process" | "codex_app_server" | string | null;
   commandArgs: string[];
   planningCommandArgs?: string[];
