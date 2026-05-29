@@ -2058,8 +2058,9 @@ pub fn run_host_role(
     let command_started_at = now();
     let command_started_instant = Instant::now();
     let command_output = match runner_command.runner_adapter {
-        RunnerAdapterKind::Process => run_command_with_timeout(
-            Command::new(&command_args[0])
+        RunnerAdapterKind::Process => {
+            let mut command = Command::new(&command_args[0]);
+            command
                 .args(&command_args[1..])
                 .current_dir(&worktree.worktree_path)
                 .stdout(Stdio::piped())
@@ -2129,26 +2130,30 @@ pub fn run_host_role(
                 .env(
                     "HELM_JIRA_TASK_ISSUE_TYPE",
                     jira_config_string(&settings.jira_config, "taskIssueType"),
-                ),
-            timeout_seconds,
-            cancellation,
-            |stream, chunk| {
-                let text = String::from_utf8_lossy(chunk).to_string();
-                let _ = append_and_emit_run_event(
-                    conn,
-                    project_id,
-                    &run.task_id,
-                    run_id,
-                    stream,
-                    &text,
-                    json!({
-                        "stream": stream,
-                        "bytes": chunk.len()
-                    }),
-                    &mut event_sink,
                 );
-            },
-        )?,
+            apply_connection_env(&mut command, &runner_command.env);
+            run_command_with_timeout(
+                &mut command,
+                timeout_seconds,
+                cancellation,
+                |stream, chunk| {
+                    let text = String::from_utf8_lossy(chunk).to_string();
+                    let _ = append_and_emit_run_event(
+                        conn,
+                        project_id,
+                        &run.task_id,
+                        run_id,
+                        stream,
+                        &text,
+                        json!({
+                            "stream": stream,
+                            "bytes": chunk.len()
+                        }),
+                        &mut event_sink,
+                    );
+                },
+            )?
+        }
         RunnerAdapterKind::CodexAppServer => run_codex_app_server_role(
             conn,
             project_id,
@@ -6253,6 +6258,7 @@ fn host_runner_placeholders(
 
 struct ResolvedHostRunnerCommand {
     args: Vec<String>,
+    env: Vec<(String, String)>,
     timeout_seconds: u64,
     provider: Option<String>,
     connection_id: Option<String>,
@@ -6279,6 +6285,7 @@ fn resolve_host_runner_command(
 
     Ok(ResolvedHostRunnerCommand {
         args: role_command_args(&settings.role_presets, role_id, placeholders)?,
+        env: Vec::new(),
         timeout_seconds: role_timeout_seconds(&settings.role_presets, role_id),
         provider: None,
         connection_id: None,
@@ -6379,6 +6386,7 @@ fn role_assignment_command(
             effort,
             placeholders,
         ),
+        env: connection_env(connection),
         timeout_seconds: connection
             .get("timeoutSeconds")
             .and_then(Value::as_u64)
@@ -6411,6 +6419,31 @@ fn optional_connection_string(connection: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn connection_env(connection: &Value) -> Vec<(String, String)> {
+    let Some(env) = connection.get("env").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut entries = env
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim();
+            let value = value.as_str()?;
+            if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+                return None;
+            }
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
+}
+
+fn apply_connection_env(command: &mut Command, env_overrides: &[(String, String)]) {
+    for (key, value) in env_overrides {
+        command.env(key, value);
+    }
 }
 
 fn first_role_selection(assignment: &Value) -> Option<Value> {
@@ -6577,6 +6610,7 @@ fn write_runner_request(
             "model": runner_command.model,
             "approvalPolicy": runner_command.approval_policy,
             "sandbox": runner_command.sandbox,
+            "envKeys": runner_command.env.iter().map(|(key, _)| key).collect::<Vec<_>>(),
             "setupConfigPath": setup_config_path,
             "command": command_args,
             "cwd": cwd
@@ -6609,12 +6643,15 @@ fn run_codex_app_server_role(
             "Codex app-server command가 비어 있습니다.",
         ));
     };
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(&server_args[1..])
         .current_dir(worktree_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    apply_connection_env(&mut command, &runner_command.env);
+    let mut child = command
         .spawn()
         .map_err(|err| CommandError::io("Codex app-server를 실행하지 못했습니다.", err))?;
     let mut stdin = child.stdin.take().ok_or_else(|| {
@@ -10058,6 +10095,7 @@ mod tests {
                     "timeoutSeconds": 120,
                     "enabled": true,
                     "defaultModel": "gpt-5.2",
+                    "env": { "CODEX_HOME": "/tmp/codex-alt" },
                     "runnerAdapter": "codex_app_server",
                     "approvalPolicy": "on-request",
                     "sandbox": "workspace-write"
@@ -10106,6 +10144,10 @@ mod tests {
         assert_eq!(command.runner_adapter, RunnerAdapterKind::CodexAppServer);
         assert_eq!(command.approval_policy.as_deref(), Some("on-request"));
         assert_eq!(command.sandbox.as_deref(), Some("workspace-write"));
+        assert_eq!(
+            command.env,
+            vec![("CODEX_HOME".to_string(), "/tmp/codex-alt".to_string())]
+        );
     }
 
     #[test]

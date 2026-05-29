@@ -72,6 +72,7 @@ export interface AiConnection {
   runnerAdapter?: "process" | "codex_app_server" | string | null;
   commandArgs: string[];
   planningCommandArgs?: string[];
+  env?: Record<string, string>;
   planningMode?: "native_plan" | "prompt_guarded" | "fixture" | string;
   planningModel?: string | null;
   healthCheckArgs?: string[];

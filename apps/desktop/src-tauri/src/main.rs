@@ -391,10 +391,11 @@ fn run_planner_conversation_blocking(
     let mut last_output = None;
 
     for command in commands {
-        match run_direct_command_with_timeout(
+        match run_direct_command_with_timeout_env(
             &context.root_path,
             &command.command,
             Duration::from_secs(command.timeout_seconds),
+            &command.env,
         ) {
             Ok(output) if output.exit_code == 0 && !output.timed_out => {
                 return Ok(planner_result_from_output(command, output));
@@ -649,7 +650,13 @@ fn check_connection_with_cwd(
     }
 
     let timeout = connection_check_timeout_seconds(&connection);
-    let check = run_direct_command_with_timeout(cwd, &command, Duration::from_secs(timeout));
+    let env_overrides = connection_env(&connection);
+    let check = run_direct_command_with_timeout_env(
+        cwd,
+        &command,
+        Duration::from_secs(timeout),
+        &env_overrides,
+    );
 
     match check {
         Ok(output) if output.exit_code == 0 && !output.timed_out => {
@@ -2072,10 +2079,12 @@ fn run_conductor_gate(
         provider,
     );
     let timeout = connection_check_timeout_seconds(connection).min(90);
-    let output = run_direct_command_with_timeout(
+    let env_overrides = connection_env(connection);
+    let output = run_direct_command_with_timeout_env(
         &context.root_path,
         &command,
         Duration::from_secs(timeout),
+        &env_overrides,
     )?;
     if output.timed_out || output.exit_code != 0 {
         return Err(CommandError::new(
@@ -2478,6 +2487,7 @@ struct PlanningCommandSpec {
     connection_id: String,
     provider: Option<String>,
     command: Vec<String>,
+    env: Vec<(String, String)>,
     timeout_seconds: u64,
 }
 
@@ -2884,6 +2894,7 @@ fn resolve_planning_command_for_connection(
         connection_id: connection_id.to_string(),
         provider,
         command,
+        env: connection_env(connection),
         timeout_seconds,
     })
 }
@@ -3549,8 +3560,9 @@ fn fetch_json_with_curl(url: &str, headers: Vec<String>) -> Result<Value, String
 }
 
 fn refresh_cli_models(connection: &Value, provider: &str, cwd: &Path) -> ModelRefreshResult {
+    let env_overrides = connection_env(connection);
     if provider == "codex" {
-        let debug_refresh = refresh_codex_debug_models(connection, cwd);
+        let debug_refresh = refresh_codex_debug_models(connection, cwd, &env_overrides);
         return debug_refresh;
     }
 
@@ -3572,7 +3584,13 @@ fn refresh_cli_models(connection: &Value, provider: &str, cwd: &Path) -> ModelRe
         };
     };
 
-    match run_pty_command_with_input(cwd, &command, "/model\n", Duration::from_secs(4)) {
+    match run_pty_command_with_input(
+        cwd,
+        &command,
+        "/model\n",
+        Duration::from_secs(4),
+        &env_overrides,
+    ) {
         Ok(output) => {
             let text = strip_terminal_controls(&format!("{}\n{}", output.stdout, output.stderr));
             let mut models = extract_cli_model_ids(provider, &text);
@@ -3656,14 +3674,19 @@ fn refresh_claude_embedded_models(connection: &Value) -> ModelRefreshResult {
     }
 }
 
-fn refresh_codex_debug_models(connection: &Value, cwd: &Path) -> ModelRefreshResult {
+fn refresh_codex_debug_models(
+    connection: &Value,
+    cwd: &Path,
+    env_overrides: &[(String, String)],
+) -> ModelRefreshResult {
     let binary = connection_cli_binary(connection).unwrap_or("codex");
     let command = vec![
         binary.to_string(),
         "debug".to_string(),
         "models".to_string(),
     ];
-    match run_direct_command_with_timeout(cwd, &command, Duration::from_secs(10)) {
+    match run_direct_command_with_timeout_env(cwd, &command, Duration::from_secs(10), env_overrides)
+    {
         Ok(output) => codex_debug_models_from_output(&output),
         Err(err) => ModelRefreshResult {
             models: None,
@@ -4206,6 +4229,7 @@ fn run_pty_command_with_input(
     command: &[String],
     input: &str,
     timeout: Duration,
+    env_overrides: &[(String, String)],
 ) -> CommandResult<ShellOutput> {
     if command.is_empty() {
         return Err(CommandError::validation("실행할 CLI command가 없습니다."));
@@ -4245,6 +4269,7 @@ fn run_pty_command_with_input(
         }
         set_child_env("TERM", "xterm-256color");
         set_child_env("COLORTERM", "truecolor");
+        set_child_env_overrides(env_overrides);
 
         let cstrings = command
             .iter()
@@ -4510,6 +4535,37 @@ fn set_child_env(key: &str, value: &str) {
     unsafe {
         libc::setenv(key.as_ptr(), value.as_ptr(), 1);
     }
+}
+
+fn set_child_env_overrides(env_overrides: &[(String, String)]) {
+    for (key, value) in env_overrides {
+        set_child_env(key, value);
+    }
+}
+
+fn apply_command_env(command: &mut Command, env_overrides: &[(String, String)]) {
+    for (key, value) in env_overrides {
+        command.env(key, value);
+    }
+}
+
+fn connection_env(connection: &Value) -> Vec<(String, String)> {
+    let Some(env) = connection.get("env").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut entries = env
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim();
+            let value = value.as_str()?;
+            if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+                return None;
+            }
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
 }
 
 fn create_terminal_startup_dir(
@@ -5138,10 +5194,11 @@ fn read_role_pty_output(
     );
 }
 
-fn run_direct_command_with_timeout(
+fn run_direct_command_with_timeout_env(
     cwd: &std::path::Path,
     command: &[String],
     timeout: Duration,
+    env_overrides: &[(String, String)],
 ) -> CommandResult<ShellOutput> {
     if command.is_empty() {
         return Err(CommandError::validation(
@@ -5150,11 +5207,14 @@ fn run_direct_command_with_timeout(
     }
     let command = resolve_command_args(cwd, command);
     let started_at = Instant::now();
-    let mut child = Command::new(&command[0])
+    let mut process = Command::new(&command[0]);
+    process
         .args(&command[1..])
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    apply_command_env(&mut process, env_overrides);
+    let mut child = process
         .spawn()
         .map_err(|err| CommandError::io("planner command를 실행하지 못했습니다.", err))?;
     let stdout_reader = child

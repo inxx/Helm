@@ -519,13 +519,10 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
 
   function addConnection(provider: "codex" | "claude" | "custom") {
     const candidate =
-      provider === "codex"
-        ? codexConnection()
-        : provider === "claude"
-          ? claudeConnection()
-          : customConnection(nextCustomConnectionId());
+      provider === "custom"
+        ? customConnection(nextCustomConnectionId())
+        : nextProviderConnection(provider, aiConnections);
     setAiConnections((current) => {
-      if (provider !== "custom" && current.some((connection) => connection.id === candidate.id)) return current;
       return [...current, candidate];
     });
     setModelRefreshes((current) => {
@@ -920,6 +917,19 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                               ))}
                             </select>
                           </label>
+                          <label className="connection-env-field">
+                            <span>환경 변수</span>
+                            <textarea
+                              placeholder="CODEX_HOME=/path/to/.codex"
+                              rows={3}
+                              value={formatConnectionEnv(orchestratorConnection.env)}
+                              onChange={(event) =>
+                                updateOrchestratorConnection({
+                                  env: parseConnectionEnv(event.target.value),
+                                })
+                              }
+                            />
+                          </label>
                         </div>
                         <code className="command-preview">
                           확인/계획: {(orchestratorConnection.planningCommandArgs ?? []).join(" ") || "command 없음"}
@@ -1174,6 +1184,19 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                                   onChange={(event) =>
                                     updateConnection(connection.id, {
                                       timeoutSeconds: Math.max(1, Number(event.target.value) || 1),
+                                    })
+                                  }
+                                />
+                              </label>
+                              <label className="connection-env-field">
+                                <span>환경 변수</span>
+                                <textarea
+                                  placeholder="CODEX_HOME=/path/to/.codex"
+                                  rows={3}
+                                  value={formatConnectionEnv(connection.env)}
+                                  onChange={(event) =>
+                                    updateConnection(connection.id, {
+                                      env: parseConnectionEnv(event.target.value),
                                     })
                                   }
                                 />
@@ -1604,6 +1627,7 @@ function normalizeAiConnections(value: unknown): AiConnection[] {
         planningCommandArgs: Array.isArray(item.planningCommandArgs)
           ? normalizeCliArgs(provider, item.planningCommandArgs.filter(isString))
           : undefined,
+        env: normalizeConnectionEnv(item.env),
         planningMode: typeof item.planningMode === "string" ? item.planningMode : undefined,
         planningModel: typeof item.planningModel === "string" ? item.planningModel : null,
         healthCheckArgs: Array.isArray(item.healthCheckArgs) ? item.healthCheckArgs.filter(isString) : undefined,
@@ -1620,6 +1644,36 @@ function normalizeAiConnections(value: unknown): AiConnection[] {
         sandbox: typeof item.sandbox === "string" ? item.sandbox : null,
       };
     });
+}
+
+function normalizeConnectionEnv(value: unknown): Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key, item]) => key.trim() && typeof item === "string")
+      .map(([key, item]) => [key.trim(), item]),
+  );
+}
+
+function formatConnectionEnv(env: Record<string, string> | undefined): string {
+  return Object.entries(env ?? {})
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+}
+
+function parseConnectionEnv(raw: string): Record<string, string> {
+  return Object.fromEntries(
+    raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const separator = line.indexOf("=");
+        if (separator === -1) return [line, ""];
+        return [line.slice(0, separator).trim(), line.slice(separator + 1)];
+      })
+      .filter(([key]) => key.length > 0),
+  );
 }
 
 function normalizeRoleAssignments(value: unknown): RoleAssignment[] {
@@ -1824,6 +1878,22 @@ function defaultsForProvider(provider: string, cliPath: string) {
   return customConnection("custom-template", path);
 }
 
+function nextProviderConnection(provider: "codex" | "claude", connections: AiConnection[]): AiConnection {
+  const connection = provider === "codex" ? codexConnection() : claudeConnection();
+  if (!connections.some((item) => item.id === connection.id)) {
+    return connection;
+  }
+  let nextIndex = 2;
+  while (connections.some((item) => item.id === `${provider}-local-${nextIndex}`)) {
+    nextIndex += 1;
+  }
+  return {
+    ...connection,
+    id: `${provider}-local-${nextIndex}`,
+    label: `${connection.label} ${nextIndex}`,
+  };
+}
+
 function codexConnection(cliPath = "codex"): AiConnection {
   return {
     id: "codex-local",
@@ -1850,6 +1920,7 @@ function codexConnection(cliPath = "codex"): AiConnection {
     ],
     planningMode: "prompt_guarded",
     planningModel: null,
+    env: {},
     healthCheckArgs: [cliPath, "--version"],
     timeoutSeconds: 1800,
     planningTimeoutSeconds: 600,
@@ -1892,6 +1963,7 @@ function claudeConnection(cliPath = "claude"): AiConnection {
     planningCommandArgs: [cliPath, "--permission-mode", "plan", "-p", "{planPrompt}"],
     planningMode: "native_plan",
     planningModel: null,
+    env: {},
     healthCheckArgs: [cliPath, "--version"],
     timeoutSeconds: 1800,
     planningTimeoutSeconds: 600,
@@ -1913,6 +1985,7 @@ function customConnection(id: string, cliPath = "llm"): AiConnection {
     planningCommandArgs: [cliPath, "{planPrompt}"],
     planningMode: "prompt_guarded",
     planningModel: null,
+    env: {},
     healthCheckArgs: [cliPath, "--version"],
     timeoutSeconds: 1800,
     planningTimeoutSeconds: 600,

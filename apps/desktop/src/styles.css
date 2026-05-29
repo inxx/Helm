@@ -3922,6 +3922,16 @@ textarea {
   min-width: 0;
 }
 
+.connection-fields textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+}
+
+.connection-env-field {
+  grid-column: 1 / -1;
+}
+
 .settings-skeleton {
   display: block;
   min-width: 0;
