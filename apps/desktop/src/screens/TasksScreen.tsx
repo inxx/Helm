@@ -1,13 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import type { AgentRunSummary, ProjectSnapshot, TaskStatus, TaskSummary } from "../lib/types";
-import { AgentUsageBar } from "../components/AgentUsageBar";
-import { ApprovalInbox } from "../components/ApprovalInbox";
+import { FileText, GitPullRequest, MessageSquareWarning, X } from "lucide-react";
+import type {
+  AgentRunSummary,
+  ApprovalSummary,
+  GitFileStatus,
+  ProjectSnapshot,
+  TaskSummary,
+  TaskTimelineEntry,
+} from "../lib/types";
 import { TaskBoard } from "../components/TaskBoard";
-import { TaskDetail } from "../components/TaskDetail";
-import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
-import { deriveRunLiveState, isRunActiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
+import { deriveRunLiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
+import { roleLabel } from "../lib/runnerReadiness";
 import { TASK_STATUS_LABEL } from "../lib/status";
 
 interface TasksScreenProps {
@@ -28,22 +33,16 @@ export function TasksScreen({
   selectedTaskId,
   onSelectTask,
   onOpenProject,
-  onRefresh,
+  onRefresh: _onRefresh,
   onGoPlanning,
-  onGoGit,
-  onGoSettings,
+  onGoGit: _onGoGit,
+  onGoSettings: _onGoSettings,
 }: TasksScreenProps) {
-  const { showToast } = useToast();
   const [taskRuns, setTaskRuns] = useState<Record<string, AgentRunSummary[]>>({});
   const [runRefreshKey, setRunRefreshKey] = useState(0);
-  const [taskGraphBusy, setTaskGraphBusy] = useState<"export" | "open" | "coordination" | null>(null);
   const taskRunKey = useMemo(
     () => snapshot?.tasks.map((task) => task.id).join(":") ?? "",
     [snapshot?.tasks],
-  );
-  const planTaskGroups = useMemo(
-    () => (snapshot ? groupTasksByPlan(snapshot.tasks, taskRuns) : []),
-    [snapshot, taskRuns],
   );
 
   useEffect(() => {
@@ -98,7 +97,7 @@ export function TasksScreen({
     return (
       <section className="empty-state">
         <h2>프로젝트를 열어주세요</h2>
-        <p>Git 저장소를 열면 Helm이 repo-local DB와 태스크 보드를 준비합니다.</p>
+        <p>Git 저장소를 열면 Helm이 repo-local DB와 작업자 상태 화면을 준비합니다.</p>
         <button className="primary-button" onClick={onOpenProject} type="button">
           프로젝트 열기
         </button>
@@ -106,195 +105,33 @@ export function TasksScreen({
     );
   }
 
-  async function regenerateTaskGraph() {
-    if (!snapshot) return;
-    setTaskGraphBusy("export");
-    try {
-      const conflict = await api.checkTaskGraphConflict(snapshot.project.id);
-      const force = conflict.conflict
-        ? window.confirm(
-            `${conflict.reason ?? "tasks.md가 외부에서 수정되었습니다."}\n\n현재 Helm DB 상태로 덮어쓸까요?`,
-          )
-        : false;
-      if (conflict.conflict && !force) return;
-      const exported = await api.exportTaskGraph(snapshot.project.id, force);
-      showToast({
-        tone: "success",
-        title: "tasks.md 재생성 완료",
-        description: `${exported.taskCount}개 Task를 ${exported.path}에 저장했습니다.`,
-      });
-    } catch (error) {
-      showToast({
-        tone: "error",
-        title: "tasks.md 재생성 실패",
-        description: messageFromError(error, "Task graph를 저장하지 못했습니다."),
-      });
-    } finally {
-      setTaskGraphBusy(null);
-    }
-  }
-
-  async function openTaskGraph() {
-    if (!snapshot) return;
-    setTaskGraphBusy("open");
-    try {
-      const conflict = await api.checkTaskGraphConflict(snapshot.project.id);
-      if (!conflict.exists) {
-        await api.exportTaskGraph(snapshot.project.id, false);
-      } else if (conflict.conflict) {
-        showToast({
-          tone: "info",
-          title: "외부 편집된 tasks.md",
-          description: "덮어쓰지 않고 현재 파일을 엽니다. 재생성하려면 충돌 확인 후 진행하세요.",
-        });
-      }
-      await api.openTaskGraph(snapshot.project.id);
-    } catch (error) {
-      showToast({
-        tone: "error",
-        title: "tasks.md 열기 실패",
-        description: messageFromError(error, "Task graph 파일을 열지 못했습니다."),
-      });
-    } finally {
-      setTaskGraphBusy(null);
-    }
-  }
-
-  async function exportCoordinationSnapshot() {
-    if (!snapshot) return;
-    setTaskGraphBusy("coordination");
-    try {
-      const exported = await api.exportCoordinationSnapshot(snapshot.project.id);
-      showToast({
-        tone: "success",
-        title: "조정 스냅샷 내보내기 완료",
-        description: `${exported.taskCount} Task · ${exported.runCount} Run · ${exported.messageCount} Message를 ${exported.path}에 저장했습니다.`,
-      });
-    } catch (error) {
-      showToast({
-        tone: "error",
-        title: "조정 스냅샷 내보내기 실패",
-        description: messageFromError(error, "조정 스냅샷을 저장하지 못했습니다."),
-      });
-    } finally {
-      setTaskGraphBusy(null);
-    }
-  }
-
   return (
     <div className={selectedTask ? "tasks-layout with-detail" : "tasks-layout"}>
       <section className="task-workspace">
         <div className="section-header">
           <div>
-            <h2>Agent board</h2>
-            <p>계획, 실행, 검토, 테스트, 머지까지 태스크 흐름을 추적합니다.</p>
+            <h2>작업자 현황</h2>
+            <p>누가 무엇을 진행 중인지, 승인이나 질문 때문에 멈췄는지만 봅니다.</p>
           </div>
           <div className="section-header-actions">
-            <div className="header-action-primary">
-              <button className="primary-button" onClick={onGoPlanning} type="button">
-                계획 만들기
-              </button>
-            </div>
-            <div className="header-action-tools" aria-label="태스크 보드 관리 작업">
-              <button
-                className="secondary-button"
-                disabled={taskGraphBusy !== null}
-                onClick={openTaskGraph}
-                title="현재 태스크 보드를 Markdown 파일로 엽니다."
-                type="button"
-              >
-                {taskGraphBusy === "open" ? "여는 중..." : "tasks.md 열기"}
-              </button>
-              <button
-                className="secondary-button caution"
-                disabled={taskGraphBusy !== null}
-                onClick={regenerateTaskGraph}
-                title="Helm DB 기준으로 tasks.md를 다시 씁니다. 외부 편집이 있으면 확인 후 진행합니다."
-                type="button"
-              >
-                {taskGraphBusy === "export" ? "다시 쓰는 중..." : "tasks.md 다시 쓰기"}
-              </button>
-              <button
-                className="secondary-button"
-                disabled={taskGraphBusy !== null}
-                onClick={exportCoordinationSnapshot}
-                title="다른 에이전트가 읽을 수 있는 .helm/coordination 스냅샷을 내보냅니다."
-                type="button"
-              >
-                {taskGraphBusy === "coordination" ? "내보내는 중..." : "조정 스냅샷 내보내기"}
-              </button>
-            </div>
+            <button className="primary-button" onClick={onGoPlanning} type="button">
+              계획 만들기
+            </button>
           </div>
         </div>
 
-        {snapshot.tasks.length === 0 ? (
-          <div className="empty-board-callout">
-            <div>
-              <strong>아직 실행할 Task가 없습니다.</strong>
-              <span>계획을 승인하면 실행, 검토, 테스트 흐름이 이 보드에 나타납니다.</span>
-            </div>
-            <button className="primary-button" onClick={onGoPlanning} type="button">
-              계획 탭에서 시작
-            </button>
-          </div>
-        ) : (
-          <div className={planTaskGroups.length > 1 ? "plan-task-groups" : "plan-task-groups single"}>
-            {planTaskGroups.map((group) => (
-              <section className="plan-task-group" key={group.id}>
-                <header className="plan-task-group-header">
-                  <div className="plan-task-group-title">
-                    <span>{group.caption}</span>
-                    <h3>{group.title}</h3>
-                    <p>{group.description}</p>
-                  </div>
-                  <div className="plan-task-group-metrics" aria-label="Plan progress summary">
-                    <span>
-                      <strong>{group.tasks.length}</strong>
-                      Task
-                    </span>
-                    <span>
-                      <strong>{group.subtaskCounts.total}</strong>
-                      Subtask
-                    </span>
-                    <span>
-                      <strong>{group.statusSummary}</strong>
-                      현재 단계
-                    </span>
-                  </div>
-                </header>
-                {group.subtasks.length > 0 ? (
-                  <div className="plan-subtask-strip" aria-label="Subtask progress">
-                    {group.subtasks.slice(0, 8).map((subtask) => (
-                      <span className={`plan-subtask-chip ${subtask.tone}`} key={subtask.id}>
-                        <strong>{subtask.state}</strong>
-                        {subtask.title}
-                      </span>
-                    ))}
-                    {group.subtasks.length > 8 ? (
-                      <span className="plan-subtask-chip muted">+{group.subtasks.length - 8}개 더</span>
-                    ) : null}
-                  </div>
-                ) : null}
-                <TaskBoard
-                  tasks={group.tasks}
-                  taskRuns={taskRuns}
-                  selectedTaskId={selectedTaskId}
-                  onSelectTask={onSelectTask}
-                />
-              </section>
-            ))}
-          </div>
-        )}
-        <AgentUsageBar snapshot={snapshot} />
-        <ApprovalInbox snapshot={snapshot} onRefresh={onRefresh} />
+        <TaskBoard
+          tasks={snapshot.tasks}
+          taskRuns={taskRuns}
+          selectedTaskId={selectedTaskId}
+          onSelectTask={onSelectTask}
+        />
       </section>
       {selectedTask ? (
-        <TaskDetail
+        <TaskFocusDetail
           snapshot={snapshot}
           task={selectedTask}
-          onRefresh={onRefresh}
-          onGoGit={onGoGit}
-          onGoSettings={onGoSettings}
+          runs={taskRuns[selectedTask.id] ?? []}
           onClose={() => onSelectTask(null)}
         />
       ) : null}
@@ -302,187 +139,199 @@ export function TasksScreen({
   );
 }
 
-interface PlanTaskGroup {
-  id: string;
-  title: string;
-  caption: string;
-  description: string;
-  tasks: TaskSummary[];
-  subtasks: PlanSubtask[];
-  subtaskCounts: Record<PlanProgressTone, number> & { total: number };
-  statusSummary: string;
+interface TaskFocusDetailProps {
+  snapshot: ProjectSnapshot;
+  task: TaskSummary;
+  runs: AgentRunSummary[];
+  onClose: () => void;
 }
 
-interface PlanSubtask {
-  id: string;
-  title: string;
-  state: string;
-  tone: PlanProgressTone;
-}
+function TaskFocusDetail({ snapshot, task, runs, onClose }: TaskFocusDetailProps) {
+  const [timeline, setTimeline] = useState<TaskTimelineEntry[]>([]);
+  const [changedFiles, setChangedFiles] = useState<GitFileStatus[]>([]);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const visibleRun = selectVisibleRun(runs);
+  const live = visibleRun ? deriveRunLiveState(visibleRun) : null;
+  const pendingApprovals = snapshot.approvals.filter(
+    (approval) =>
+      approval.status === "Pending" &&
+      ((approval.entityType === "Task" && approval.entityId === task.id) ||
+        (visibleRun && approval.entityType === "AgentRun" && approval.entityId === visibleRun.id)),
+  );
+  const attentionItems = buildAttentionItems(task, visibleRun, pendingApprovals);
+  const markdownRefs = task.externalRefs.filter(
+    (ref) => ref.refType === "MarkdownPlan" || ref.refTitle?.toLowerCase().includes("markdown") || ref.refValue.endsWith(".md"),
+  );
 
-type PlanProgressTone = "waiting" | "active" | "done" | "blocked";
+  useEffect(() => {
+    let disposed = false;
+    setDetailError(null);
+    setTimeline([]);
+    setChangedFiles([]);
 
-function groupTasksByPlan(tasks: TaskSummary[], taskRuns: Record<string, AgentRunSummary[]>): PlanTaskGroup[] {
-  const groups = new Map<
-    string,
-    {
-      title: string;
-      caption: string;
-      description: string;
-      tasks: TaskSummary[];
-      latestAt: number;
-    }
-  >();
+    void (async () => {
+      try {
+        const [nextTimeline, nextFiles] = await Promise.all([
+          api.listTaskTimeline(snapshot.project.id, task.id),
+          api.getTaskWorktreeChangedFiles(snapshot.project.id, task.id).catch(() => []),
+        ]);
+        if (!disposed) {
+          setTimeline(nextTimeline);
+          setChangedFiles(nextFiles);
+        }
+      } catch (error) {
+        if (!disposed) setDetailError(messageFromError(error, "상세 정보를 불러오지 못했습니다."));
+      }
+    })();
 
-  for (const task of tasks) {
-    const plan = planIdentityForTask(task);
-    const group = groups.get(plan.id) ?? {
-      title: plan.title,
-      caption: plan.caption,
-      description: plan.description,
-      tasks: [],
-      latestAt: 0,
+    return () => {
+      disposed = true;
     };
-    group.tasks.push(task);
-    group.latestAt = Math.max(group.latestAt, Date.parse(task.updatedAt) || Date.parse(task.createdAt) || 0);
-    groups.set(plan.id, group);
-  }
+  }, [snapshot.project.id, task.id]);
 
-  return Array.from(groups.entries())
-    .map(([id, group]) => {
-      const sortedTasks = [...group.tasks].sort(
-        (a, b) => a.sortOrder - b.sortOrder || Date.parse(a.createdAt) - Date.parse(b.createdAt),
-      );
-      const subtasks = sortedTasks.flatMap((task) => {
-        const progress = taskProgressForPlan(task, taskRuns[task.id] ?? []);
-        return extractSubtasks(task.description).map((title, index) => ({
-          id: `${task.id}:${index}`,
-          title,
-          state: progress.label,
-          tone: progress.tone,
-        }));
-      });
-      const subtaskCounts = countSubtaskProgress(subtasks);
-      return {
-        id,
-        title: group.title,
-        caption: group.caption,
-        description: group.description,
-        tasks: sortedTasks,
-        subtasks,
-        subtaskCounts,
-        statusSummary: summarizePlanStatus(sortedTasks),
-        latestAt: group.latestAt,
-      };
-    })
-    .sort((a, b) => b.latestAt - a.latestAt)
-    .map(({ latestAt: _latestAt, ...group }) => group);
+  const recentTimeline = timeline.slice(0, 4);
+
+  return (
+    <aside className="task-focus-detail" aria-label="작업 상세">
+      <header className="task-focus-header">
+        <div>
+          <span>{TASK_STATUS_LABEL[task.status]}</span>
+          <h3>{task.title}</h3>
+        </div>
+        <button className="icon-button" onClick={onClose} title="닫기" type="button">
+          <X size={16} />
+        </button>
+      </header>
+
+      {detailError ? <div className="error-banner compact">{detailError}</div> : null}
+
+      <section className="focus-section">
+        <div className="focus-section-title">
+          <GitPullRequest size={16} />
+          <h4>현재 작업</h4>
+        </div>
+        {visibleRun && live ? (
+          <div className={`focus-run-card ${live.tone}`}>
+            <span>{roleLabel(visibleRun.roleId)} · {live.label}</span>
+            <strong>{live.summary}</strong>
+            <small>{visibleRun.latestEventMessage ?? visibleRun.resultStatus ?? `최근 신호 ${live.ageLabel}`}</small>
+          </div>
+        ) : (
+          <div className="focus-run-card queued">
+            <span>{TASK_STATUS_LABEL[task.status]}</span>
+            <strong>{task.statusReason ?? "실행 중인 작업자는 없습니다."}</strong>
+            <small>{task.description ? firstLine(task.description) : "대기 중인 작업입니다."}</small>
+          </div>
+        )}
+      </section>
+
+      <section className="focus-section">
+        <div className="focus-section-title">
+          <MessageSquareWarning size={16} />
+          <h4>승인/질문</h4>
+        </div>
+        {attentionItems.length > 0 ? (
+          <ul className="focus-list">
+            {attentionItems.map((item) => (
+              <li key={item.id}>
+                <strong>{item.title}</strong>
+                <span>{item.body}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="focus-empty">지금 필요한 승인이나 질문은 없습니다.</p>
+        )}
+      </section>
+
+      <section className="focus-section">
+        <div className="focus-section-title">
+          <FileText size={16} />
+          <h4>참고 Markdown</h4>
+        </div>
+        {markdownRefs.length > 0 ? (
+          <ul className="focus-list">
+            {markdownRefs.map((ref) => (
+              <li key={ref.id}>
+                <strong>{ref.refTitle ?? "Markdown"}</strong>
+                <span>{ref.refValue}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="focus-empty">연결된 Markdown 참조가 없습니다.</p>
+        )}
+      </section>
+
+      <section className="focus-section">
+        <div className="focus-section-title">
+          <GitPullRequest size={16} />
+          <h4>수정된 파일</h4>
+        </div>
+        {changedFiles.length > 0 ? (
+          <ul className="focus-file-list">
+            {changedFiles.map((file) => (
+              <li key={`${file.status}:${file.path}`}>
+                <strong>{file.status}</strong>
+                <span>{file.path}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="focus-empty">Task worktree에서 감지된 변경 파일이 없습니다.</p>
+        )}
+      </section>
+
+      {recentTimeline.length > 0 ? (
+        <section className="focus-section">
+          <h4>최근 기록</h4>
+          <ul className="focus-list">
+            {recentTimeline.map((entry) => (
+              <li key={entry.id}>
+                <strong>{entry.title}</strong>
+                <span>{entry.summary ?? entry.status ?? entry.entryType}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+    </aside>
+  );
 }
 
-function planIdentityForTask(task: TaskSummary): { id: string; title: string; caption: string; description: string } {
-  const goalRef = task.externalRefs.find((ref) => ref.refTitle === "Planning goal");
-  const draftRef = task.externalRefs.find((ref) => ref.refTitle === "Planner draft task");
-  const jiraRef = task.externalRefs.find((ref) => ref.refTitle === "Jira reference");
-  const draftVersion = draftRef?.refValue.match(/^Planner draft v\d+/)?.[0] ?? null;
-
-  if (goalRef) {
-    return {
-      id: ["planning", goalRef.refValue, draftVersion ?? ""].join(":"),
-      title: goalRef.refValue,
-      caption: draftVersion ?? "Plan document",
-      description: jiraRef ? `Jira reference · ${jiraRef.refValue}` : "Helm Planning에서 승인된 계획",
-    };
-  }
-
-  if (task.epicId) {
-    return {
-      id: `epic:${task.epicId}`,
-      title: task.epicId,
-      caption: "Epic",
-      description: "Epic 기준으로 묶인 Task",
-    };
-  }
-
-  return {
-    id: "unplanned",
-    title: "계획 연결 없는 Task",
-    caption: "No plan",
-    description: "Planning goal 참조가 없는 Task",
-  };
-}
-
-function extractSubtasks(description: string): string[] {
-  const section = extractSection(description, "Subtasks", ["Acceptance Criteria", "Risks", "Test Plan"]);
-  return section
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => line.replace(/^[-*]\s*/, "").trim())
-    .filter(Boolean);
-}
-
-function extractSection(description: string, startHeading: string, endHeadings: string[]): string {
-  const start = description.indexOf(startHeading);
-  if (start < 0) return "";
-  const bodyStart = start + startHeading.length;
-  const end = endHeadings
-    .map((heading) => description.indexOf(heading, bodyStart))
-    .filter((index) => index >= 0)
-    .sort((a, b) => a - b)[0];
-  return description.slice(bodyStart, end ?? description.length);
-}
-
-function taskProgressForPlan(
+function buildAttentionItems(
   task: TaskSummary,
-  runs: AgentRunSummary[],
-): { label: string; tone: PlanProgressTone } {
-  const activeRun = selectVisibleRun(runs);
-  const live = activeRun ? deriveRunLiveState(activeRun) : null;
+  run: AgentRunSummary | null,
+  approvals: ApprovalSummary[],
+): Array<{ id: string; title: string; body: string }> {
+  const items = approvals.map((approval) => ({
+    id: approval.id,
+    title: approval.approvalType === "PlanApproval" ? "계획 승인 필요" : "실행 승인 필요",
+    body: approval.requestedReason,
+  }));
 
-  if (task.status === "Blocked" || (activeRun && isRunAttentionState(activeRun))) {
-    return { label: "막힘", tone: "blocked" };
+  if (task.status === "Blocked") {
+    items.push({
+      id: `task:${task.id}:blocked`,
+      title: "Task 막힘",
+      body: task.statusReason ?? "작업을 계속하려면 사용자 결정이 필요합니다.",
+    });
   }
-  if (task.status === "MergeWaiting" || task.status === "Merged" || task.status === "Done") {
-    return { label: "완료", tone: "done" };
+
+  if (run && isRunAttentionState(run)) {
+    const live = deriveRunLiveState(run);
+    items.push({
+      id: `run:${run.id}:attention`,
+      title: `${roleLabel(run.roleId)} 확인 필요`,
+      body: live.summary,
+    });
   }
-  if (activeRun && isRunActiveState(activeRun)) {
-    return { label: live?.state === "approval_pending" ? "승인대기" : "진행중", tone: "active" };
-  }
-  if (isActiveTaskStatus(task.status)) {
-    return { label: "진행중", tone: "active" };
-  }
-  return { label: "대기", tone: "waiting" };
+
+  return items;
 }
 
-function isActiveTaskStatus(status: TaskStatus): boolean {
-  return status === "Coding" || status === "PlanVerification" || status === "CodeReview" || status === "Testing";
-}
-
-function countSubtaskProgress(subtasks: PlanSubtask[]): Record<PlanProgressTone, number> & { total: number } {
-  return subtasks.reduce(
-    (counts, subtask) => {
-      counts[subtask.tone] += 1;
-      counts.total += 1;
-      return counts;
-    },
-    { waiting: 0, active: 0, done: 0, blocked: 0, total: 0 },
-  );
-}
-
-function summarizePlanStatus(tasks: TaskSummary[]): string {
-  const counts = tasks.reduce(
-    (acc, task) => {
-      acc[task.status] = (acc[task.status] ?? 0) + 1;
-      return acc;
-    },
-    {} as Partial<Record<TaskStatus, number>>,
-  );
-  const mostCommon = Object.entries(counts).sort(([, a], [, b]) => (b ?? 0) - (a ?? 0))[0] as
-    | [TaskStatus, number]
-    | undefined;
-  if (!mostCommon) return "-";
-  const [status, count] = mostCommon;
-  return count === tasks.length ? TASK_STATUS_LABEL[status] : `${TASK_STATUS_LABEL[status]} ${count}/${tasks.length}`;
+function firstLine(value: string): string {
+  return value.split("\n").map((line) => line.trim()).find(Boolean) ?? value;
 }
 
 function messageFromError(error: unknown, fallback: string): string {

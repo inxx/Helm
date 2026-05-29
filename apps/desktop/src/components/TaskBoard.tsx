@@ -1,89 +1,22 @@
-import { useEffect, useMemo, useRef } from "react";
-import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
 import { deriveRunLiveState, isRunActiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
-import { roleLabel } from "../lib/runnerReadiness";
+import { roleLabel, type RoleId } from "../lib/runnerReadiness";
+import { TASK_STATUS_LABEL } from "../lib/status";
 import type { AgentRunSummary, TaskStatus, TaskSummary } from "../lib/types";
 
-type StageTone = "idle" | "ready" | "active" | "review" | "done" | "blocked";
+type WorkState = "active" | "attention" | "waiting" | "done";
 
-const STATUS_STAGE: Record<TaskStatus, { label: string; next: string; tone: StageTone }> = {
-  Planned: {
-    label: "Plan",
-    next: "Planner",
-    tone: "idle",
-  },
-  Ready: {
-    label: "Ready",
-    next: "Coder",
-    tone: "ready",
-  },
-  Coding: {
-    label: "Build",
-    next: "Watch run",
-    tone: "active",
-  },
-  PlanVerification: {
-    label: "Verify",
-    next: "Plan review",
-    tone: "review",
-  },
-  CodeReview: {
-    label: "Review",
-    next: "Code review",
-    tone: "review",
-  },
-  Testing: {
-    label: "Test",
-    next: "Tester",
-    tone: "review",
-  },
-  MergeWaiting: {
-    label: "Merge",
-    next: "Readiness",
-    tone: "ready",
-  },
-  Merged: {
-    label: "Merged",
-    next: "Close out",
-    tone: "done",
-  },
-  Done: {
-    label: "Done",
-    next: "No action",
-    tone: "done",
-  },
-  Blocked: {
-    label: "Blocked",
-    next: "Decision",
-    tone: "blocked",
-  },
-};
-
-const COLUMN_HINT: Record<TaskStatus, string> = {
-  Planned: "spec and acceptance",
-  Ready: "approved for build",
-  Coding: "agent is changing files",
-  PlanVerification: "plan compliance gate",
-  CodeReview: "quality gate",
-  Testing: "test gate",
-  MergeWaiting: "ready for merge decision",
-  Merged: "branch landed",
-  Done: "closed loop",
-  Blocked: "needs decision",
-};
-
-const EMPTY_COLUMN_COPY: Record<TaskStatus, string> = {
-  Planned: "새 계획 후보가 들어오면 여기에 쌓입니다.",
-  Ready: "승인된 계획이 구현 대기 상태로 이동합니다.",
-  Coding: "실행 중인 구현 작업이 여기에 표시됩니다.",
-  PlanVerification: "구현 diff가 계획과 맞는지 확인하는 단계입니다.",
-  CodeReview: "품질과 위험을 검토할 작업이 들어옵니다.",
-  Testing: "테스트 검증이 필요한 작업이 들어옵니다.",
-  MergeWaiting: "모든 gate를 통과한 작업이 merge 결정을 기다립니다.",
-  Merged: "브랜치가 반영된 작업이 표시됩니다.",
-  Done: "완전히 닫힌 작업이 표시됩니다.",
-  Blocked: "사용자 결정이나 추가 입력이 필요한 작업이 표시됩니다.",
-};
+interface WorkRow {
+  id: string;
+  task: TaskSummary;
+  roleId: RoleId | "coordinator";
+  workerLabel: string;
+  state: WorkState;
+  stateLabel: string;
+  summary: string;
+  needsDecision: boolean;
+  updatedAt: string;
+  run: AgentRunSummary | null;
+}
 
 interface TaskBoardProps {
   tasks: TaskSummary[];
@@ -93,206 +26,142 @@ interface TaskBoardProps {
 }
 
 export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask }: TaskBoardProps) {
-  const tasksByStatus = groupTasksByStatus(tasks);
-  const boardRef = useRef<HTMLDivElement | null>(null);
-  const focusStatus = useMemo(
-    () => focusStatusForBoard(tasks, taskRuns, selectedTaskId),
-    [tasks, taskRuns, selectedTaskId],
+  const rows = tasks.map((task) => workRowForTask(task, taskRuns[task.id] ?? [])).sort(compareWorkRows);
+  const counts = rows.reduce(
+    (acc, row) => {
+      acc[row.state] += 1;
+      return acc;
+    },
+    { active: 0, attention: 0, waiting: 0, done: 0 },
   );
-
-  useEffect(() => {
-    if (!focusStatus) return;
-    const column = boardRef.current?.querySelector<HTMLElement>(`[data-status="${focusStatus}"]`);
-    column?.scrollIntoView({ block: "nearest", inline: "start" });
-  }, [focusStatus]);
 
   return (
-    <div className="task-board" data-focus-status={focusStatus ?? undefined} ref={boardRef}>
-      {TASK_STATUS_ORDER.map((status) => {
-        const columnTasks = tasksByStatus[status];
-        const stage = STATUS_STAGE[status];
-        const columnTone = columnToneForTasks(columnTasks, taskRuns);
-        return (
-          <section className="task-column" data-status={status} data-tone={columnTone} key={status}>
-            <header className="task-column-header">
-              <div>
-                <span>{TASK_STATUS_LABEL[status]}</span>
-                <small>{COLUMN_HINT[status]}</small>
-              </div>
-              <strong>{columnTasks.length}</strong>
-            </header>
-            <div className={columnTasks.length === 0 ? "task-card-list empty" : "task-card-list"}>
-              {columnTasks.length === 0 ? (
-                <div className="task-column-empty">
-                  <strong>{stage.label}</strong>
-                  <span>{EMPTY_COLUMN_COPY[status]}</span>
+    <section className="worker-board" aria-label="작업자 상태">
+      <header className="worker-board-summary">
+        <div>
+          <span>작업자 상태</span>
+          <strong>
+            진행 {counts.active} · 확인 필요 {counts.attention} · 대기 {counts.waiting}
+          </strong>
+        </div>
+        <small>클릭하면 진행 내용, 승인/질문, 참고 문서, 변경 파일만 확인합니다.</small>
+      </header>
+      {rows.length === 0 ? (
+        <div className="worker-board-empty">
+          <strong>현재 추적 중인 작업이 없습니다.</strong>
+          <span>계획을 승인하거나 Task를 만들면 작업자별 상태가 여기에 표시됩니다.</span>
+        </div>
+      ) : (
+        <div className="worker-row-list">
+          {rows.map((row) => (
+            <button
+              aria-label={`${row.workerLabel}. ${row.task.title}. ${row.stateLabel}`}
+              aria-pressed={row.task.id === selectedTaskId}
+              className={row.task.id === selectedTaskId ? `worker-row selected ${row.state}` : `worker-row ${row.state}`}
+              key={row.id}
+              onClick={() => onSelectTask(row.task.id === selectedTaskId ? null : row.task.id)}
+              type="button"
+            >
+              <div className="worker-row-main">
+                <span className={`worker-state-dot ${row.state}`} />
+                <div>
+                  <strong>{row.workerLabel}</strong>
+                  <span>{row.task.title}</span>
                 </div>
-              ) : null}
-              {columnTasks.map((task) => {
-                const externalRef = task.externalRefs[0];
-                const activeRun = activeRunForTask(taskRuns[task.id] ?? []);
-                const flowLabel = activeRun ? runFlowLabel(activeRun) : stage.next;
-                const flowCaption = activeRun ? "run" : "next";
-                const taskAriaLabel = taskCardAriaLabel(task, activeRun, flowLabel);
-                return (
-                  <button
-                    aria-label={taskAriaLabel}
-                    aria-pressed={task.id === selectedTaskId}
-                    className={task.id === selectedTaskId ? "task-card selected" : "task-card"}
-                    key={task.id}
-                    onClick={() => onSelectTask(task.id === selectedTaskId ? null : task.id)}
-                    title={task.title}
-                    type="button"
-                  >
-                    <div className="task-card-topline">
-                      <span className={`task-stage-pill ${stage.tone}`}>{stage.label}</span>
-                      <small>{relativeTime(task.lastTransitionAt)}</small>
-                    </div>
-                    <strong className="task-card-title">{task.title}</strong>
-                    {task.description ? <span className="task-card-description">{task.description}</span> : null}
-                    {activeRun ? (
-                      <div className={`task-card-run ${runTone(activeRun)}`}>
-                        <span>{runStatusLabel(activeRun)}</span>
-                        <strong>{roleLabel(activeRun.roleId)}</strong>
-                        <small>{runHint(activeRun)}</small>
-                      </div>
-                    ) : null}
-                    <div className="task-card-flow">
-                      <span>{flowCaption}</span>
-                      <strong>{flowLabel}</strong>
-                    </div>
-                    {task.statusReason ? <span className="task-card-reason">{task.statusReason}</span> : null}
-                    {externalRef ? (
-                      <small className="task-card-ref">
-                        {externalRef.refTitle ? `${externalRef.refTitle} · ` : ""}
-                        {externalRef.refValue}
-                      </small>
-                    ) : null}
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-        );
-      })}
-    </div>
+              </div>
+              <div className="worker-row-status">
+                <strong>{row.stateLabel}</strong>
+                <span>{row.summary}</span>
+              </div>
+              <div className="worker-row-meta">
+                <span>{TASK_STATUS_LABEL[row.task.status]}</span>
+                {row.needsDecision ? <strong>승인/질문 필요</strong> : <small>{relativeTime(row.updatedAt)}</small>}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
-function activeRunForTask(runs: AgentRunSummary[]): AgentRunSummary | null {
-  return selectVisibleRun(runs);
-}
-
-function runFlowLabel(run: AgentRunSummary): string {
-  const live = deriveRunLiveState(run);
-  return `${roleLabel(run.roleId)} · ${live.label}`;
-}
-
-function runHint(run: AgentRunSummary): string {
-  const live = deriveRunLiveState(run);
-  if (live.state === "running") return live.summary;
-  if (live.state === "approval_pending") return "승인 전에는 다음 단계로 진행하지 않습니다.";
-  if (live.state === "quiet" || live.state === "stalled_candidate") return `${live.summary} · ${live.ageLabel}`;
-  if (live.state === "queued" || live.state === "starting") return live.summary;
-  if (run.failureKind) return humanizedFailureReason(run) ?? `${failureKindLabel(run.failureKind)} · 재시도 가능`;
-  return live.summary || (run.resultStatus ? `${run.resultStatus} · 재시도 가능` : "상세에서 근거 확인");
-}
-
-function runStatusLabel(run: AgentRunSummary): string {
-  return deriveRunLiveState(run).label;
-}
-
-function runTone(run: AgentRunSummary): "running" | "queued" | "attention" | "done" {
-  return deriveRunLiveState(run).tone;
-}
-
-function failureKindLabel(kind: string): string {
-  if (kind === "needs_inspection") return "점검 필요";
-  if (kind === "blocking_gate") return "게이트 차단";
-  if (kind === "diff_mismatch") return "diff 불일치";
-  if (kind === "schema_invalid") return "결과 포맷 불일치";
-  if (kind === "timeout") return "시간 초과";
-  if (kind === "exit_failed") return "실행 실패";
-  if (kind === "canceled") return "취소됨";
-  return kind;
-}
-
-function humanizedFailureReason(run: AgentRunSummary): string | null {
-  if (!run.failureReason) return null;
-  if (run.failureKind === "needs_inspection") {
-    return "자동 판정에 필요한 근거가 부족해 수동 점검이 필요합니다.";
+function workRowForTask(task: TaskSummary, runs: AgentRunSummary[]): WorkRow {
+  const run = selectVisibleRun(runs);
+  if (run) {
+    const live = deriveRunLiveState(run);
+    const attention = isRunAttentionState(run);
+    const active = isRunActiveState(run);
+    return {
+      id: `${task.id}:${run.id}`,
+      task,
+      roleId: run.roleId as RoleId,
+      workerLabel: roleLabel(run.roleId),
+      state: attention ? "attention" : active ? "active" : run.status === "Succeeded" ? "done" : "waiting",
+      stateLabel: live.label,
+      summary: live.summary,
+      needsDecision: live.attention || Boolean(run.pendingRunApprovalId),
+      updatedAt: run.latestEventAt ?? run.heartbeatAt ?? run.updatedAt,
+      run,
+    };
   }
-  if (run.failureKind === "blocking_gate") {
-    return "차단 이슈가 감지되어 다음 단계로 진행되지 않았습니다.";
-  }
-  return run.failureReason;
+
+  return {
+    id: task.id,
+    task,
+    roleId: roleForTaskStatus(task.status),
+    workerLabel: roleLabel(roleForTaskStatus(task.status)),
+    state: task.status === "Blocked" ? "attention" : terminalTaskStatus(task.status) ? "done" : "waiting",
+    stateLabel: task.status === "Blocked" ? "막힘" : terminalTaskStatus(task.status) ? "완료" : "대기",
+    summary: task.statusReason ?? nextWorkSummary(task.status),
+    needsDecision: task.status === "Blocked",
+    updatedAt: task.updatedAt,
+    run: null,
+  };
 }
 
-function taskCardAriaLabel(task: TaskSummary, activeRun: AgentRunSummary | null, flowLabel: string): string {
-  const parts = [`${task.title}`, `현재 단계 ${TASK_STATUS_LABEL[task.status]}`];
-  if (activeRun) {
-    const live = deriveRunLiveState(activeRun);
-    parts.push(`${roleLabel(activeRun.roleId)} ${live.label}`);
-  } else {
-    parts.push(`다음 액션 ${flowLabel}`);
-  }
-  return parts.join(". ");
+function compareWorkRows(left: WorkRow, right: WorkRow): number {
+  return statePriority(left.state) - statePriority(right.state) || Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
 }
 
-function columnToneForTasks(
-  tasks: TaskSummary[],
-  taskRuns: Record<string, AgentRunSummary[]>,
-): "attention" | "active" | "idle" {
-  if (tasks.some((task) => (taskRuns[task.id] ?? []).some(isRunAttentionState) || task.status === "Blocked")) {
-    return "attention";
-  }
-  if (tasks.some((task) => (taskRuns[task.id] ?? []).some(isRunActiveState))) {
-    return "active";
-  }
-  return "idle";
+function statePriority(state: WorkState): number {
+  if (state === "attention") return 0;
+  if (state === "active") return 1;
+  if (state === "waiting") return 2;
+  return 3;
 }
 
-function focusStatusForBoard(
-  tasks: TaskSummary[],
-  taskRuns: Record<string, AgentRunSummary[]>,
-  selectedTaskId: string | null,
-): TaskStatus | null {
-  const selectedTask = selectedTaskId ? tasks.find((task) => task.id === selectedTaskId) : null;
-  if (selectedTask) return selectedTask.status;
-
-  const attentionTask = tasks.find((task) => (taskRuns[task.id] ?? []).some(isRunAttentionState) || task.status === "Blocked");
-  if (attentionTask) return attentionTask.status;
-
-  const activeTask = tasks.find((task) => (taskRuns[task.id] ?? []).some(isRunActiveState));
-  return activeTask?.status ?? null;
+function roleForTaskStatus(status: TaskStatus): RoleId {
+  if (status === "Planned" || status === "Blocked") return "planner";
+  if (status === "Ready" || status === "Coding" || status === "MergeWaiting") return "coder";
+  if (status === "PlanVerification") return "plan_verifier";
+  if (status === "CodeReview") return "code_reviewer";
+  if (status === "Testing") return "tester";
+  return "coder";
 }
 
-function groupTasksByStatus(tasks: TaskSummary[]): Record<TaskStatus, TaskSummary[]> {
-  const grouped = Object.fromEntries(
-    TASK_STATUS_ORDER.map((status) => [status, [] as TaskSummary[]]),
-  ) as Record<TaskStatus, TaskSummary[]>;
-  for (const task of tasks) {
-    grouped[task.status].push(task);
-  }
-  for (const status of TASK_STATUS_ORDER) {
-    grouped[status].sort(
-      (a, b) => a.sortOrder - b.sortOrder || Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
-    );
-  }
-  return grouped;
+function terminalTaskStatus(status: TaskStatus): boolean {
+  return status === "Merged" || status === "Done";
+}
+
+function nextWorkSummary(status: TaskStatus): string {
+  if (status === "Planned") return "계획 승인을 기다립니다.";
+  if (status === "Ready") return "구현자가 작업을 시작할 수 있습니다.";
+  if (status === "Coding") return "구현 작업 상태를 확인합니다.";
+  if (status === "PlanVerification") return "계획 준수 확인이 필요합니다.";
+  if (status === "CodeReview") return "코드 리뷰가 필요합니다.";
+  if (status === "Testing") return "테스트 검증이 필요합니다.";
+  if (status === "MergeWaiting") return "머지 결정이 필요합니다.";
+  return "닫힌 작업입니다.";
 }
 
 function relativeTime(value: string): string {
   const time = Date.parse(value);
-  if (!Number.isFinite(time)) return "-";
-  const diffMs = Date.now() - time;
-  const absMs = Math.abs(diffMs);
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-
-  if (absMs < minute) return "now";
-  if (absMs < hour) return `${Math.floor(absMs / minute)}m ago`;
-  if (absMs < day) return `${Math.floor(absMs / hour)}h ago`;
-  return `${Math.floor(absMs / day)}d ago`;
+  if (!Number.isFinite(time)) return "알 수 없음";
+  const diffMs = Math.max(0, Date.now() - time);
+  if (diffMs < 60_000) return "방금 전";
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) return `${minutes}분 전`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}시간 전`;
+  return `${Math.floor(hours / 24)}일 전`;
 }
