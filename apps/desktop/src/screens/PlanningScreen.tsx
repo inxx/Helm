@@ -837,7 +837,14 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
                       key={message.id}
                     >
                       <div className="planning-message-meta">
-                        <strong>{message.role === "planner" ? `Planner · v${activeSession.revision}` : "User"}</strong>
+                        {message.role === "planner" ? (
+                          <strong>
+                            <span className="planning-message-role">Planner · v{activeSession.revision}</span>
+                            {message.pending ? <Loader2 className="loading-icon planning-message-spinner" size={12} aria-hidden /> : null}
+                          </strong>
+                        ) : (
+                          <strong>User</strong>
+                        )}
                         <span>{message.createdLabel}</span>
                       </div>
                       <p>{message.content}</p>

@@ -5553,6 +5553,12 @@ textarea {
   text-transform: uppercase;
 }
 
+.planning-message-role {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .planning-message-meta span {
   color: var(--text-muted);
   font-family: var(--mono);
