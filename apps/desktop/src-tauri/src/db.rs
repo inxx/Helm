@@ -2055,6 +2055,32 @@ pub fn run_host_role(
         &command_args,
         &runner_command,
     )?;
+    append_and_emit_run_event(
+        conn,
+        project_id,
+        &run.task_id,
+        run_id,
+        "system",
+        "Runner request captured",
+        json!({
+            "runner": "HelmHostRunner",
+            "provider": runner_command.provider.clone(),
+            "connectionId": runner_command.connection_id.clone(),
+            "model": runner_command.model.clone(),
+            "adapter": runner_adapter_label(runner_command.runner_adapter),
+            "worktreePath": worktree.worktree_path.clone(),
+            "artifactDir": run.artifact_dir.clone(),
+            "path": format!("{}/runner-request.json", run.artifact_dir),
+            "envKeys": runner_command.env.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            "reads": [
+                "context-pack.md",
+                "context-pack.json",
+                "structured-result.schema.json",
+                "worktree git state"
+            ]
+        }),
+        &mut event_sink,
+    )?;
     let command_started_at = now();
     let command_started_instant = Instant::now();
     let command_output = match runner_command.runner_adapter {
@@ -2197,6 +2223,23 @@ pub fn run_host_role(
         fs::write(artifact_path.join("diff.patch"), diff_output.stderr)
             .map_err(|err| CommandError::io("Git diff 오류를 저장하지 못했습니다.", err))?;
     }
+    append_and_emit_run_event(
+        conn,
+        project_id,
+        &run.task_id,
+        run_id,
+        "artifact",
+        "Execution artifacts collected",
+        json!({
+            "stdoutPath": format!("{}/stdout.log", run.artifact_dir),
+            "stderrPath": format!("{}/stderr.log", run.artifact_dir),
+            "changedFilesPath": format!("{}/changed-files.json", run.artifact_dir),
+            "diffPath": format!("{}/diff.patch", run.artifact_dir),
+            "changedFileCount": changed_files.len(),
+            "diffExitCode": diff_output.status.code()
+        }),
+        &mut event_sink,
+    )?;
 
     let result_path = artifact_path.join("structured-result.json");
     let result_value = fs::read_to_string(&result_path)

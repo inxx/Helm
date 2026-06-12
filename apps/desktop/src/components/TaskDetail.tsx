@@ -738,6 +738,14 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
               <span>{visibleRunActivity.description}</span>
             </div>
           ) : null}
+          <RunObservationBoard
+            events={visibleRunEvents}
+            projectRoot={snapshot.project.rootPath}
+            run={visibleRun}
+            task={task}
+            worktree={worktree}
+            worktreeFiles={worktreeFiles}
+          />
           <div className="run-document-grid">
             <RunDocumentCard
               description="runner가 읽는 md 계획/컨텍스트"
@@ -762,6 +770,12 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
               label="진행"
               name="events"
               onOpen={() => showRunEvents(visibleRun.id)}
+            />
+            <RunDocumentCard
+              description="provider/model/command/env key"
+              label="환경"
+              name="runner-request.json"
+              onOpen={() => showArtifact(visibleRun.id, "runner-request.json")}
             />
           </div>
           <RunEventPreview events={visibleRunEvents} />
@@ -2006,6 +2020,99 @@ function RunDocumentCard({
   );
 }
 
+function RunObservationBoard({
+  events,
+  projectRoot,
+  run,
+  task,
+  worktree,
+  worktreeFiles,
+}: {
+  events: RunEventSummary[];
+  projectRoot: string;
+  run: AgentRunSummary;
+  task: TaskSummary;
+  worktree: TaskWorktreeSummary | null;
+  worktreeFiles: GitFileStatus[];
+}) {
+  const latestEvent = events.length > 0 ? events[events.length - 1] : null;
+  const payloads = events.map((event) => (isRecord(event.payload) ? event.payload : null)).filter(isRecord);
+  const runnerPayload = payloads.find((payload) => stringValue(payload.runner) || stringValue(payload.provider)) ?? null;
+  const artifactPayloads = payloads.filter((payload) => stringValue(payload.path) || stringValue(payload.summaryPath) || stringValue(payload.resultPath));
+  const readItems = uniqueStrings(
+    payloads.flatMap((payload) => {
+      const reads = payload.reads;
+      return Array.isArray(reads) ? reads.map((item) => String(item)) : [];
+    }),
+  );
+  const writtenArtifacts = uniqueStrings(
+    artifactPayloads.flatMap((payload) => [
+      stringValue(payload.path),
+      stringValue(payload.summaryPath),
+      stringValue(payload.resultPath),
+      stringValue(payload.schemaPath),
+      stringValue(payload.stdoutPath),
+      stringValue(payload.stderrPath),
+      stringValue(payload.changedFilesPath),
+      stringValue(payload.diffPath),
+    ]),
+  );
+  const environmentItems = [
+    `project ${projectRoot}`,
+    worktree ? `worktree ${worktree.worktreePath}` : "worktree 없음",
+    `artifact ${run.artifactDir}`,
+    runnerPayload ? `provider ${stringValue(runnerPayload.provider) ?? stringValue(runnerPayload.runner) ?? "unknown"}` : "",
+    runnerPayload && stringValue(runnerPayload.model) ? `model ${stringValue(runnerPayload.model)}` : "",
+    runnerPayload && stringValue(runnerPayload.adapter) ? `adapter ${stringValue(runnerPayload.adapter)}` : "",
+  ].filter(Boolean);
+  const flowItems = [
+    `task ${TASK_STATUS_LABEL[task.status]}`,
+    `run ${run.status}`,
+    run.lifecyclePhase ? `phase ${run.lifecyclePhase}` : "",
+    run.resultStatus ? `result ${run.resultStatus}` : "",
+    latestEvent ? `last ${latestEvent.kind}: ${compactEventMessage(latestEvent.message)}` : "event 대기",
+  ].filter(Boolean);
+  const skillItems = inferSkillAndContextItems(events, run);
+  const changedItems = worktreeFiles.slice(0, 6).map((file) => `${file.status} ${file.path}`);
+
+  return (
+    <div className="run-observation-board" aria-label="실행 관찰 요약">
+      <ObservationTile title="현재 단계" items={flowItems} empty="run 신호 대기" />
+      <ObservationTile title="환경" items={environmentItems} empty="환경 정보 없음" />
+      <ObservationTile title="참조/작성 MD" items={writtenArtifacts} empty="아직 기록된 산출물 없음" />
+      <ObservationTile title="스킬/컨텍스트" items={[...readItems, ...skillItems]} empty="컨텍스트 사용 기록 없음" />
+      <ObservationTile title="수정 파일" items={changedItems} empty="관찰된 변경 파일 없음" />
+      <ObservationTile
+        title="검증 근거"
+        items={[
+          run.exitCode !== null ? `exit ${run.exitCode}` : "",
+          run.failureKind ? `failure ${run.failureKind}` : "",
+          run.failureReason ? compactEventMessage(run.failureReason) : "",
+        ].filter(Boolean)}
+        empty="아직 종료 근거 없음"
+      />
+    </div>
+  );
+}
+
+function ObservationTile({ empty, items, title }: { empty: string; items: string[]; title: string }) {
+  const visible = uniqueStrings(items).filter(Boolean).slice(0, 5);
+  return (
+    <div className="observation-tile">
+      <span>{title}</span>
+      {visible.length > 0 ? (
+        <ul>
+          {visible.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      ) : (
+        <p>{empty}</p>
+      )}
+    </div>
+  );
+}
+
 function RunEventPreview({ events }: { events: RunEventSummary[] }) {
   if (events.length === 0) {
     return <p className="run-event-empty">아직 기록된 이벤트가 없습니다. 실행이 시작되면 stdout/stderr/status가 여기에 쌓입니다.</p>;
@@ -2138,6 +2245,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
+}
+
+function inferSkillAndContextItems(events: RunEventSummary[], run: AgentRunSummary): string[] {
+  const text = events.map((event) => `${event.message} ${JSON.stringify(event.payload)}`).join(" ").toLowerCase();
+  const items = [`role ${roleLabel(run.roleId)}`];
+  if (text.includes("skill")) items.push("skill marker 감지");
+  if (text.includes("context-pack")) items.push("context-pack.md 기반 실행");
+  if (text.includes("repair")) items.push("targeted repair context");
+  if (text.includes("approval")) items.push("approval gate 연동");
+  return items;
 }
 
 function appendRunEvent(
