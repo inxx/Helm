@@ -2240,6 +2240,17 @@ fn list_agent_runs(
 }
 
 #[tauri::command]
+fn list_project_runs(
+    project_id: String,
+    limit: Option<i64>,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<AgentRunSummary>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::list_project_runs(&conn, &project_id, limit.unwrap_or(120))
+}
+
+#[tauri::command]
 fn list_task_timeline(
     project_id: String,
     task_id: String,
@@ -5757,6 +5768,7 @@ fn main() {
             retry_host_role,
             cancel_host_role,
             list_agent_runs,
+            list_project_runs,
             list_task_timeline,
             list_run_events,
             get_agent_run,

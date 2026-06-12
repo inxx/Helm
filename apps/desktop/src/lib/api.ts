@@ -185,6 +185,9 @@ export const api = {
   listAgentRuns(projectId: string, taskId: string) {
     return invoke<AgentRunSummary[]>("list_agent_runs", { projectId, taskId });
   },
+  listProjectRuns(projectId: string, limit = 120) {
+    return invoke<AgentRunSummary[]>("list_project_runs", { projectId, limit });
+  },
   listTaskTimeline(projectId: string, taskId: string) {
     return invoke<TaskTimelineEntry[]>("list_task_timeline", { projectId, taskId });
   },
