@@ -137,6 +137,9 @@ export const api = {
       statusReason,
     });
   },
+  deleteTask(projectId: string, taskId: string) {
+    return invoke<void>("delete_task", { projectId, taskId });
+  },
   getTaskWorktree(projectId: string, taskId: string) {
     return invoke<TaskWorktreeSummary | null>("get_task_worktree", { projectId, taskId });
   },

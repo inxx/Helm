@@ -1,22 +1,20 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { Compass, GitBranch, ListChecks, Settings, SquareTerminal } from "lucide-react";
+import { GitBranch, ListChecks, Settings, SquareTerminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
-import { PlanningScreen } from "./screens/PlanningScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
 
-type Screen = "planning" | "tasks" | "git" | "terminal" | "settings";
+type Screen = "tasks" | "git" | "terminal" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItems = [
-  { id: "planning" as const, label: "계획", icon: Compass },
   { id: "tasks" as const, label: "태스크", icon: ListChecks },
   { id: "git" as const, label: "깃", icon: GitBranch },
   { id: "terminal" as const, label: "터미널", icon: SquareTerminal },
@@ -224,14 +222,6 @@ export function App() {
         </section>
       ) : (
         <>
-          {screen === "planning" ? (
-            <PlanningScreen
-              snapshot={snapshot}
-              onOpenProject={openProject}
-              onRefresh={refresh}
-              onOpenTask={openTask}
-            />
-          ) : null}
           {screen === "tasks" ? (
             <TasksScreen
               snapshot={snapshot}
@@ -240,7 +230,6 @@ export function App() {
               onSelectTask={setSelectedTaskId}
               onOpenProject={openProject}
               onRefresh={refresh}
-              onGoPlanning={() => setScreen("planning")}
               onGoGit={() => setScreen("git")}
               onGoSettings={() => setScreen("settings")}
             />

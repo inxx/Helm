@@ -1,22 +1,23 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
-import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import {
+  Bot,
+  ChevronDown,
   Cpu,
+  FileTerminal,
   Folder,
   FolderOpen,
   GitBranch,
+  Pencil,
   Play,
   Plus,
   RotateCcw,
-  Save,
-  Search,
   SplitSquareHorizontal,
   SquareTerminal,
   Trash2,
@@ -71,6 +72,15 @@ interface TerminalAutocompleteSuggestion {
   suffix: string;
 }
 
+type SavedScriptAction = "terminal" | "agent";
+
+interface SavedScriptEditorState {
+  id: string | null;
+  name: string;
+  command: string;
+  action: SavedScriptAction;
+}
+
 const MAX_TERMINAL_COMMAND_HISTORY = 200;
 const MAX_TERMINAL_COMMAND_LENGTH = 500;
 const MAX_SAVED_TERMINAL_SCRIPT_LENGTH = 4000;
@@ -117,7 +127,6 @@ export function TerminalScreen({
   const terminalRefs = useRef(new Map<string, HTMLDivElement>());
   const xtermRefs = useRef(new Map<string, XTerm>());
   const fitAddonRefs = useRef(new Map<string, FitAddon>());
-  const searchAddonRefs = useRef(new Map<string, SearchAddon>());
   const serializeAddonRefs = useRef(new Map<string, SerializeAddon>());
   const inputDisposers = useRef(new Map<string, { dispose: () => void }>());
   const resizeObservers = useRef(new Map<string, ResizeObserver>());
@@ -133,7 +142,8 @@ export function TerminalScreen({
   >({});
   const [savedScripts, setSavedScripts] = useState<TerminalSavedScriptSummary[]>([]);
   const [savedScriptsBusy, setSavedScriptsBusy] = useState(false);
-  const [terminalSearchQuery, setTerminalSearchQuery] = useState("");
+  const [savedScriptMenuOpen, setSavedScriptMenuOpen] = useState(false);
+  const [savedScriptEditor, setSavedScriptEditor] = useState<SavedScriptEditorState | null>(null);
 
   const selectedPaneId = activePaneId ?? panes[0]?.id ?? null;
   const activePane = panes.find((pane) => pane.id === selectedPaneId) ?? panes[0] ?? null;
@@ -449,12 +459,33 @@ export function TerminalScreen({
     }
   }
 
-  async function saveScriptFromCurrentInput() {
+  function openSavedScriptEditor(script: TerminalSavedScriptSummary | null = null) {
+    if (script) {
+      setSavedScriptEditor({
+        id: script.id,
+        name: script.name,
+        command: script.command,
+        action: savedScriptActionFromTags(script.tags),
+      });
+      return;
+    }
+    const command = savedScriptCandidateForPane(selectedPaneId);
+    setSavedScriptEditor({
+      id: null,
+      name: command ? savedScriptNameFromCommand(command) : "",
+      command,
+      action: "terminal",
+    });
+  }
+
+  function updateSavedScriptEditor(patch: Partial<SavedScriptEditorState>) {
+    setSavedScriptEditor((current) => (current ? { ...current, ...patch } : current));
+  }
+
+  async function saveScriptFromEditor() {
     if (!snapshot) return;
-    const candidate = savedScriptCandidateForPane(selectedPaneId);
-    const command = window.prompt("저장할 스크립트/명령어를 확인해주세요.", candidate);
-    if (command === null) return;
-    const normalizedCommand = normalizeSavedTerminalScript(command);
+    if (!savedScriptEditor) return;
+    const normalizedCommand = normalizeSavedTerminalScript(savedScriptEditor.command);
     if (!normalizedCommand) {
       setControlError("저장할 스크립트가 비어 있습니다.");
       return;
@@ -464,19 +495,21 @@ export function TerminalScreen({
       return;
     }
     const suggestedName = savedScriptNameFromCommand(normalizedCommand);
-    const name = window.prompt("스크립트 이름", suggestedName);
-    if (name === null) return;
-    const normalizedName = name.trim().slice(0, 80) || suggestedName;
+    const normalizedName = savedScriptEditor.name.trim().slice(0, 80) || suggestedName;
     setSavedScriptsBusy(true);
     try {
       const saved = await api.saveTerminalSavedScript(snapshot.project.id, {
+        id: savedScriptEditor.id,
         name: normalizedName,
         command: normalizedCommand,
         cwdMode: "active_pane",
         nodeBinPath: activePane?.nodeBinPath ?? selectedNodeBinPath,
+        tags: savedScriptEditor.action === "agent" ? ["action:agent_prompt"] : [],
       });
       setSavedScripts((current) => [saved, ...current.filter((script) => script.id !== saved.id)]);
       setControlError(null);
+      setSavedScriptEditor(null);
+      setSavedScriptMenuOpen(true);
     } catch (err) {
       setControlError(errorMessage(err));
     } finally {
@@ -499,6 +532,10 @@ export function TerminalScreen({
   }
 
   async function runSavedScript(script: TerminalSavedScriptSummary) {
+    if (savedScriptActionFromTags(script.tags) === "agent") {
+      setControlError("Agent 프롬프트는 편집만 지원합니다. 터미널 명령을 선택해 실행해주세요.");
+      return;
+    }
     if (!activePane) {
       setControlError("스크립트를 실행할 터미널 pane이 없습니다.");
       return;
@@ -569,10 +606,8 @@ export function TerminalScreen({
     });
 
     const fitAddon = new FitAddon();
-    const searchAddon = new SearchAddon();
     const serializeAddon = new SerializeAddon();
     terminal.loadAddon(fitAddon);
-    terminal.loadAddon(searchAddon);
     terminal.loadAddon(serializeAddon);
 
     try {
@@ -592,7 +627,6 @@ export function TerminalScreen({
     terminal.open(container);
     xtermRefs.current.set(pane.id, terminal);
     fitAddonRefs.current.set(pane.id, fitAddon);
-    searchAddonRefs.current.set(pane.id, searchAddon);
     serializeAddonRefs.current.set(pane.id, serializeAddon);
     inputDisposers.current.set(
       pane.id,
@@ -718,7 +752,6 @@ export function TerminalScreen({
     xtermRefs.current.get(id)?.dispose();
     xtermRefs.current.delete(id);
     fitAddonRefs.current.delete(id);
-    searchAddonRefs.current.delete(id);
     serializeAddonRefs.current.delete(id);
     lastOutputSeqRefs.current.delete(id);
     restoringPaneIds.current.delete(id);
@@ -913,21 +946,6 @@ export function TerminalScreen({
     });
   }
 
-  function searchActivePane(direction: "next" | "previous") {
-    if (!selectedPaneId || !terminalSearchQuery.trim()) return;
-    const searchAddon = searchAddonRefs.current.get(selectedPaneId);
-    if (!searchAddon) return;
-    const query = terminalSearchQuery.trim();
-    const found =
-      direction === "next" ? searchAddon.findNext(query) : searchAddon.findPrevious(query);
-    if (!found) {
-      setControlError(`터미널에서 '${query}' 검색 결과가 없습니다.`);
-    } else {
-      setControlError(null);
-    }
-    xtermRefs.current.get(selectedPaneId)?.focus();
-  }
-
   return (
     <section className="terminal-screen">
       <div className="terminal-workbench">
@@ -976,48 +994,6 @@ export function TerminalScreen({
             <Plus size={14} aria-hidden="true" />
             <span>새 pane</span>
           </button>
-          <section className="terminal-scripts" aria-label="저장된 터미널 스크립트">
-            <div className="terminal-scripts-title">
-              <span>Saved scripts</span>
-              <button onClick={() => void saveScriptFromCurrentInput()} type="button" title="현재 입력 또는 최근 명령 저장" disabled={savedScriptsBusy}>
-                <Save size={12} aria-hidden="true" />
-                저장
-              </button>
-            </div>
-            {savedScriptsBusy && savedScripts.length === 0 ? (
-              <p>저장된 스크립트를 불러오는 중입니다.</p>
-            ) : savedScripts.length === 0 ? (
-              <p>자주 쓰는 명령을 저장하면 여기서 바로 실행할 수 있습니다.</p>
-            ) : (
-              <ul>
-                {savedScripts.map((script) => (
-                  <li key={script.id}>
-                    <button
-                      className="terminal-script-run"
-                      onClick={() => void runSavedScript(script)}
-                      title={script.command}
-                      type="button"
-                    >
-                      <Play size={11} aria-hidden="true" />
-                      <span>
-                        <strong>{script.name}</strong>
-                        <small>{singleLineScriptPreview(script.command)}</small>
-                      </span>
-                    </button>
-                    <button
-                      className="terminal-script-delete"
-                      onClick={() => void removeSavedScript(script.id)}
-                      title="저장된 스크립트 삭제"
-                      type="button"
-                      aria-label={`${script.name} 삭제`}
-                    >
-                      <Trash2 size={11} aria-hidden="true" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
           <div className="terminal-workspace-state">
             <span>branch</span>
             <strong>{repository.currentBranch ?? "detached"}</strong>
@@ -1035,6 +1011,80 @@ export function TerminalScreen({
               </span>
             </div>
             <div className="terminal-toolbar-controls">
+              <section className="terminal-scripts" aria-label="빠른 명령">
+                <button
+                  className="terminal-quick-command-trigger"
+                  onClick={() => setSavedScriptMenuOpen((open) => !open)}
+                  type="button"
+                  aria-expanded={savedScriptMenuOpen}
+                >
+                  <Play size={13} aria-hidden="true" />
+                  <span>{savedScripts[0]?.name ?? "빠른 명령"}</span>
+                  <ChevronDown size={13} aria-hidden="true" />
+                </button>
+                {savedScriptMenuOpen ? (
+                  <div className="terminal-quick-command-popover">
+                    {savedScriptsBusy && savedScripts.length === 0 ? (
+                      <p>저장된 명령을 불러오는 중입니다.</p>
+                    ) : savedScripts.length === 0 ? (
+                      <p>자주 쓰는 명령을 추가하세요.</p>
+                    ) : (
+                      <ul>
+                        {savedScripts.map((script) => {
+                          const action = savedScriptActionFromTags(script.tags);
+                          return (
+                            <li key={script.id}>
+                              <button
+                                className="terminal-script-run"
+                                onClick={() => void runSavedScript(script)}
+                                title={script.command}
+                                type="button"
+                              >
+                                {action === "agent" ? (
+                                  <Bot size={13} aria-hidden="true" />
+                                ) : (
+                                  <Play size={13} aria-hidden="true" />
+                                )}
+                                <span>
+                                  <strong>{script.name}</strong>
+                                  <small>{singleLineScriptPreview(script.command)}</small>
+                                </span>
+                              </button>
+                              <div className="terminal-script-actions">
+                                <button
+                                  onClick={() => openSavedScriptEditor(script)}
+                                  title="빠른 명령 편집"
+                                  type="button"
+                                  aria-label={`${script.name} 편집`}
+                                >
+                                  <Pencil size={13} aria-hidden="true" />
+                                </button>
+                                <button
+                                  onClick={() => void removeSavedScript(script.id)}
+                                  title="빠른 명령 삭제"
+                                  type="button"
+                                  aria-label={`${script.name} 삭제`}
+                                >
+                                  <Trash2 size={13} aria-hidden="true" />
+                                </button>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    <button
+                      className="terminal-script-add"
+                      onClick={() => openSavedScriptEditor()}
+                      type="button"
+                    >
+                      <Plus size={15} aria-hidden="true" />
+                      <span>명령 추가</span>
+                    </button>
+                  </div>
+                ) : null}
+              </section>
+
               <label className="terminal-select-control">
                 <Cpu size={14} aria-hidden="true" />
                 <select
@@ -1097,23 +1147,6 @@ export function TerminalScreen({
                 </select>
               </label>
 
-              <label className="terminal-search-control">
-                <Search size={14} aria-hidden="true" />
-                <input
-                  value={terminalSearchQuery}
-                  onChange={(event) => setTerminalSearchQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      searchActivePane(event.shiftKey ? "previous" : "next");
-                    }
-                  }}
-                  placeholder="터미널 검색"
-                />
-                <button onClick={() => searchActivePane("previous")} type="button">이전</button>
-                <button onClick={() => searchActivePane("next")} type="button">다음</button>
-              </label>
-
               <div className="terminal-toolbar-stats" aria-label="working tree 상태">
                 <span>{repository.stagedCount} staged</span>
                 <span>{repository.untrackedCount} untracked</span>
@@ -1146,6 +1179,108 @@ export function TerminalScreen({
           </div>
         </div>
       </div>
+      {savedScriptEditor ? (
+        <div className="terminal-command-dialog-backdrop" role="presentation">
+          <form
+            className="terminal-command-dialog"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setSavedScriptEditor(null);
+              }
+              if (event.key === "Enter" && event.metaKey) {
+                event.preventDefault();
+                void saveScriptFromEditor();
+              }
+            }}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveScriptFromEditor();
+            }}
+          >
+            <header>
+              <h2>빠른 명령 편집</h2>
+              <p>빠른 액세스를 위해 terminal 명령이나 agent 프롬프트를 저장하세요.</p>
+            </header>
+
+            <label className="terminal-command-field">
+              <span>상표</span>
+              <input
+                autoFocus
+                value={savedScriptEditor.name}
+                onChange={(event) => updateSavedScriptEditor({ name: event.target.value })}
+                maxLength={80}
+              />
+            </label>
+
+            <div className="terminal-command-field">
+              <span>행동</span>
+              <div className="terminal-command-segmented" role="tablist" aria-label="빠른 명령 행동">
+                <button
+                  className={savedScriptEditor.action === "terminal" ? "active" : ""}
+                  onClick={() => updateSavedScriptEditor({ action: "terminal" })}
+                  type="button"
+                  role="tab"
+                  aria-selected={savedScriptEditor.action === "terminal"}
+                >
+                  <FileTerminal size={15} aria-hidden="true" />
+                  Terminal 명령
+                </button>
+                <button
+                  className={savedScriptEditor.action === "agent" ? "active" : ""}
+                  onClick={() => updateSavedScriptEditor({ action: "agent" })}
+                  type="button"
+                  role="tab"
+                  aria-selected={savedScriptEditor.action === "agent"}
+                >
+                  <Bot size={15} aria-hidden="true" />
+                  Agent 프롬프트
+                </button>
+              </div>
+            </div>
+
+            <label className="terminal-command-field">
+              <span>{savedScriptEditor.action === "terminal" ? "명령 텍스트" : "즉각적인"}</span>
+              <textarea
+                value={savedScriptEditor.command}
+                onChange={(event) => updateSavedScriptEditor({ command: event.target.value })}
+                placeholder={
+                  savedScriptEditor.action === "terminal"
+                    ? "pnpm run dev:admin-bo"
+                    : "agent에게 이 워크스페이스를 조사하도록 요청하세요."
+                }
+                maxLength={MAX_SAVED_TERMINAL_SCRIPT_LENGTH}
+              />
+            </label>
+
+            <details className="terminal-command-advanced">
+              <summary>고급</summary>
+            </details>
+
+            <footer>
+              <button
+                className="terminal-command-cancel"
+                onClick={() => setSavedScriptEditor(null)}
+                type="button"
+              >
+                취소
+              </button>
+              <button
+                className="terminal-command-save"
+                disabled={
+                  savedScriptsBusy ||
+                  !savedScriptEditor.name.trim() ||
+                  !savedScriptEditor.command.trim()
+                }
+                type="submit"
+              >
+                저장
+                <kbd>⌘ Enter</kbd>
+              </button>
+            </footer>
+          </form>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -1280,7 +1415,11 @@ function normalizeSavedTerminalScript(value: string): string {
 }
 
 function isSavedTerminalScriptCandidate(command: string): boolean {
-  return command.length > 0 && command.length <= MAX_SAVED_TERMINAL_SCRIPT_LENGTH && !containsSensitiveShellValue(command);
+  return (
+    command.length > 0 &&
+    command.length <= MAX_SAVED_TERMINAL_SCRIPT_LENGTH &&
+    !containsSensitiveShellValue(command)
+  );
 }
 
 function isTerminalCommandHistoryCandidate(command: string): boolean {
@@ -1304,6 +1443,10 @@ function savedScriptNameFromCommand(command: string): string {
 
 function singleLineScriptPreview(command: string): string {
   return command.replace(/\s+/g, " ").slice(0, 90);
+}
+
+function savedScriptActionFromTags(tags: string[]): SavedScriptAction {
+  return tags.includes("action:agent_prompt") ? "agent" : "terminal";
 }
 
 function isPrintableTerminalInput(char: string): boolean {

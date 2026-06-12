@@ -817,6 +817,17 @@ fn update_task_status(
 }
 
 #[tauri::command]
+fn delete_task(
+    project_id: String,
+    task_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::delete_task(&mut conn, &project_id, &task_id)
+}
+
+#[tauri::command]
 fn get_task_worktree(
     project_id: String,
     task_id: String,
@@ -5709,6 +5720,7 @@ fn main() {
             list_tasks,
             create_task,
             update_task_status,
+            delete_task,
             get_task_worktree,
             ensure_task_worktree,
             export_task_graph,

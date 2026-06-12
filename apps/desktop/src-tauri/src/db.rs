@@ -1337,6 +1337,65 @@ pub fn update_task_status(
     get_task(conn, task_id)
 }
 
+pub fn delete_task(conn: &mut Connection, project_id: &str, task_id: &str) -> CommandResult<()> {
+    let task = get_task(conn, task_id)?;
+    if task.project_id != project_id {
+        return Err(CommandError::validation("해당 프로젝트의 태스크가 아닙니다."));
+    }
+
+    let active_run_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_runs
+             WHERE project_id = ?1 AND task_id = ?2 AND status IN ('Queued', 'Running')",
+            params![project_id, task_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| CommandError::database("태스크 실행 상태를 확인하지 못했습니다.", err))?;
+
+    if active_run_count > 0 {
+        return Err(CommandError::validation(
+            "실행 중인 작업자가 있는 태스크는 삭제할 수 없습니다.",
+        ));
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|err| CommandError::database("태스크를 삭제하지 못했습니다.", err))?;
+    tx.execute(
+        "DELETE FROM approvals
+         WHERE project_id = ?1
+           AND ((entity_type = 'Task' AND entity_id = ?2)
+             OR (entity_type = 'AgentRun' AND entity_id IN (
+               SELECT id FROM agent_runs WHERE project_id = ?1 AND task_id = ?2
+             )))",
+        params![project_id, task_id],
+    )
+    .map_err(|err| CommandError::database("태스크 승인 기록을 삭제하지 못했습니다.", err))?;
+    tx.execute(
+        "DELETE FROM audit_logs
+         WHERE project_id = ?1
+           AND ((entity_type = 'Task' AND entity_id = ?2)
+             OR (entity_type = 'AgentRun' AND entity_id IN (
+               SELECT id FROM agent_runs WHERE project_id = ?1 AND task_id = ?2
+             )))",
+        params![project_id, task_id],
+    )
+    .map_err(|err| CommandError::database("태스크 감사 기록을 삭제하지 못했습니다.", err))?;
+    let affected = tx
+        .execute(
+            "DELETE FROM tasks WHERE project_id = ?1 AND id = ?2",
+            params![project_id, task_id],
+        )
+        .map_err(|err| CommandError::database("태스크를 삭제하지 못했습니다.", err))?;
+
+    if affected == 0 {
+        return Err(CommandError::validation("삭제할 태스크를 찾을 수 없습니다."));
+    }
+
+    tx.commit()
+        .map_err(|err| CommandError::database("태스크 삭제를 저장하지 못했습니다.", err))
+}
+
 pub fn get_task_worktree(
     conn: &Connection,
     project_id: &str,
@@ -4242,6 +4301,9 @@ pub fn read_run_artifact(
             | "stderr.log"
             | "context-pack.md"
             | "context-pack.json"
+            | "context-manifest.json"
+            | "git-before.txt"
+            | "git-after.txt"
             | "structured-result.schema.json"
             | "changed-files.json"
             | "diff.patch"
