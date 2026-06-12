@@ -534,6 +534,9 @@ export interface AgentRunSummary {
   stdoutLogPath: string;
   stderrLogPath: string;
   repairRequestId: string | null;
+  provider: string | null;
+  connectionId: string | null;
+  model: string | null;
   exitCode: number | null;
   resultStatus: "pass" | "fail" | "needs_changes" | null;
   startedAt: string | null;

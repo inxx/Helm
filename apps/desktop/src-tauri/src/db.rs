@@ -25,7 +25,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 10;
+const SUPPORTED_SCHEMA_VERSION: i64 = 11;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
@@ -36,6 +36,7 @@ const PHASE7_MIGRATION: &str = include_str!("../migrations/0007_repair_run_links
 const PHASE8_MIGRATION: &str = include_str!("../migrations/0008_planning_workspace.sql");
 const PHASE9_MIGRATION: &str = include_str!("../migrations/0009_planning_approvals_artifacts.sql");
 const PHASE10_MIGRATION: &str = include_str!("../migrations/0010_terminal_orca_parity.sql");
+const PHASE11_MIGRATION: &str = include_str!("../migrations/0011_agent_run_runner_metadata.sql");
 const TASK_STATUS_ORDER: &[&str] = &[
     "Planned",
     "Ready",
@@ -377,6 +378,19 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
     {
         apply_schema_patch(conn, PHASE10_MIGRATION)?;
     }
+    if current_version < 11 {
+        apply_migration(
+            conn,
+            11,
+            "phase11_agent_run_runner_metadata",
+            PHASE11_MIGRATION,
+        )?;
+    } else if !table_has_column(conn, "agent_runs", "provider")?
+        || !table_has_column(conn, "agent_runs", "connection_id")?
+        || !table_has_column(conn, "agent_runs", "model")?
+    {
+        apply_phase11_schema_patch(conn)?;
+    }
     Ok(())
 }
 
@@ -488,6 +502,77 @@ fn apply_phase9_schema_patch(conn: &mut Connection) -> CommandResult<()> {
     .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
     tx.commit()
         .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
+    Ok(())
+}
+
+fn apply_phase11_schema_patch(conn: &mut Connection) -> CommandResult<()> {
+    let tx = conn
+        .transaction()
+        .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
+    if !table_has_column(&tx, "agent_runs", "provider")? {
+        tx.execute_batch("ALTER TABLE agent_runs ADD COLUMN provider TEXT;")
+            .map_err(|err| {
+                CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err)
+            })?;
+    }
+    if !table_has_column(&tx, "agent_runs", "connection_id")? {
+        tx.execute_batch("ALTER TABLE agent_runs ADD COLUMN connection_id TEXT;")
+            .map_err(|err| {
+                CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err)
+            })?;
+    }
+    if !table_has_column(&tx, "agent_runs", "model")? {
+        tx.execute_batch("ALTER TABLE agent_runs ADD COLUMN model TEXT;")
+            .map_err(|err| {
+                CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err)
+            })?;
+    }
+    backfill_agent_run_runner_metadata(&tx)?;
+    tx.commit()
+        .map_err(|err| CommandError::database("Helm 데이터베이스 업데이트에 실패했습니다.", err))?;
+    Ok(())
+}
+
+fn backfill_agent_run_runner_metadata(conn: &Connection) -> CommandResult<()> {
+    conn.execute_batch(
+        "UPDATE agent_runs
+         SET
+           provider = COALESCE(provider, (
+             SELECT json_extract(run_events.payload_json, '$.provider')
+             FROM run_events
+             WHERE run_events.run_id = agent_runs.id
+               AND run_events.message = 'Runner request captured'
+               AND json_valid(run_events.payload_json)
+             ORDER BY run_events.seq DESC
+             LIMIT 1
+           )),
+           connection_id = COALESCE(connection_id, (
+             SELECT json_extract(run_events.payload_json, '$.connectionId')
+             FROM run_events
+             WHERE run_events.run_id = agent_runs.id
+               AND run_events.message = 'Runner request captured'
+               AND json_valid(run_events.payload_json)
+             ORDER BY run_events.seq DESC
+             LIMIT 1
+           )),
+           model = COALESCE(model, (
+             SELECT json_extract(run_events.payload_json, '$.model')
+             FROM run_events
+             WHERE run_events.run_id = agent_runs.id
+               AND run_events.message = 'Runner request captured'
+               AND json_valid(run_events.payload_json)
+             ORDER BY run_events.seq DESC
+             LIMIT 1
+           ))
+         WHERE EXISTS (
+           SELECT 1
+           FROM run_events
+           WHERE run_events.run_id = agent_runs.id
+             AND run_events.message = 'Runner request captured'
+             AND json_valid(run_events.payload_json)
+         );",
+    )
+    .map_err(|err| CommandError::database("agent run runner 메타를 백필하지 못했습니다.", err))?;
     Ok(())
 }
 
@@ -1972,17 +2057,28 @@ pub fn claim_host_run(
     }
 
     let started_at = now();
+    let (provider, connection_id, model) = runner_payload_metadata(&runner_payload);
     let changed = conn
         .execute(
             "UPDATE agent_runs
              SET status = 'Running',
                  lifecycle_phase = 'running',
+                 provider = ?2,
+                 connection_id = ?3,
+                 model = ?4,
                  started_at = COALESCE(started_at, ?1),
                  claimed_at = COALESCE(claimed_at, ?1),
                  heartbeat_at = ?1,
                  updated_at = ?1
-             WHERE id = ?2 AND project_id = ?3 AND status = 'Queued'",
-            params![started_at, run_id, project_id],
+             WHERE id = ?5 AND project_id = ?6 AND status = 'Queued'",
+            params![
+                started_at,
+                provider,
+                connection_id,
+                model,
+                run_id,
+                project_id
+            ],
         )
         .map_err(|err| CommandError::database("host run claim을 저장하지 못했습니다.", err))?;
     if changed == 0 {
@@ -2051,6 +2147,24 @@ pub fn claim_host_run(
     )?;
 
     get_agent_run(conn, run_id)
+}
+
+fn runner_payload_metadata(payload: &Value) -> (Option<String>, Option<String>, Option<String>) {
+    (
+        string_payload_field(payload, "provider"),
+        string_payload_field(payload, "connectionId")
+            .or_else(|| string_payload_field(payload, "connection_id")),
+        string_payload_field(payload, "model"),
+    )
+}
+
+fn string_payload_field(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 pub fn run_host_role(
@@ -2866,7 +2980,8 @@ pub fn list_agent_runs(
     let mut stmt = conn
         .prepare(
             "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
-                    stdout_log_path, stderr_log_path, repair_request_id, exit_code, result_status, started_at, finished_at,
+                    stdout_log_path, stderr_log_path, repair_request_id, provider, connection_id, model,
+                    exit_code, result_status, started_at, finished_at,
                     lifecycle_phase, claimed_at, heartbeat_at, failure_kind, failure_reason, attempt,
                     (SELECT approvals.id
                        FROM approvals
@@ -2903,6 +3018,59 @@ pub fn list_agent_runs(
         .query_map(params![project_id, task_id], map_agent_run)
         .map_err(|err| CommandError::database("실행 기록을 읽지 못했습니다.", err))?;
     collect_rows(rows, "실행 기록을 읽지 못했습니다.")
+}
+
+pub fn list_project_runs(
+    conn: &Connection,
+    project_id: &str,
+    limit: i64,
+) -> CommandResult<Vec<AgentRunSummary>> {
+    ensure_project_exists(conn, project_id)?;
+    let bounded_limit = limit.clamp(1, 500);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+                    stdout_log_path, stderr_log_path, repair_request_id, provider, connection_id, model,
+                    exit_code, result_status, started_at, finished_at,
+                    lifecycle_phase, claimed_at, heartbeat_at, failure_kind, failure_reason, attempt,
+                    (SELECT approvals.id
+                       FROM approvals
+                      WHERE approvals.project_id = agent_runs.project_id
+                        AND approvals.entity_type = 'AgentRun'
+                        AND approvals.entity_id = agent_runs.id
+                        AND approvals.approval_type = 'RunApproval'
+                        AND approvals.status = 'Pending'
+                      ORDER BY approvals.created_at DESC
+                      LIMIT 1),
+                    (SELECT run_events.kind
+                       FROM run_events
+                      WHERE run_events.run_id = agent_runs.id
+                        AND run_events.kind NOT IN ('stdout', 'stderr')
+                      ORDER BY run_events.seq DESC
+                      LIMIT 1),
+                    (SELECT run_events.message
+                       FROM run_events
+                      WHERE run_events.run_id = agent_runs.id
+                        AND run_events.kind NOT IN ('stdout', 'stderr')
+                      ORDER BY run_events.seq DESC
+                      LIMIT 1),
+                    (SELECT run_events.created_at
+                       FROM run_events
+                      WHERE run_events.run_id = agent_runs.id
+                        AND run_events.kind NOT IN ('stdout', 'stderr')
+                      ORDER BY run_events.seq DESC
+                      LIMIT 1),
+                    created_at, updated_at
+             FROM agent_runs
+             WHERE project_id = ?1
+             ORDER BY created_at DESC
+             LIMIT ?2",
+        )
+        .map_err(|err| CommandError::database("프로젝트 실행 기록을 읽지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id, bounded_limit], map_agent_run)
+        .map_err(|err| CommandError::database("프로젝트 실행 기록을 읽지 못했습니다.", err))?;
+    collect_rows(rows, "프로젝트 실행 기록을 읽지 못했습니다.")
 }
 
 pub fn task_graph_path(root: &Path) -> PathBuf {
@@ -3828,7 +3996,8 @@ pub fn next_queued_agent_run(
 ) -> CommandResult<Option<AgentRunSummary>> {
     conn.query_row(
         "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
-                stdout_log_path, stderr_log_path, repair_request_id, exit_code, result_status, started_at, finished_at,
+                stdout_log_path, stderr_log_path, repair_request_id, provider, connection_id, model,
+                exit_code, result_status, started_at, finished_at,
                 lifecycle_phase, claimed_at, heartbeat_at, failure_kind, failure_reason, attempt,
                 (SELECT approvals.id
                    FROM approvals
@@ -4107,7 +4276,8 @@ pub fn list_task_timeline(
 pub fn get_agent_run(conn: &Connection, run_id: &str) -> CommandResult<AgentRunSummary> {
     conn.query_row(
         "SELECT id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
-                stdout_log_path, stderr_log_path, repair_request_id, exit_code, result_status, started_at, finished_at,
+                stdout_log_path, stderr_log_path, repair_request_id, provider, connection_id, model,
+                exit_code, result_status, started_at, finished_at,
                 lifecycle_phase, claimed_at, heartbeat_at, failure_kind, failure_reason, attempt,
                 (SELECT approvals.id
                    FROM approvals
@@ -4519,22 +4689,25 @@ fn map_agent_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunSummary> {
         stdout_log_path: row.get(8)?,
         stderr_log_path: row.get(9)?,
         repair_request_id: row.get(10)?,
-        exit_code: row.get(11)?,
-        result_status: row.get(12)?,
-        started_at: row.get(13)?,
-        finished_at: row.get(14)?,
-        lifecycle_phase: row.get(15)?,
-        claimed_at: row.get(16)?,
-        heartbeat_at: row.get(17)?,
-        failure_kind: row.get(18)?,
-        failure_reason: row.get(19)?,
-        attempt: row.get(20)?,
-        pending_run_approval_id: row.get(21)?,
-        latest_event_kind: row.get(22)?,
-        latest_event_message: row.get(23)?,
-        latest_event_at: row.get(24)?,
-        created_at: row.get(25)?,
-        updated_at: row.get(26)?,
+        provider: row.get(11)?,
+        connection_id: row.get(12)?,
+        model: row.get(13)?,
+        exit_code: row.get(14)?,
+        result_status: row.get(15)?,
+        started_at: row.get(16)?,
+        finished_at: row.get(17)?,
+        lifecycle_phase: row.get(18)?,
+        claimed_at: row.get(19)?,
+        heartbeat_at: row.get(20)?,
+        failure_kind: row.get(21)?,
+        failure_reason: row.get(22)?,
+        attempt: row.get(23)?,
+        pending_run_approval_id: row.get(24)?,
+        latest_event_kind: row.get(25)?,
+        latest_event_message: row.get(26)?,
+        latest_event_at: row.get(27)?,
+        created_at: row.get(28)?,
+        updated_at: row.get(29)?,
     })
 }
 
@@ -9135,6 +9308,26 @@ mod tests {
         .expect("host run")
     }
 
+    fn migrate_through_phase10(conn: &mut Connection) {
+        apply_migration(conn, 1, "phase1", PHASE1_MIGRATION).expect("phase1");
+        apply_migration(conn, 2, "phase2_runs_approvals", PHASE2_MIGRATION).expect("phase2");
+        apply_migration(conn, 3, "phase3a_worktrees", PHASE3A_MIGRATION).expect("phase3");
+        apply_migration(conn, 4, "evidence_gate_timeline", PHASE4_MIGRATION).expect("phase4");
+        apply_migration(conn, 5, "phase5_run_events", PHASE5_MIGRATION).expect("phase5");
+        apply_migration(conn, 6, "phase6_run_lifecycle", PHASE6_MIGRATION).expect("phase6");
+        apply_migration(conn, 7, "phase7_repair_run_links", PHASE7_MIGRATION).expect("phase7");
+        apply_migration(conn, 8, "phase8_planning_workspace", PHASE8_MIGRATION).expect("phase8");
+        apply_migration(
+            conn,
+            9,
+            "phase9_planning_approvals_artifacts",
+            PHASE9_MIGRATION,
+        )
+        .expect("phase9");
+        apply_migration(conn, 10, "phase10_terminal_orca_parity", PHASE10_MIGRATION)
+            .expect("phase10");
+    }
+
     #[test]
     fn migrations_are_idempotent() {
         let mut conn = Connection::open_in_memory().expect("in-memory db");
@@ -9148,6 +9341,143 @@ mod tests {
             })
             .expect("version");
         assert_eq!(version, SUPPORTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_backfills_runner_metadata_from_request_event() {
+        let mut conn = Connection::open_in_memory().expect("in-memory db");
+        migrate_through_phase10(&mut conn);
+        let timestamp = "2026-06-12T00:00:00Z";
+        let project_id = new_id();
+        let task_id = new_id();
+        let run_id = new_id();
+        let missing_run_id = new_id();
+
+        conn.execute(
+            "INSERT INTO projects (id, root_path, name, base_branch, created_at, updated_at)
+             VALUES (?1, '/tmp/helm-control-tower', 'Helm', 'main', ?2, ?2)",
+            params![&project_id, timestamp],
+        )
+        .expect("insert project");
+        conn.execute(
+            "INSERT INTO tasks (
+               id, project_id, title, description, status, sort_order, created_at, updated_at, last_transition_at
+             )
+             VALUES (?1, ?2, 'Control Tower', '', 'Ready', 0, ?3, ?3, ?3)",
+            params![&task_id, &project_id, timestamp],
+        )
+        .expect("insert task");
+        for run_id in [&run_id, &missing_run_id] {
+            conn.execute(
+                "INSERT INTO agent_runs (
+                   id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+                   stdout_log_path, stderr_log_path, created_at, updated_at
+                 )
+                 VALUES (?1, ?2, ?3, 'coder', 'Running', '.helm/artifacts/runs/test',
+                         'summary.md', 'structured-result.json', 'stdout.log', 'stderr.log', ?4, ?4)",
+                params![run_id, &project_id, &task_id, timestamp],
+            )
+            .expect("insert run");
+        }
+        conn.execute(
+            "INSERT INTO run_events (
+               id, project_id, task_id, run_id, seq, kind, message, payload_json, created_at
+             )
+             VALUES (?1, ?2, ?3, ?4, 1, 'system', 'Runner request captured', ?5, ?6)",
+            params![
+                new_id(),
+                &project_id,
+                &task_id,
+                &run_id,
+                json!({
+                    "provider": "codex",
+                    "connectionId": "codex-local",
+                    "model": "gpt-5.4"
+                })
+                .to_string(),
+                timestamp
+            ],
+        )
+        .expect("insert runner event");
+        conn.execute(
+            "INSERT INTO run_events (
+               id, project_id, task_id, run_id, seq, kind, message, payload_json, created_at
+             )
+             VALUES (?1, ?2, ?3, ?4, 1, 'system', 'Runner request captured', '{}', ?5)",
+            params![new_id(), &project_id, &task_id, &missing_run_id, timestamp],
+        )
+        .expect("insert missing runner event");
+
+        run_migrations(&mut conn).expect("phase11 migration");
+
+        let run = get_agent_run(&conn, &run_id).expect("run");
+        assert_eq!(run.provider.as_deref(), Some("codex"));
+        assert_eq!(run.connection_id.as_deref(), Some("codex-local"));
+        assert_eq!(run.model.as_deref(), Some("gpt-5.4"));
+
+        let missing_run = get_agent_run(&conn, &missing_run_id).expect("missing run");
+        assert_eq!(missing_run.provider, None);
+        assert_eq!(missing_run.connection_id, None);
+        assert_eq!(missing_run.model, None);
+    }
+
+    #[test]
+    fn list_project_runs_returns_recent_runs_across_tasks() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let first_task = create_test_task(&mut conn, &project.id);
+        let second_task = create_task(
+            &mut conn,
+            &project.id,
+            CreateTaskInput {
+                epic_id: None,
+                title: "Second task".to_string(),
+                description: None,
+                external_refs: None,
+            },
+        )
+        .expect("second task");
+        let older_run_id = new_id();
+        let latest_run_id = new_id();
+
+        conn.execute(
+            "INSERT INTO agent_runs (
+               id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+               stdout_log_path, stderr_log_path, provider, connection_id, model, created_at, updated_at
+             )
+             VALUES (?1, ?2, ?3, 'planner', 'Succeeded', '.helm/artifacts/runs/older',
+                     'summary.md', 'structured-result.json', 'stdout.log', 'stderr.log',
+                     'claude', 'claude-local', 'claude-sonnet', '2026-06-12T00:00:00Z', '2026-06-12T00:00:00Z')",
+                params![&older_run_id, &project.id, &first_task.id],
+        )
+        .expect("older run");
+        conn.execute(
+            "INSERT INTO agent_runs (
+               id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+               stdout_log_path, stderr_log_path, provider, connection_id, model, created_at, updated_at
+             )
+             VALUES (?1, ?2, ?3, 'coder', 'Running', '.helm/artifacts/runs/latest',
+                     'summary.md', 'structured-result.json', 'stdout.log', 'stderr.log',
+                     'gemini', 'gemini-local', 'gemini-2.5-pro', '2026-06-12T00:01:00Z', '2026-06-12T00:01:00Z')",
+            params![&latest_run_id, &project.id, &second_task.id],
+        )
+        .expect("latest run");
+
+        let limited = list_project_runs(&conn, &project.id, 1).expect("limited runs");
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].id, latest_run_id);
+        assert_eq!(limited[0].provider.as_deref(), Some("gemini"));
+        assert_eq!(limited[0].connection_id.as_deref(), Some("gemini-local"));
+        assert_eq!(limited[0].model.as_deref(), Some("gemini-2.5-pro"));
+
+        let all_runs = list_project_runs(&conn, &project.id, 10).expect("project runs");
+        assert_eq!(
+            all_runs
+                .iter()
+                .map(|run| run.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![latest_run_id.as_str(), older_run_id.as_str(),]
+        );
     }
 
     #[test]
@@ -9587,7 +9917,12 @@ mod tests {
             &conn,
             &project.id,
             &run.id,
-            json!({ "runner": "test" }),
+            json!({
+                "runner": "test",
+                "provider": "codex",
+                "connectionId": "codex-local",
+                "model": "gpt-5.4"
+            }),
             &mut event_sink,
         )
         .expect("claim");
@@ -9595,6 +9930,9 @@ mod tests {
         assert_eq!(claimed.lifecycle_phase.as_deref(), Some("running"));
         assert!(claimed.claimed_at.is_some());
         assert!(claimed.heartbeat_at.is_some());
+        assert_eq!(claimed.provider.as_deref(), Some("codex"));
+        assert_eq!(claimed.connection_id.as_deref(), Some("codex-local"));
+        assert_eq!(claimed.model.as_deref(), Some("gpt-5.4"));
 
         let duplicate = claim_host_run(
             &conn,
