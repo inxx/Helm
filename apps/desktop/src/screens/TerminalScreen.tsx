@@ -1146,11 +1146,6 @@ export function TerminalScreen({
                   ))}
                 </select>
               </label>
-
-              <div className="terminal-toolbar-stats" aria-label="working tree 상태">
-                <span>{repository.stagedCount} staged</span>
-                <span>{repository.untrackedCount} untracked</span>
-              </div>
             </div>
           </div>
           {controlError ? <div className="terminal-control-error">{controlError}</div> : null}

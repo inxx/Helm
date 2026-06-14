@@ -5811,25 +5811,6 @@ textarea {
   overflow: visible;
 }
 
-.terminal-toolbar-stats {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-  margin-left: 4px;
-  padding-left: 10px;
-  border-left: 1px solid var(--term-line);
-}
-
-.terminal-toolbar-stats span {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--term-line);
-  border-radius: 999px;
-  padding: 2px 8px;
-  color: var(--term-muted);
-}
-
 .terminal-select-control {
   display: inline-grid;
   grid-template-columns: auto minmax(108px, 150px);
