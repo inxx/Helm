@@ -9,6 +9,8 @@
   },
   "scripts": {
     "check": "node src/cli.ts --help >/dev/null && node --test",
+    "handoff": "node scripts/claude-desktop-handoff.mjs",
+    "handoff:once": "node scripts/claude-desktop-handoff.mjs --once",
     "start": "node src/cli.ts"
   },
   "engines": {

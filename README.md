@@ -47,6 +47,7 @@ Helm의 목표 UX는 한국어 우선 로컬 데스크톱 앱이다. 최상위 �
 - [Phase 2 Implementation Plan](docs/phase-2-implementation-plan.md): stub role run, approval, audit vertical slice
 - [Phase 3a Implementation Plan](docs/phase-3a-implementation-plan.md): task worktree, context pack, HelmHostRunner single run
 - [Hermes Local API Guide](docs/hermes-local-api-guide.md): 로컬 Docker Hermes를 Helm backend에서 호출하는 방식과 운영 원칙
+- [Claude Desktop to Helm Handoff](docs/claude-desktop-handoff.md): Claude Desktop 계획 파일을 Helm 실행/보고로 자동 이관하는 로컬 inbox/outbox 계약
 - [Planner Conversation Approval Feature](docs/ai-plan-conversation-approval-feature.md): planner와 계획 문서를 고정하고 승인 후 Task로 변환하는 기능 계약
 - [Executable Planning Contract](docs/executable-planning-contract.md): 큰 작업을 task graph, task card, ownership map, barrier, verification gate로 쪼개는 기본 계획 계약
 - [Reference Adoption Application Plan](docs/reference-adoption-application-plan.md): 외부 레퍼런스 차용 포인트별 Helm 적용 계획
