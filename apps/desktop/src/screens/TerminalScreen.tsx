@@ -137,6 +137,7 @@ export function TerminalScreen({
   const lastOutputSeqRefs = useRef(new Map<string, number>());
   const restoringPaneIds = useRef(new Set<string>());
   const pendingOutputRefs = useRef(new Map<string, TerminalPtyOutput[]>());
+  const savedScriptMenuRef = useRef<HTMLElement | null>(null);
   const [autocompleteByPane, setAutocompleteByPane] = useState<
     Record<string, TerminalAutocompleteSuggestion | null>
   >({});
@@ -152,6 +153,30 @@ export function TerminalScreen({
   useEffect(() => {
     isActiveRef.current = isActive;
   }, [isActive]);
+
+  useEffect(() => {
+    if (!savedScriptMenuOpen) return;
+
+    function closeOnOutsidePointerDown(event: PointerEvent) {
+      const menu = savedScriptMenuRef.current;
+      if (!menu || menu.contains(event.target as Node)) return;
+      setSavedScriptMenuOpen(false);
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setSavedScriptMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("pointerdown", closeOnOutsidePointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [savedScriptMenuOpen]);
 
   useEffect(() => {
     if (!snapshot) {
@@ -460,6 +485,7 @@ export function TerminalScreen({
   }
 
   function openSavedScriptEditor(script: TerminalSavedScriptSummary | null = null) {
+    setSavedScriptMenuOpen(false);
     if (script) {
       setSavedScriptEditor({
         id: script.id,
@@ -519,6 +545,7 @@ export function TerminalScreen({
 
   async function removeSavedScript(scriptId: string) {
     if (!snapshot) return;
+    setSavedScriptMenuOpen(false);
     setSavedScriptsBusy(true);
     try {
       await api.deleteTerminalSavedScript(snapshot.project.id, scriptId);
@@ -532,6 +559,7 @@ export function TerminalScreen({
   }
 
   async function runSavedScript(script: TerminalSavedScriptSummary) {
+    setSavedScriptMenuOpen(false);
     if (savedScriptActionFromTags(script.tags) === "agent") {
       setControlError("Agent 프롬프트는 편집만 지원합니다. 터미널 명령을 선택해 실행해주세요.");
       return;
@@ -1011,7 +1039,7 @@ export function TerminalScreen({
               </span>
             </div>
             <div className="terminal-toolbar-controls">
-              <section className="terminal-scripts" aria-label="빠른 명령">
+              <section className="terminal-scripts" ref={savedScriptMenuRef} aria-label="빠른 명령">
                 <button
                   className="terminal-quick-command-trigger"
                   onClick={() => setSavedScriptMenuOpen((open) => !open)}
