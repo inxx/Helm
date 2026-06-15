@@ -552,6 +552,29 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     }
   }
 
+  async function approveTaskCompletion() {
+    if (!task) return;
+    setBusyAction({ key: "completion", label: "커밋 및 푸시 중" });
+    try {
+      const result = await api.approveTaskCompletionWithGit(snapshot.project.id, task.id);
+      await onRefresh();
+      setActiveTab("git");
+      showToast({
+        tone: "success",
+        title: "작업 완료 승인",
+        description: `${result.commitHash.slice(0, 7)} 커밋을 ${result.branchName} 브랜치로 푸시했습니다.`,
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "작업 완료 승인 실패",
+        description: messageFromError(error, "커밋 또는 푸시를 완료하지 못했습니다."),
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function requestPlanRevision(approval: ApprovalSummary) {
     if (!task) return;
     const reason = window.prompt("수정 요청 내용을 적어주세요.", "계획 범위와 승인 조건을 다시 다듬어주세요.");
@@ -687,6 +710,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
             retryableRun={activeRetryableRun}
             busyAction={busyAction}
             onApprovePlan={approvePendingPlan}
+            onApproveCompletion={approveTaskCompletion}
             onRequestPlanRevision={requestPlanRevision}
             onPrepareWorktree={prepareWorktree}
             onPrepareContext={prepareContext}
@@ -1158,6 +1182,7 @@ interface NextActionProps {
   retryableRun: AgentRunSummary | null;
   busyAction: { key: string; label: string } | null;
   onApprovePlan: (approval: ApprovalSummary) => Promise<void>;
+  onApproveCompletion: () => Promise<void>;
   onRequestPlanRevision: (approval: ApprovalSummary) => Promise<void>;
   onPrepareWorktree: () => Promise<void>;
   onPrepareContext: (roleId: string) => Promise<void>;
@@ -1255,6 +1280,7 @@ function NextAction({
   retryableRun,
   busyAction,
   onApprovePlan,
+  onApproveCompletion,
   onRequestPlanRevision,
   onPrepareWorktree,
   onPrepareContext,
@@ -1393,15 +1419,28 @@ function NextAction({
   }
 
   if (task.status === "MergeWaiting") {
+    const completionBusy = busyAction?.key === "completion";
     return (
       <div className="next-action-card">
         <div>
-          <strong>머지 준비 확인</strong>
-          <p>Git 화면에서 diff, branch 상태, merge readiness를 확인합니다.</p>
+          <strong>작업 완료 승인</strong>
+          <p>승인하면 task worktree 변경사항을 커밋하고 현재 브랜치를 origin으로 푸시한 뒤 완료 처리합니다.</p>
         </div>
-        <button className="primary-button" disabled={busy} onClick={onGoGit} type="button">
-          Git에서 보기
-        </button>
+        <div className="artifact-actions">
+          <button
+            aria-busy={completionBusy ? true : undefined}
+            className={completionBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+            disabled={busy}
+            onClick={() => void onApproveCompletion()}
+            type="button"
+          >
+            {completionBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+            {completionBusy ? "커밋/푸시 중..." : "완료 승인"}
+          </button>
+          <button disabled={busy} onClick={onGoGit} type="button">
+            Git에서 보기
+          </button>
+        </div>
       </div>
     );
   }

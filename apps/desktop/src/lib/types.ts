@@ -596,3 +596,10 @@ export interface ApprovalSummary {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface TaskCompletionGitSummary {
+  task: TaskSummary;
+  branchName: string;
+  commitHash: string;
+  pushed: boolean;
+}

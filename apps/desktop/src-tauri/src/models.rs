@@ -332,6 +332,15 @@ pub struct GitFileStatus {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskCompletionGitSummary {
+    pub task: TaskSummary,
+    pub branch_name: String,
+    pub commit_hash: String,
+    pub pushed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeRuntimeSummary {
     pub id: String,
     pub label: String,

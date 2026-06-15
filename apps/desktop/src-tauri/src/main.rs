@@ -11,8 +11,9 @@ use crate::models::{
     PlanningMaterializationSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectContext,
     ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult,
     RunnerTemplateSummary, SavePlanDraftRevisionInput, SaveTerminalScriptInput,
-    TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary, TaskTimelineEntry,
-    TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry, TerminalSavedScriptSummary,
+    TaskCompletionGitSummary, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
+    TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
+    TerminalSavedScriptSummary,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -872,6 +873,79 @@ fn update_task_status(
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
     db::update_task_status(&mut conn, &project_id, &task_id, &status, status_reason)
+}
+
+#[tauri::command]
+fn approve_task_completion_with_git(
+    project_id: String,
+    task_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<TaskCompletionGitSummary> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    let task = db::get_task(&conn, &task_id)?;
+    if task.project_id != project_id {
+        return Err(CommandError::validation("대상 태스크를 찾을 수 없습니다."));
+    }
+    if task.status != "MergeWaiting" {
+        return Err(CommandError::validation(
+            "테스트를 통과해 머지 대기 상태인 태스크만 완료 승인할 수 있습니다.",
+        ));
+    }
+    let worktree = db::get_task_worktree(&conn, &project_id, &task_id)?
+        .ok_or_else(|| CommandError::validation("완료 승인할 task worktree를 찾을 수 없습니다."))?;
+    let worktree_path = Path::new(&worktree.worktree_path);
+    let changed_files = git::changed_files(worktree_path)?;
+    if changed_files.is_empty() {
+        return Err(CommandError::validation(
+            "커밋할 변경사항이 없습니다. Git 화면에서 worktree 상태를 확인해주세요.",
+        ));
+    }
+    let branch_name = git::current_branch(worktree_path).ok_or_else(|| {
+        CommandError::validation("detached HEAD 상태에서는 완료 승인 push를 실행할 수 없습니다.")
+    })?;
+    let commit_message = format_task_completion_commit_message(&task.title);
+    git::stage_all(worktree_path)?;
+    let commit_hash = git::commit_staged(worktree_path, &commit_message)?;
+    git::push_branch(worktree_path, &branch_name)?;
+    let updated_task = db::update_task_status(
+        &mut conn,
+        &project_id,
+        &task_id,
+        "Done",
+        Some(format!(
+            "작업 완료 승인: commit {} push origin/{}",
+            short_commit_hash(&commit_hash),
+            branch_name
+        )),
+    )?;
+
+    Ok(TaskCompletionGitSummary {
+        task: updated_task,
+        branch_name,
+        commit_hash,
+        pushed: true,
+    })
+}
+
+fn format_task_completion_commit_message(title: &str) -> String {
+    let title = title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        "feat: 작업 완료".to_string()
+    } else if title.starts_with("feat:") {
+        title
+    } else {
+        format!("feat: {title}")
+    }
+}
+
+fn short_commit_hash(commit_hash: &str) -> String {
+    commit_hash.chars().take(7).collect()
 }
 
 #[tauri::command]
@@ -5893,6 +5967,7 @@ fn main() {
             list_tasks,
             create_task,
             update_task_status,
+            approve_task_completion_with_git,
             delete_task,
             get_task_worktree,
             ensure_task_worktree,

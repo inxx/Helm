@@ -30,6 +30,7 @@ import type {
   RunnerTemplateSummary,
   SavePlanDraftRevisionInput,
   TaskStatus,
+  TaskCompletionGitSummary,
   TaskGraphConflictSummary,
   TaskGraphExportSummary,
   TaskSummary,
@@ -140,6 +141,9 @@ export const api = {
       status,
       statusReason,
     });
+  },
+  approveTaskCompletionWithGit(projectId: string, taskId: string) {
+    return invoke<TaskCompletionGitSummary>("approve_task_completion_with_git", { projectId, taskId });
   },
   deleteTask(projectId: string, taskId: string) {
     return invoke<void>("delete_task", { projectId, taskId });

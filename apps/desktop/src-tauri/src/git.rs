@@ -107,6 +107,68 @@ pub fn head_hash(root: &Path) -> Option<String> {
     git_output_allow_fail(root, &["rev-parse", "--verify", "HEAD"])
 }
 
+pub fn stage_all(root: &Path) -> CommandResult<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["add", "-A"])
+        .output()
+        .map_err(|err| CommandError::io("Git stage에 실패했습니다.", err))?;
+
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GitCommandFailed",
+            "Git stage에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn commit_staged(root: &Path, message: &str) -> CommandResult<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["commit", "-m", message])
+        .output()
+        .map_err(|err| CommandError::io("Git commit에 실패했습니다.", err))?;
+
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GitCommandFailed",
+            "Git commit에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    head_hash(root).ok_or_else(|| {
+        CommandError::new(
+            "GitCommandFailed",
+            "커밋은 생성됐지만 HEAD commit hash를 확인하지 못했습니다.",
+        )
+    })
+}
+
+pub fn push_branch(root: &Path, branch_name: &str) -> CommandResult<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["push", "-u", "origin", branch_name])
+        .output()
+        .map_err(|err| CommandError::io("Git push에 실패했습니다.", err))?;
+
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GitCommandFailed",
+            "Git push에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn branch_exists(root: &Path, branch_name: &str) -> CommandResult<bool> {
     let output = Command::new("git")
         .arg("-C")
