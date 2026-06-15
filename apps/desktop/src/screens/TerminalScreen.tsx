@@ -18,7 +18,6 @@ import {
   Play,
   Plus,
   RotateCcw,
-  SplitSquareHorizontal,
   SquareTerminal,
   Trash2,
   X,
@@ -1032,12 +1031,6 @@ export function TerminalScreen({
 
         <div className="terminal-main">
           <div className="terminal-split-toolbar">
-            <div className="terminal-toolbar-summary">
-              <SplitSquareHorizontal size={15} aria-hidden="true" />
-              <span>
-                {panes.length} pane{panes.length === 1 ? "" : "s"}
-              </span>
-            </div>
             <div className="terminal-toolbar-controls">
               <section className="terminal-scripts" ref={savedScriptMenuRef} aria-label="빠른 명령">
                 <button

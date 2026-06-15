@@ -5784,23 +5784,6 @@ textarea {
   padding: 8px 12px;
 }
 
-.terminal-toolbar-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-  color: var(--term-muted);
-}
-
-.terminal-toolbar-summary > span {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--term-line);
-  border-radius: 999px;
-  padding: 2px 8px;
-  color: var(--term-text);
-}
-
 .terminal-toolbar-controls {
   display: flex;
   align-items: center;
