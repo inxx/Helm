@@ -40,6 +40,13 @@ export interface LaunchState {
   restoreError: CommandError | null;
 }
 
+export interface ControlTowerProjectSummary {
+  recent: RecentProjectSummary;
+  snapshot: ProjectSnapshot | null;
+  runs: AgentRunSummary[];
+  error: CommandError | null;
+}
+
 export interface AppSettings {
   version: number;
   orchestrator: OrchestratorSettings;

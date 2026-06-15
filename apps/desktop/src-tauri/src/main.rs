@@ -76,6 +76,15 @@ struct LaunchState {
     restore_error: Option<CommandError>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlTowerProjectSummary {
+    recent: StoredRecentProject,
+    snapshot: Option<ProjectSnapshot>,
+    runs: Vec<AgentRunSummary>,
+    error: Option<CommandError>,
+}
+
 #[derive(Default)]
 struct AppState {
     projects: Mutex<HashMap<String, ProjectContext>>,
@@ -342,6 +351,53 @@ fn get_project_snapshot(
     let conn = db::open_existing_db(&context.db_path)?;
     let project = db::get_project(&conn, &project_id)?;
     project_snapshot(&conn, &context.root_path, project)
+}
+
+#[tauri::command]
+fn list_control_tower_projects(
+    limit: Option<i64>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> CommandResult<Vec<ControlTowerProjectSummary>> {
+    let stored = load_stored_launch_state(&app)?;
+    let run_limit = limit.unwrap_or(80);
+    let mut summaries = Vec::new();
+
+    for recent in stored.recent_projects {
+        match open_project_from_path(Path::new(&recent.root_path), &state, false) {
+            Ok(snapshot) => {
+                let runs = match project_context(&state, &snapshot.project.id)
+                    .and_then(|context| db::open_existing_db(&context.db_path))
+                    .and_then(|conn| db::list_project_runs(&conn, &snapshot.project.id, run_limit))
+                {
+                    Ok(runs) => runs,
+                    Err(error) => {
+                        summaries.push(ControlTowerProjectSummary {
+                            recent,
+                            snapshot: Some(snapshot),
+                            runs: Vec::new(),
+                            error: Some(error),
+                        });
+                        continue;
+                    }
+                };
+                summaries.push(ControlTowerProjectSummary {
+                    recent,
+                    snapshot: Some(snapshot),
+                    runs,
+                    error: None,
+                });
+            }
+            Err(error) => summaries.push(ControlTowerProjectSummary {
+                recent,
+                snapshot: None,
+                runs: Vec::new(),
+                error: Some(error),
+            }),
+        }
+    }
+
+    Ok(summaries)
 }
 
 #[tauri::command]
@@ -5709,6 +5765,7 @@ fn main() {
             get_app_settings,
             update_app_settings,
             get_project_snapshot,
+            list_control_tower_projects,
             get_effective_settings,
             update_project_settings,
             run_planner_conversation,

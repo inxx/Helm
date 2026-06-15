@@ -1,21 +1,23 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { Activity, GitBranch, ListChecks, Settings, SquareTerminal } from "lucide-react";
+import { Activity, GitBranch, LayoutDashboard, ListChecks, Settings, SquareTerminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
 import { ControlTowerScreen } from "./screens/ControlTowerScreen";
+import { GlobalControlTowerScreen } from "./screens/GlobalControlTowerScreen";
 import { GitScreen } from "./screens/GitScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
 
-type Screen = "controlTower" | "tasks" | "git" | "terminal" | "settings";
+type Screen = "dashboard" | "controlTower" | "tasks" | "git" | "terminal" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItems = [
+  { id: "dashboard" as const, label: "전체", icon: LayoutDashboard },
   { id: "controlTower" as const, label: "관제탑", icon: Activity },
   { id: "tasks" as const, label: "태스크", icon: ListChecks },
   { id: "git" as const, label: "깃", icon: GitBranch },
@@ -24,7 +26,7 @@ const navItems = [
 ];
 
 export function App() {
-  const [screen, setScreen] = useState<Screen>("controlTower");
+  const [screen, setScreen] = useState<Screen>("dashboard");
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [recents, setRecents] = useState<RecentProject[]>(() => loadRecents());
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -51,7 +53,7 @@ export function App() {
         saveRecents(launch.recentProjects);
 
         if (launch.snapshot) {
-          hydrateSnapshot(launch.snapshot);
+          hydrateSnapshot(launch.snapshot, "dashboard");
         } else if (launch.restoreError) {
           setError(launch.restoreError.message);
         }
@@ -104,10 +106,10 @@ export function App() {
     }
   }, [screen]);
 
-  function hydrateSnapshot(next: ProjectSnapshot) {
+  function hydrateSnapshot(next: ProjectSnapshot, nextScreen: Screen = "controlTower") {
     setSnapshot(next);
     setSelectedTaskId(null);
-    setScreen("controlTower");
+    setScreen(nextScreen);
     setError(null);
   }
 
@@ -151,6 +153,11 @@ export function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function focusProject(projectId: string) {
+    await switchProject(projectId);
+    setScreen("controlTower");
   }
 
   async function forgetProject(projectId: string) {
@@ -224,6 +231,12 @@ export function App() {
         </section>
       ) : (
         <>
+          {screen === "dashboard" ? (
+            <GlobalControlTowerScreen
+              onFocusProject={focusProject}
+              onOpenProject={openProject}
+            />
+          ) : null}
           {screen === "controlTower" ? (
             <ControlTowerScreen
               snapshot={snapshot}

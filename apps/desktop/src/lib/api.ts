@@ -6,6 +6,7 @@ import type {
   AiConnectionCheckResult,
   AiModelRefreshResult,
   ApprovalSummary,
+  ControlTowerProjectSummary,
   CoordinationExportSummary,
   CreatePlanningSessionInput,
   CreateTaskInput,
@@ -69,6 +70,9 @@ export const api = {
   },
   getProjectSnapshot(projectId: string) {
     return invoke<ProjectSnapshot>("get_project_snapshot", { projectId });
+  },
+  listControlTowerProjects(limit = 80) {
+    return invoke<ControlTowerProjectSummary[]>("list_control_tower_projects", { limit });
   },
   createEpic(projectId: string, title: string) {
     return invoke<EpicSummary>("create_epic", { projectId, input: { title } });
