@@ -23,7 +23,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -92,6 +92,7 @@ struct AppState {
     queue_workers: Mutex<HashMap<String, Arc<AtomicBool>>>,
     terminal_sessions: Mutex<HashMap<String, PtySession>>,
     role_pty_sessions: Mutex<HashMap<String, RolePtySession>>,
+    handoff_watcher: Mutex<Option<Child>>,
 }
 
 struct PtySession {
@@ -4917,6 +4918,104 @@ fn shell_quote_path(path: &Path) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn start_handoff_watcher(state: &AppState) {
+    let helm_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .map(Path::to_path_buf);
+    let Some(helm_root) = helm_root else {
+        eprintln!("Helm handoff watcher를 시작하지 못했습니다: Helm root를 찾지 못했습니다.");
+        return;
+    };
+    let script_path = helm_root.join("scripts").join("claude-desktop-handoff.mjs");
+    if !script_path.is_file() {
+        eprintln!(
+            "Helm handoff watcher를 시작하지 못했습니다: {} 파일이 없습니다.",
+            script_path.display()
+        );
+        return;
+    }
+
+    let mut watcher = match state.handoff_watcher.lock() {
+        Ok(watcher) => watcher,
+        Err(_) => {
+            eprintln!("Helm handoff watcher 상태를 확인하지 못했습니다.");
+            return;
+        }
+    };
+    if watcher
+        .as_mut()
+        .and_then(|child| child.try_wait().ok())
+        .flatten()
+        .is_none()
+        && watcher.is_some()
+    {
+        return;
+    }
+
+    let node_path = discover_node_runtimes()
+        .into_iter()
+        .next()
+        .map(|runtime| PathBuf::from(runtime.node_path))
+        .unwrap_or_else(|| PathBuf::from("node"));
+    let log_dir = helm_root.join(".helm").join("outbox").join("logs");
+    if let Err(error) = fs::create_dir_all(&log_dir) {
+        eprintln!("Helm handoff watcher log 폴더를 만들지 못했습니다: {error}");
+        return;
+    }
+    let stdout = match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("handoff-watcher.stdout.log"))
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("Helm handoff watcher stdout log를 열지 못했습니다: {error}");
+            return;
+        }
+    };
+    let stderr = match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("handoff-watcher.stderr.log"))
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("Helm handoff watcher stderr log를 열지 못했습니다: {error}");
+            return;
+        }
+    };
+
+    match Command::new(node_path)
+        .arg(script_path)
+        .current_dir(&helm_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+    {
+        Ok(child) => {
+            *watcher = Some(child);
+        }
+        Err(error) => {
+            eprintln!("Helm handoff watcher를 시작하지 못했습니다: {error}");
+        }
+    }
+}
+
+fn stop_handoff_watcher(state: &AppState) {
+    let Ok(mut watcher) = state.handoff_watcher.lock() else {
+        return;
+    };
+    let Some(mut child) = watcher.take() else {
+        return;
+    };
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 fn spawn_pty_shell(
     project_id: &str,
     terminal_id: &str,
@@ -5758,6 +5857,11 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
+        .setup(|app| {
+            let state = app.state::<AppState>();
+            start_handoff_watcher(&state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_launch_state,
             open_project,
@@ -5835,6 +5939,15 @@ fn main() {
             approve_approval,
             reject_approval
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Helm desktop");
+        .build(tauri::generate_context!())
+        .expect("failed to build Helm desktop")
+        .run(|app, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                let state = app.state::<AppState>();
+                stop_handoff_watcher(&state);
+            }
+        });
 }
