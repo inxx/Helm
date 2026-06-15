@@ -706,6 +706,9 @@ pub fn effective_settings(conn: &Connection, project_id: &str) -> CommandResult<
         role_assignments: settings
             .remove("roleAssignments")
             .unwrap_or_else(default_role_assignments),
+        role_policies: settings
+            .remove("rolePolicies")
+            .unwrap_or_else(default_role_policies),
         conductor_config: settings.remove("conductorConfig"),
         worktree_root: settings
             .remove("worktreeRoot")
@@ -743,6 +746,9 @@ pub fn update_settings(
     }
     if let Some(value) = patch.role_assignments {
         values.push(("roleAssignments", value));
+    }
+    if let Some(value) = patch.role_policies {
+        values.push(("rolePolicies", normalize_role_policies(value)));
     }
     if let Some(value) = patch.conductor_config {
         values.push(("conductorConfig", value.unwrap_or(Value::Null)));
@@ -1425,7 +1431,9 @@ pub fn update_task_status(
 pub fn delete_task(conn: &mut Connection, project_id: &str, task_id: &str) -> CommandResult<()> {
     let task = get_task(conn, task_id)?;
     if task.project_id != project_id {
-        return Err(CommandError::validation("해당 프로젝트의 태스크가 아닙니다."));
+        return Err(CommandError::validation(
+            "해당 프로젝트의 태스크가 아닙니다.",
+        ));
     }
 
     let active_run_count: i64 = conn
@@ -1474,7 +1482,9 @@ pub fn delete_task(conn: &mut Connection, project_id: &str, task_id: &str) -> Co
         .map_err(|err| CommandError::database("태스크를 삭제하지 못했습니다.", err))?;
 
     if affected == 0 {
-        return Err(CommandError::validation("삭제할 태스크를 찾을 수 없습니다."));
+        return Err(CommandError::validation(
+            "삭제할 태스크를 찾을 수 없습니다.",
+        ));
     }
 
     tx.commit()
@@ -1841,6 +1851,7 @@ pub fn prepare_role_context(
     }
     let settings = effective_settings(conn, project_id)?;
     let worktree_setup = resolve_worktree_setup_config(root, settings.worktree_setup.as_ref())?;
+    let role_policy = resolve_role_policy(root, &settings.role_policies, role_id);
 
     let run_id = new_id();
     let timestamp = now();
@@ -1850,10 +1861,22 @@ pub fn prepare_role_context(
     fs::create_dir_all(&artifact_path)
         .map_err(|err| CommandError::io("실행 산출물 폴더를 만들지 못했습니다.", err))?;
 
-    let context_pack =
-        build_context_pack_markdown(root, &task, &worktree, role_id, worktree_setup.as_ref())?;
-    let context_manifest =
-        build_context_manifest(root, &task, &worktree, role_id, worktree_setup.as_ref())?;
+    let context_pack = build_context_pack_markdown(
+        root,
+        &task,
+        &worktree,
+        role_id,
+        worktree_setup.as_ref(),
+        Some(&role_policy),
+    )?;
+    let context_manifest = build_context_manifest(
+        root,
+        &task,
+        &worktree,
+        role_id,
+        worktree_setup.as_ref(),
+        Some(&role_policy),
+    )?;
     let placeholder_result = json!({
         "schemaVersion": 1,
         "status": "needs_changes",
@@ -1957,6 +1980,7 @@ pub fn prepare_role_context(
                 "Git changed files",
                 "Recent commits",
                 "Role contract",
+                "Role policy",
                 "Worktree setup config"
             ]
         }),
@@ -2781,6 +2805,7 @@ pub fn prepare_repair_context(
     let role_id = repair_role_for_gate(gate.as_ref().map(|item| item.gate.as_str()), &task);
     let settings = effective_settings(conn, project_id)?;
     let worktree_setup = resolve_worktree_setup_config(root, settings.worktree_setup.as_ref())?;
+    let role_policy = resolve_role_policy(root, &settings.role_policies, role_id);
     let previous_run = repair
         .run_id
         .as_ref()
@@ -2798,16 +2823,28 @@ pub fn prepare_repair_context(
     fs::create_dir_all(&artifact_path)
         .map_err(|err| CommandError::io("repair 산출물 폴더를 만들지 못했습니다.", err))?;
 
-    let mut context_pack =
-        build_context_pack_markdown(root, &task, &worktree, role_id, worktree_setup.as_ref())?;
+    let mut context_pack = build_context_pack_markdown(
+        root,
+        &task,
+        &worktree,
+        role_id,
+        worktree_setup.as_ref(),
+        Some(&role_policy),
+    )?;
     context_pack.push_str(&repair_context_markdown(
         &repair,
         gate.as_ref(),
         previous_run.as_ref(),
         &previous_summary,
     ));
-    let mut context_manifest =
-        build_context_manifest(root, &task, &worktree, role_id, worktree_setup.as_ref())?;
+    let mut context_manifest = build_context_manifest(
+        root,
+        &task,
+        &worktree,
+        role_id,
+        worktree_setup.as_ref(),
+        Some(&role_policy),
+    )?;
     if let Some(object) = context_manifest.as_object_mut() {
         object.insert(
             "repair".to_string(),
@@ -3204,6 +3241,7 @@ pub fn export_coordination_snapshot(
         "projectId": project_id,
         "aiConnections": settings.ai_connections,
         "roleAssignments": settings.role_assignments,
+        "rolePolicies": settings.role_policies,
         "conductorConfig": settings.conductor_config
     });
     files.push(write_coordination_json(
@@ -6357,6 +6395,16 @@ fn validate_role_id(role_id: &str) -> CommandResult<()> {
     Err(CommandError::validation("지원하지 않는 역할입니다."))
 }
 
+fn role_policy_role_ids() -> [&'static str; 5] {
+    [
+        "planner",
+        "coder",
+        "plan_verifier",
+        "code_reviewer",
+        "tester",
+    ]
+}
+
 fn validate_approval_status(status: &str) -> CommandResult<()> {
     if matches!(status, "Pending" | "Approved" | "Rejected" | "Expired") {
         return Ok(());
@@ -7164,7 +7212,7 @@ fn codex_turn_start_params(
 
 fn codex_app_server_role_prompt(artifact_path: &Path, run: &AgentRunSummary) -> String {
     format!(
-        "Read {context_pack}, perform the {role_id} role, then write {summary_path} and {result_path} following {schema_path}.\n\nRules:\n- Work only inside the task worktree and approved task scope.\n- If {setup_path} exists, inspect it before changing files and run only relevant setup steps under the active approval policy.\n- Do not skip the structured-result.json file; Helm gates depend on it.\n- Keep the final chat answer brief because Helm reads the artifact files as source of truth.",
+        "Read {context_pack}, follow the role contract and any Role Policy section for {role_id}, then write {summary_path} and {result_path} following {schema_path}.\n\nRules:\n- Work only inside the task worktree and approved task scope.\n- If {setup_path} exists, inspect it before changing files and run only relevant setup steps under the active approval policy.\n- Do not skip the structured-result.json file; Helm gates depend on it.\n- Keep the final chat answer brief because Helm reads the artifact files as source of truth.",
         context_pack = artifact_path.join("context-pack.md").to_string_lossy(),
         role_id = run.role_id,
         setup_path = artifact_path.join("worktree-setup.json").to_string_lossy(),
@@ -8365,12 +8413,127 @@ fn worktree_setup_markdown(setup: Option<&Value>) -> String {
     )
 }
 
+struct ResolvedRolePolicy {
+    role_id: String,
+    enabled: bool,
+    path: Option<String>,
+    content: Option<String>,
+    content_hash: Option<String>,
+    error: Option<String>,
+}
+
+impl ResolvedRolePolicy {
+    fn to_json(&self) -> Value {
+        json!({
+            "roleId": self.role_id,
+            "enabled": self.enabled,
+            "path": self.path,
+            "contentHash": self.content_hash,
+            "error": self.error
+        })
+    }
+}
+
+fn resolve_role_policy(root: &Path, role_policies: &Value, role_id: &str) -> ResolvedRolePolicy {
+    let mut result = ResolvedRolePolicy {
+        role_id: role_id.to_string(),
+        enabled: false,
+        path: None,
+        content: None,
+        content_hash: None,
+        error: None,
+    };
+    let Some(policy) = role_policies.as_array().and_then(|items| {
+        items
+            .iter()
+            .find(|item| item.get("roleId").and_then(Value::as_str) == Some(role_id))
+    }) else {
+        return result;
+    };
+    result.enabled = policy
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    result.path = policy
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string);
+    if !result.enabled {
+        return result;
+    }
+    let Some(path) = result.path.as_deref() else {
+        result.error = Some("정책 문서 경로가 비어 있습니다.".to_string());
+        return result;
+    };
+    if let Err(err) = validate_repo_relative_policy_path(path) {
+        result.error = Some(err.message);
+        return result;
+    }
+    match fs::read_to_string(root.join(path)) {
+        Ok(content) => {
+            result.content_hash = Some(stable_content_hash(&content));
+            result.content = Some(content);
+        }
+        Err(err) => {
+            result.error = Some(format!("정책 문서를 읽지 못했습니다: {err}"));
+        }
+    }
+    result
+}
+
+fn validate_repo_relative_policy_path(path: &str) -> CommandResult<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.split('/').any(|part| part == "..")
+    {
+        return Err(CommandError::validation(
+            "역할 정책 문서는 프로젝트 내부 상대 경로여야 합니다.",
+        ));
+    }
+    if !trimmed.ends_with(".md") {
+        return Err(CommandError::validation(
+            "역할 정책 문서는 .md 파일이어야 합니다.",
+        ));
+    }
+    Ok(())
+}
+
+fn role_policy_markdown(policy: Option<&ResolvedRolePolicy>) -> String {
+    let Some(policy) = policy else {
+        return "등록된 역할 정책 없음".to_string();
+    };
+    if !policy.enabled {
+        return "역할 정책 비활성화".to_string();
+    }
+    if let Some(error) = policy.error.as_deref() {
+        return format!(
+            "- path: {}\n- error: {}",
+            policy.path.as_deref().unwrap_or("-"),
+            error
+        );
+    }
+    let content = policy
+        .content
+        .as_deref()
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .unwrap_or("정책 문서가 비어 있습니다.");
+    format!(
+        "- path: {}\n- contentHash: {}\n\n{}",
+        policy.path.as_deref().unwrap_or("-"),
+        policy.content_hash.as_deref().unwrap_or("-"),
+        content
+    )
+}
+
 fn build_context_pack_markdown(
     root: &Path,
     task: &TaskSummary,
     worktree: &TaskWorktreeSummary,
     role_id: &str,
     worktree_setup: Option<&Value>,
+    role_policy: Option<&ResolvedRolePolicy>,
 ) -> CommandResult<String> {
     let contract = role_context_contract(role_id);
     let changed_files = git::changed_files(root)?;
@@ -8411,6 +8574,7 @@ fn build_context_pack_markdown(
          ### Pass Conditions\n\n{}\n\n\
          ### Blocking Conditions\n\n{}\n\n\
          ### Forbidden\n\n{}\n\n\
+         ## Role Policy\n\n{}\n\n\
          ## Worktree Setup\n\n{}\n\n\
          ## External Refs\n\n{}\n\n\
          ## Changed Files\n\n{}\n\n\
@@ -8437,6 +8601,7 @@ fn build_context_pack_markdown(
         markdown_list(contract.pass_conditions.as_ref()),
         markdown_list(contract.blocking_conditions.as_ref()),
         markdown_list(contract.forbidden.as_ref()),
+        role_policy_markdown(role_policy),
         worktree_setup_markdown(worktree_setup),
         if refs.is_empty() {
             "- 없음"
@@ -8462,6 +8627,7 @@ fn build_context_manifest(
     worktree: &TaskWorktreeSummary,
     role_id: &str,
     worktree_setup: Option<&Value>,
+    role_policy: Option<&ResolvedRolePolicy>,
 ) -> CommandResult<Value> {
     let contract = role_context_contract(role_id);
     Ok(json!({
@@ -8471,6 +8637,7 @@ fn build_context_manifest(
         "task": task,
         "roleId": role_id,
         "roleContract": contract.to_json(role_id),
+        "rolePolicy": role_policy.map(ResolvedRolePolicy::to_json),
         "worktree": worktree,
         "worktreeSetup": worktree_setup.cloned(),
         "git": {
@@ -8484,6 +8651,7 @@ fn build_context_manifest(
             "git.changedFiles",
             "git.recentCommits",
             "roleContract",
+            "rolePolicy",
             "worktreeSetup"
         ],
         "expectedArtifacts": [
@@ -8854,6 +9022,45 @@ fn default_role_assignments() -> Value {
             "aggregationPolicy": "all_pass"
         }
     ])
+}
+
+fn default_role_policies() -> Value {
+    json!(role_policy_role_ids()
+        .into_iter()
+        .map(|role_id| json!({
+            "roleId": role_id,
+            "path": format!(".helm/policies/{role_id}.md"),
+            "enabled": false
+        }))
+        .collect::<Vec<_>>())
+}
+
+fn normalize_role_policies(value: Value) -> Value {
+    let incoming = value.as_array().cloned().unwrap_or_default();
+    json!(role_policy_role_ids()
+        .into_iter()
+        .map(|role_id| {
+            let match_item = incoming
+                .iter()
+                .find(|item| item.get("roleId").and_then(Value::as_str) == Some(role_id));
+            let default_path = format!(".helm/policies/{role_id}.md");
+            let path = match_item
+                .and_then(|item| item.get("path"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .unwrap_or(default_path.as_str());
+            let enabled = match_item
+                .and_then(|item| item.get("enabled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            json!({
+                "roleId": role_id,
+                "path": path,
+                "enabled": enabled
+            })
+        })
+        .collect::<Vec<_>>())
 }
 
 #[cfg(test)]
@@ -9877,6 +10084,68 @@ mod tests {
     }
 
     #[test]
+    fn prepare_role_context_includes_enabled_role_policy() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "planner").expect("planner");
+        let approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("approvals")
+            .remove(0);
+        decide_approval(&mut conn, &project.id, &approval.id, "Approved", "승인").expect("approve");
+        fs::create_dir_all(repo.root.join(".helm").join("policies")).expect("policy dir");
+        fs::write(
+            repo.root.join(".helm").join("policies").join("coder.md"),
+            "# Coder Policy\n\n- 정책 문서를 우선한다.\n",
+        )
+        .expect("policy");
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: None,
+                ai_connections: None,
+                role_assignments: None,
+                role_policies: Some(json!([
+                    {
+                        "roleId": "coder",
+                        "path": ".helm/policies/coder.md",
+                        "enabled": true
+                    }
+                ])),
+                conductor_config: None,
+                worktree_root: None,
+                worktree_setup: None,
+                jira_config: None,
+                obsidian_vault_path: None,
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("settings");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "coder")
+            .expect("context");
+        let artifact_dir = repo.root.join(&run.artifact_dir);
+        let context_pack =
+            fs::read_to_string(artifact_dir.join("context-pack.md")).expect("context pack");
+        assert!(context_pack.contains("## Role Policy"));
+        assert!(context_pack.contains("# Coder Policy"));
+        assert!(context_pack.contains("정책 문서를 우선한다."));
+
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(artifact_dir.join("context-pack.json")).expect("manifest"),
+        )
+        .expect("manifest json");
+        assert_eq!(manifest["rolePolicy"]["enabled"], true);
+        assert_eq!(manifest["rolePolicy"]["path"], ".helm/policies/coder.md");
+        assert!(manifest["rolePolicy"]["contentHash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("fnv1a64:")));
+    }
+
+    #[test]
     fn create_run_approval_records_pending_agent_run_approval() {
         let repo = test_repo();
         let (mut conn, project) = open_test_project(&repo);
@@ -10004,6 +10273,7 @@ mod tests {
                 ])),
                 ai_connections: None,
                 role_assignments: None,
+                role_policies: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -10122,6 +10392,7 @@ mod tests {
                 ])),
                 ai_connections: None,
                 role_assignments: None,
+                role_policies: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -10214,6 +10485,7 @@ mod tests {
                 ])),
                 ai_connections: None,
                 role_assignments: None,
+                role_policies: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -10315,6 +10587,7 @@ mod tests {
                 ])),
                 ai_connections: None,
                 role_assignments: None,
+                role_policies: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -10423,6 +10696,7 @@ mod tests {
                 ])),
                 ai_connections: None,
                 role_assignments: None,
+                role_policies: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -10568,6 +10842,7 @@ mod tests {
                     "aggregationPolicy": null
                 }
             ]),
+            role_policies: default_role_policies(),
             conductor_config: None,
             worktree_root: None,
             worktree_setup: None,
@@ -10632,6 +10907,7 @@ mod tests {
                     "aggregationPolicy": null
                 }
             ]),
+            role_policies: default_role_policies(),
             conductor_config: None,
             worktree_root: None,
             worktree_setup: None,
@@ -10689,6 +10965,7 @@ mod tests {
                     "aggregationPolicy": null
                 }
             ]),
+            role_policies: default_role_policies(),
             conductor_config: None,
             worktree_root: None,
             worktree_setup: None,

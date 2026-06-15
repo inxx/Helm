@@ -600,6 +600,7 @@ fn apply_runner_template(
             role_presets: Some((template.presets)()),
             ai_connections: Some((template.connections)()),
             role_assignments: Some((template.assignments)()),
+            role_policies: None,
             conductor_config: None,
             worktree_root: None,
             worktree_setup: None,
@@ -2669,7 +2670,7 @@ fn codex_role_presets() -> Value {
                 "--cd",
                 "{worktreePath}",
                 "--",
-                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+                "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
             "timeoutSeconds": 1800
         }))
@@ -2689,7 +2690,7 @@ fn codex_ai_connections() -> Value {
                 "--cd",
                 "{worktreePath}",
                 "--",
-                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+                "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
             "planningCommandArgs": [
                 "codex",
@@ -2730,7 +2731,7 @@ fn claude_role_presets() -> Value {
             "commandArgs": [
                 "claude",
                 "-p",
-                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+                "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
             "timeoutSeconds": 1800
         }))
@@ -2746,7 +2747,7 @@ fn claude_ai_connections() -> Value {
             "commandArgs": [
                 "claude",
                 "-p",
-                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+                "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
             "planningCommandArgs": [
                 "claude",
@@ -2787,7 +2788,7 @@ fn gemini_role_presets() -> Value {
                 "--include-directories",
                 "{artifactDir}",
                 "--prompt",
-                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+                "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
             "timeoutSeconds": 1800
         }))
@@ -2808,7 +2809,7 @@ fn gemini_ai_connections() -> Value {
                 "--include-directories",
                 "{artifactDir}",
                 "--prompt",
-                "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}."
+                "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
             "planningCommandArgs": [
                 "gemini",

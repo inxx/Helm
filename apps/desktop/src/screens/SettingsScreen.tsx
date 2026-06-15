@@ -1,7 +1,9 @@
 import {
+  BarChart3,
   BrainCircuit,
   CheckCircle2,
   Download,
+  FileText,
   FolderTree,
   Info,
   Layers,
@@ -25,6 +27,8 @@ import type {
   OrchestratorSettings,
   ProjectSnapshot,
   RoleAssignment,
+  RolePolicy,
+  AgentRunSummary,
   RunnerCheckResult,
   RunnerTemplateSummary,
 } from "../lib/types";
@@ -40,6 +44,8 @@ type SettingsCategory =
   | "templates"
   | "connections"
   | "assignments"
+  | "policies"
+  | "usage"
   | "jira"
   | "worktree"
   | "app"
@@ -55,6 +61,8 @@ const CATEGORIES: Array<{
   { id: "templates", label: "Runner Templates", hint: "역할 프리셋과 AI CLI 연결을 한 번에 적용", icon: Layers },
   { id: "connections", label: "AI CLI 연결", hint: "Codex · Claude Code · Gemini · 기타 LLM 경로", icon: Plug },
   { id: "assignments", label: "작업별 CLI 선택", hint: "계획 · 구현 · 검수 · 테스트 매핑", icon: Workflow },
+  { id: "policies", label: "역할 정책", hint: "Role별 기본 정책 MD", icon: FileText },
+  { id: "usage", label: "통계 및 사용량", hint: "Agent 실행, 작업 시간, provider 분포", icon: BarChart3 },
   { id: "jira", label: "Jira", hint: "프로젝트 키와 기본 이슈 타입", icon: CheckCircle2 },
   { id: "worktree", label: "Worktree", hint: "병렬 작업 디렉터리 위치", icon: FolderTree },
   { id: "app", label: "앱", hint: "Helm 업데이트 확인", icon: Info },
@@ -96,12 +104,15 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const [modelRefreshes, setModelRefreshes] = useState<Record<string, ModelRefreshState>>({});
   const [aiConnections, setAiConnections] = useState<AiConnection[]>([]);
   const [roleAssignments, setRoleAssignments] = useState<RoleAssignment[]>([]);
+  const [rolePolicies, setRolePolicies] = useState<RolePolicy[]>([]);
   const [conductorConfig, setConductorConfig] = useState<ConductorConfig>(emptyConductorConfig());
   const [jiraConfig, setJiraConfig] = useState<JiraConfig>(emptyJiraConfig());
   const [busy, setBusy] = useState(false);
   const [updaterBusy, setUpdaterBusy] = useState(false);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [pendingUpdate, setPendingUpdate] = useState<ManualUpdateInfo | null>(null);
+  const [projectRuns, setProjectRuns] = useState<AgentRunSummary[]>([]);
+  const [usageBusy, setUsageBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -137,6 +148,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     setRolePresets(JSON.stringify(snapshot.settings.rolePresets, null, 2));
     setAiConnections(normalizeAiConnections(snapshot.settings.aiConnections));
     setRoleAssignments(normalizeRoleAssignments(snapshot.settings.roleAssignments));
+    setRolePolicies(normalizeRolePolicies(snapshot.settings.rolePolicies));
     setConductorConfig(normalizeConductorConfig(snapshot.settings.conductorConfig));
     setJiraConfig(normalizeJiraConfig(snapshot.settings.jiraConfig));
     setWorktreeRoot(snapshot.settings.worktreeRoot ?? "");
@@ -146,7 +158,34 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     setConnectionChecks({});
     setConnectionCheckBusyId(null);
     setModelRefreshes({});
+    setProjectRuns([]);
   }, [snapshot]);
+
+  useEffect(() => {
+    if (!snapshot || activeCategory !== "usage") return;
+    let cancelled = false;
+    setUsageBusy(true);
+    api
+      .listProjectRuns(snapshot.project.id, 500)
+      .then((runs) => {
+        if (!cancelled) setProjectRuns(runs);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          showToast({
+            tone: "error",
+            title: "통계 로드 실패",
+            description: errorMessage(error, "프로젝트 실행 통계를 읽지 못했습니다."),
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setUsageBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCategory, showToast, snapshot]);
 
   const visibleCategories = useMemo(
     () => (snapshot ? CATEGORIES : CATEGORIES.filter((category) => category.id === "orchestrator" || category.id === "app")),
@@ -189,6 +228,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         rolePresets: parsedRolePresets,
         aiConnections,
         roleAssignments: normalizeRoleAssignments(roleAssignments),
+        rolePolicies: normalizeRolePolicies(rolePolicies),
         worktreeRoot: worktreeRoot.trim() ? worktreeRoot.trim() : null,
         worktreeSetup: parsedWorktreeSetup,
         jiraConfig: normalizeJiraConfig(jiraConfig),
@@ -681,6 +721,14 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     );
   }
 
+  function updateRolePolicy(roleId: RoleAssignment["roleId"], patch: Partial<RolePolicy>) {
+    setRolePolicies((current) =>
+      normalizeRolePolicies(current).map((policy) =>
+        policy.roleId === roleId ? { ...policy, ...patch } : policy,
+      ),
+    );
+  }
+
   function updateJiraConfig(patch: Partial<JiraConfig>) {
     setJiraConfig((current) => normalizeJiraConfig({ ...current, ...patch }));
   }
@@ -700,6 +748,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     conductorConfig.enabled &&
     Boolean(conductorConnection) &&
     !orchestratorSettingsConfigured(orchestrator);
+  const usageStats = useMemo(() => buildUsageStats(snapshot, projectRuns), [projectRuns, snapshot]);
 
   return (
     <div className="settings-layout">
@@ -1350,6 +1399,54 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               </section>
             ) : null}
 
+            {activeCategory === "policies" ? (
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3>역할 정책 MD</h3>
+                  <p className="muted">
+                    Context Pack에 함께 포함할 프로젝트 내부 Markdown 정책입니다. 경로는 repo-relative .md 파일만 허용합니다.
+                  </p>
+                </div>
+                <div className="role-assignment-list">
+                  {normalizeRolePolicies(rolePolicies).map((policy) => {
+                    const role = ROLE_DEFINITIONS.find((item) => item.roleId === policy.roleId);
+                    return (
+                      <article className="role-assignment-row" key={policy.roleId}>
+                        <div>
+                          <strong>{role?.label ?? roleLabel(policy.roleId)}</strong>
+                          <span>
+                            {role?.group ?? "역할"}
+                            <span className="role-mode-pill">{policy.enabled ? "사용" : "비활성"}</span>
+                          </span>
+                        </div>
+                        <div className="connection-fields">
+                          <label className="toggle-switch">
+                            <input
+                              checked={policy.enabled}
+                              onChange={(event) =>
+                                updateRolePolicy(policy.roleId, { enabled: event.target.checked })
+                              }
+                              type="checkbox"
+                            />
+                            <span className="toggle-switch-track" aria-hidden />
+                            <span className="toggle-switch-label">Context Pack에 정책 포함</span>
+                          </label>
+                          <label>
+                            <span>정책 문서 경로</span>
+                            <input
+                              placeholder={`.helm/policies/${policy.roleId}.md`}
+                              value={policy.path}
+                              onChange={(event) => updateRolePolicy(policy.roleId, { path: event.target.value })}
+                            />
+                          </label>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
+
             {activeCategory === "jira" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
@@ -1403,6 +1500,28 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                   Host runner에는 <code>HELM_JIRA_PROJECT_KEY</code>, <code>HELM_JIRA_SITE_URL</code> 등으로 전달됩니다.
                 </p>
               </section>
+            ) : null}
+
+            {activeCategory === "usage" ? (
+              <UsageStatsPanel
+                stats={usageStats}
+                loading={usageBusy}
+                onRefresh={() => {
+                  if (!snapshot) return;
+                  setUsageBusy(true);
+                  api
+                    .listProjectRuns(snapshot.project.id, 500)
+                    .then(setProjectRuns)
+                    .catch((error) =>
+                      showToast({
+                        tone: "error",
+                        title: "통계 새로고침 실패",
+                        description: errorMessage(error, "프로젝트 실행 통계를 다시 읽지 못했습니다."),
+                      }),
+                    )
+                    .finally(() => setUsageBusy(false));
+                }}
+              />
             ) : null}
 
             {activeCategory === "worktree" ? (
@@ -1518,6 +1637,186 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
             ) : null}
           </div>
         </section>
+      </div>
+    </div>
+  );
+}
+
+interface UsageStats {
+  totalRuns: number;
+  totalDurationMs: number;
+  activeDays: number;
+  successRate: number | null;
+  completedTasks: number;
+  trackingSince: string | null;
+  updatedAt: string;
+  heatmap: Array<{ date: string; count: number; level: number }>;
+  peakDay: { date: string; count: number } | null;
+  providers: Array<{
+    id: string;
+    label: string;
+    runCount: number;
+    durationMs: number;
+    successRate: number | null;
+    latestAt: string | null;
+  }>;
+  lifecycle: Array<{ label: string; count: number; tone: "running" | "queued" | "attention" | "done" | "neutral" }>;
+}
+
+function UsageStatsPanel({
+  stats,
+  loading,
+  onRefresh,
+}: {
+  stats: UsageStats;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="settings-section usage-section" aria-busy={loading ? true : undefined}>
+      <div className="settings-section-head">
+        <h3>통계 및 사용량</h3>
+        <p className="muted">현재 프로젝트의 Agent 실행 기록을 기준으로 집계합니다.</p>
+      </div>
+
+      <div className="usage-summary-grid">
+        <UsageMetric icon={Workflow} value={formatNumber(stats.totalRuns)} label="시작된 Agents" />
+        <UsageMetric icon={Info} value={formatDuration(stats.totalDurationMs)} label="agent 작업 시간" />
+        <UsageMetric icon={CheckCircle2} value={formatNumber(stats.completedTasks)} label="완료된 태스크" />
+      </div>
+
+      <p className="usage-tracking">
+        Tracking since {stats.trackingSince ? formatDateTime(stats.trackingSince) : "기록 없음"}
+      </p>
+
+      <div className="usage-panel-header">
+        <div>
+          <strong>사용량 개요</strong>
+          <span>Updated {formatDateTime(stats.updatedAt)}</span>
+        </div>
+        <button className="icon-button" disabled={loading} onClick={onRefresh} title="통계 새로고침" type="button">
+          <RefreshCw className={loading ? "loading-icon" : undefined} size={15} aria-hidden />
+        </button>
+      </div>
+
+      <div className="usage-kpi-grid">
+        <UsageMetric icon={BarChart3} value={formatNumber(stats.totalRuns)} label="총 실행" />
+        <UsageMetric icon={FolderTree} value={formatNumber(stats.activeDays)} label="활성 일수" />
+        <UsageMetric icon={CheckCircle2} value={formatPercent(stats.successRate)} label="성공률" />
+        <UsageMetric icon={Plug} value={`${stats.providers.length}`} label="활성 provider" />
+      </div>
+
+      <div className="usage-analysis-grid">
+        <article className="usage-analysis-card">
+          <div className="usage-card-heading">
+            <div>
+              <strong>일일 강도</strong>
+              <span>최근 42일 Agent 실행 밀도</span>
+            </div>
+            {stats.peakDay ? <span className="usage-pill">최상위: {formatShortDate(stats.peakDay.date)}</span> : null}
+          </div>
+          <div className="usage-heatmap" aria-label="최근 42일 실행 강도">
+            {stats.heatmap.map((day) => (
+              <span
+                key={day.date}
+                className={`usage-heatmap-cell level-${day.level}`}
+                title={`${formatShortDate(day.date)} · ${day.count}회`}
+              />
+            ))}
+          </div>
+          <div className="usage-heatmap-legend">
+            <span>{stats.heatmap[0] ? formatShortDate(stats.heatmap[0].date) : ""}</span>
+            <span>더 적은</span>
+            <span className="usage-legend-squares" aria-hidden>
+              <i className="level-0" />
+              <i className="level-1" />
+              <i className="level-2" />
+              <i className="level-3" />
+              <i className="level-4" />
+            </span>
+            <span>더</span>
+            <span>{stats.heatmap.at(-1) ? formatShortDate(stats.heatmap.at(-1)?.date ?? "") : ""}</span>
+          </div>
+        </article>
+
+        <article className="usage-analysis-card">
+          <div className="usage-card-heading">
+            <div>
+              <strong>Provider 믹스</strong>
+              <span>실행 횟수와 누적 작업 시간 기준</span>
+            </div>
+            <span className="usage-pill">{formatNumber(stats.totalRuns)} 세션</span>
+          </div>
+          <div className="usage-provider-bars">
+            {stats.providers.length === 0 ? (
+              <p className="settings-empty">아직 실행 기록이 없습니다.</p>
+            ) : (
+              stats.providers.map((provider) => (
+                <div className="usage-provider-row" key={provider.id}>
+                  <div>
+                    <strong>{provider.label}</strong>
+                    <span>
+                      {formatNumber(provider.runCount)}회 · {formatDuration(provider.durationMs)}
+                    </span>
+                  </div>
+                  <div className="usage-provider-bar" aria-hidden>
+                    <span style={{ width: `${Math.max(4, (provider.runCount / Math.max(1, stats.totalRuns)) * 100)}%` }} />
+                  </div>
+                  <small>{formatPercent(provider.successRate)}</small>
+                </div>
+              ))
+            )}
+          </div>
+        </article>
+      </div>
+
+      <div className="usage-provider-grid">
+        {stats.providers.map((provider) => (
+          <article className="usage-provider-card" key={provider.id}>
+            <div>
+              <strong>{provider.label}</strong>
+              <span className="check-info">{formatPercent(provider.successRate)}</span>
+            </div>
+            <p>{provider.latestAt ? `${formatDateTime(provider.latestAt)} 마지막 실행` : "실행 기록 없음"}</p>
+            <dl>
+              <div>
+                <dt>세션</dt>
+                <dd>{formatNumber(provider.runCount)}</dd>
+              </div>
+              <div>
+                <dt>작업 시간</dt>
+                <dd>{formatDuration(provider.durationMs)}</dd>
+              </div>
+            </dl>
+          </article>
+        ))}
+      </div>
+
+      <div className="usage-note">
+        <strong>토큰/비용</strong>
+        <span>현재 Helm DB에는 provider별 token/cost 이벤트가 저장되지 않아 집계하지 않습니다.</span>
+      </div>
+    </section>
+  );
+}
+
+function UsageMetric({
+  icon: Icon,
+  value,
+  label,
+}: {
+  icon: typeof BarChart3;
+  value: string;
+  label: string;
+}) {
+  return (
+    <div className="usage-metric">
+      <span className="usage-metric-icon">
+        <Icon size={17} aria-hidden />
+      </span>
+      <div>
+        <strong>{value}</strong>
+        <span>{label}</span>
       </div>
     </div>
   );
@@ -1707,6 +2006,23 @@ function normalizeRoleAssignments(value: unknown): RoleAssignment[] {
       selections,
       connectionIds: selections.map((selection) => selection.connectionId),
       aggregationPolicy: role.selectionMode === "multiple" ? "all_pass" : null,
+    };
+  });
+}
+
+function normalizeRolePolicies(value: unknown): RolePolicy[] {
+  const incoming = Array.isArray(value) ? value : [];
+  return ROLE_DEFINITIONS.map((role) => {
+    const match = incoming.find(
+      (item) => typeof item === "object" && item !== null && (item as { roleId?: unknown }).roleId === role.roleId,
+    ) as Partial<RolePolicy> | undefined;
+    const path = typeof match?.path === "string" && match.path.trim()
+      ? match.path.trim()
+      : `.helm/policies/${role.roleId}.md`;
+    return {
+      roleId: role.roleId,
+      path,
+      enabled: Boolean(match?.enabled),
     };
   });
 }
@@ -1939,7 +2255,7 @@ function codexConnection(cliPath = "codex"): AiConnection {
       "--cd",
       "{worktreePath}",
       "--",
-      "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}.",
+      "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}.",
     ],
     planningCommandArgs: [
       cliPath,
@@ -1991,7 +2307,7 @@ function claudeConnection(cliPath = "claude"): AiConnection {
     commandArgs: [
       cliPath,
       "-p",
-      "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}.",
+      "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}.",
     ],
     planningCommandArgs: [cliPath, "--permission-mode", "plan", "-p", "{planPrompt}"],
     planningMode: "native_plan",
@@ -2019,7 +2335,7 @@ function geminiConnection(cliPath = "gemini"): AiConnection {
       "--include-directories",
       "{artifactDir}",
       "--prompt",
-      "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}.",
+      "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}.",
     ],
     planningCommandArgs: [
       cliPath,
@@ -2048,7 +2364,7 @@ function customConnection(id: string, cliPath = "llm"): AiConnection {
     provider: "custom",
     commandArgs: [
       cliPath,
-      "Read {contextPackPath}, perform the {roleId} role, then write {summaryPath} and {resultPath} following {schemaPath}.",
+      "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}.",
     ],
     planningCommandArgs: [cliPath, "{planPrompt}"],
     planningMode: "prompt_guarded",
@@ -2080,6 +2396,217 @@ function errorMessage(error: unknown, fallback: string): string {
     return String((error as { message: unknown }).message);
   }
   return fallback;
+}
+
+function buildUsageStats(snapshot: ProjectSnapshot | null, runs: AgentRunSummary[]): UsageStats {
+  const now = new Date();
+  const days = buildRecentDays(now, 42);
+  const countsByDay = new Map(days.map((day) => [day, 0]));
+  const providers = new Map<
+    string,
+    {
+      id: string;
+      label: string;
+      runCount: number;
+      durationMs: number;
+      passed: number;
+      finished: number;
+      latestAt: string | null;
+    }
+  >();
+  const lifecycle = new Map<string, number>();
+  let totalDurationMs = 0;
+  let passed = 0;
+  let finished = 0;
+  let trackingSince: string | null = null;
+
+  for (const run of runs) {
+    const startedAt = run.startedAt ?? run.createdAt;
+    const startedDate = parseDate(startedAt);
+    if (startedDate) {
+      const key = toDateKey(startedDate);
+      if (countsByDay.has(key)) {
+        countsByDay.set(key, (countsByDay.get(key) ?? 0) + 1);
+      }
+      if (!trackingSince || startedAt < trackingSince) {
+        trackingSince = startedAt;
+      }
+    }
+
+    const durationMs = runDurationMs(run);
+    totalDurationMs += durationMs;
+
+    if (run.finishedAt || run.resultStatus || isDoneRun(run)) {
+      finished += 1;
+      if (run.resultStatus === "pass" || isDoneRun(run)) {
+        passed += 1;
+      }
+    }
+
+    const providerId = run.provider ?? run.connectionId ?? "unknown";
+    const existing = providers.get(providerId) ?? {
+      id: providerId,
+      label: providerLabel(providerId),
+      runCount: 0,
+      durationMs: 0,
+      passed: 0,
+      finished: 0,
+      latestAt: null,
+    };
+    existing.runCount += 1;
+    existing.durationMs += durationMs;
+    if (run.finishedAt || run.resultStatus || isDoneRun(run)) {
+      existing.finished += 1;
+      if (run.resultStatus === "pass" || isDoneRun(run)) {
+        existing.passed += 1;
+      }
+    }
+    const latestAt = run.finishedAt ?? run.updatedAt ?? run.startedAt ?? run.createdAt;
+    if (!existing.latestAt || latestAt > existing.latestAt) {
+      existing.latestAt = latestAt;
+    }
+    providers.set(providerId, existing);
+
+    lifecycle.set(runLifecycleLabel(run), (lifecycle.get(runLifecycleLabel(run)) ?? 0) + 1);
+  }
+
+  const peakDay = [...countsByDay.entries()].reduce<{ date: string; count: number } | null>((best, [date, count]) => {
+    if (!best || count > best.count) return { date, count };
+    return best;
+  }, null);
+  const maxDayCount = Math.max(1, peakDay?.count ?? 0);
+  const heatmap = days.map((date) => {
+    const count = countsByDay.get(date) ?? 0;
+    return { date, count, level: heatmapLevel(count, maxDayCount) };
+  });
+  const activeDays = [...countsByDay.values()].filter((count) => count > 0).length;
+
+  return {
+    totalRuns: runs.length,
+    totalDurationMs,
+    activeDays,
+    successRate: finished > 0 ? passed / finished : null,
+    completedTasks: snapshot?.taskCounts.done ?? 0,
+    trackingSince,
+    updatedAt: now.toISOString(),
+    heatmap,
+    peakDay: peakDay && peakDay.count > 0 ? peakDay : null,
+    providers: [...providers.values()]
+      .sort((left, right) => right.runCount - left.runCount)
+      .map((provider) => ({
+        id: provider.id,
+        label: provider.label,
+        runCount: provider.runCount,
+        durationMs: provider.durationMs,
+        successRate: provider.finished > 0 ? provider.passed / provider.finished : null,
+        latestAt: provider.latestAt,
+      })),
+    lifecycle: [...lifecycle.entries()].map(([label, count]) => ({
+      label,
+      count,
+      tone: lifecycleTone(label),
+    })),
+  };
+}
+
+function runDurationMs(run: AgentRunSummary): number {
+  const started = parseDate(run.startedAt ?? run.createdAt);
+  const finished = parseDate(run.finishedAt ?? run.heartbeatAt ?? run.updatedAt);
+  if (!started || !finished || finished.getTime() < started.getTime()) return 0;
+  return finished.getTime() - started.getTime();
+}
+
+function isDoneRun(run: AgentRunSummary): boolean {
+  return run.status === "Succeeded" || run.lifecyclePhase === "Succeeded" || run.lifecyclePhase === "Done";
+}
+
+function runLifecycleLabel(run: AgentRunSummary): string {
+  if (run.pendingRunApprovalId) return "승인 대기";
+  if (run.failureKind || run.resultStatus === "fail" || run.resultStatus === "needs_changes") return "확인 필요";
+  if (run.lifecyclePhase === "Running" || run.status === "Running") return "실행 중";
+  if (run.lifecyclePhase === "Queued" || run.status === "Queued") return "대기";
+  if (isDoneRun(run) || run.resultStatus === "pass") return "완료";
+  return run.lifecyclePhase ?? run.status ?? "기타";
+}
+
+function lifecycleTone(label: string): UsageStats["lifecycle"][number]["tone"] {
+  if (label === "실행 중") return "running";
+  if (label === "대기" || label === "승인 대기") return "queued";
+  if (label === "확인 필요") return "attention";
+  if (label === "완료") return "done";
+  return "neutral";
+}
+
+function buildRecentDays(base: Date, count: number): string[] {
+  return Array.from({ length: count }, (_, index) => {
+    const date = new Date(base);
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() - (count - 1 - index));
+    return toDateKey(date);
+  });
+}
+
+function heatmapLevel(count: number, max: number): number {
+  if (count <= 0) return 0;
+  if (count >= max) return 4;
+  return Math.max(1, Math.ceil((count / max) * 4));
+}
+
+function parseDate(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function toDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat("ko-KR").format(value);
+}
+
+function formatPercent(value: number | null): string {
+  if (value === null) return "n/a";
+  return new Intl.NumberFormat("ko-KR", {
+    maximumFractionDigits: 0,
+    style: "percent",
+  }).format(value);
+}
+
+function formatDuration(ms: number): string {
+  if (ms <= 0) return "0m";
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const remainingMinutes = minutes % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${remainingMinutes}m`;
+  return `${remainingMinutes}m`;
+}
+
+function formatShortDate(value: string): string {
+  const date = parseDate(value);
+  if (!date) return value;
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "short",
+    day: "numeric",
+  }).format(date);
+}
+
+function formatDateTime(value: string): string {
+  const date = parseDate(value);
+  if (!date) return value;
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function formatDate(value: string) {

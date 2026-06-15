@@ -63,6 +63,7 @@ export interface EffectiveSettings {
   rolePresets: unknown;
   aiConnections: AiConnection[];
   roleAssignments: RoleAssignment[];
+  rolePolicies: RolePolicy[];
   conductorConfig: ConductorConfig | null;
   worktreeRoot: string | null;
   worktreeSetup: unknown | null;
@@ -106,6 +107,12 @@ export interface RoleAssignment {
   /** Legacy shape retained for older persisted project settings. */
   connectionIds: string[];
   aggregationPolicy?: "all_pass" | "any_pass" | "manual_decision" | null;
+}
+
+export interface RolePolicy {
+  roleId: RoleAssignment["roleId"];
+  path: string;
+  enabled: boolean;
 }
 
 export interface ConductorConfig {
@@ -511,6 +518,7 @@ export interface ProjectSettingsPatch {
   rolePresets?: unknown;
   aiConnections?: AiConnection[];
   roleAssignments?: RoleAssignment[];
+  rolePolicies?: RolePolicy[];
   conductorConfig?: ConductorConfig | null;
   worktreeRoot?: string | null;
   worktreeSetup?: unknown | null;
