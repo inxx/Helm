@@ -1,4 +1,3 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -12,8 +11,6 @@ import {
   Cpu,
   FileTerminal,
   Folder,
-  FolderOpen,
-  GitBranch,
   Pencil,
   Play,
   Plus,
@@ -25,10 +22,8 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type {
-  GitBranchSummary,
   NodeRuntimeSummary,
   ProjectSnapshot,
-  TerminalDirectoryEntry,
   TerminalPtySnapshot,
   TerminalPtySummary,
   TerminalSavedScriptSummary,
@@ -110,18 +105,13 @@ export function TerminalScreen({
   snapshot,
   isActive,
   onOpenProject,
-  onSnapshotUpdated,
 }: TerminalScreenProps) {
-  const [selectedNodeBinPath, setSelectedNodeBinPath] = useState<string | null>(null);
   const [panes, setPanes] = useState<TerminalPaneState[]>(() =>
     snapshot ? [createPane(snapshot.project.rootPath, null)] : [],
   );
   const [activePaneId, setActivePaneId] = useState<string | null>(panes[0]?.id ?? null);
   const [nodeRuntimes, setNodeRuntimes] = useState<NodeRuntimeSummary[]>([]);
-  const [branches, setBranches] = useState<GitBranchSummary[]>([]);
-  const [directoryEntries, setDirectoryEntries] = useState<TerminalDirectoryEntry[]>([]);
   const [controlError, setControlError] = useState<string | null>(null);
-  const [branchBusy, setBranchBusy] = useState(false);
   const paneRefs = useRef(new Map<string, HTMLElement>());
   const terminalRefs = useRef(new Map<string, HTMLDivElement>());
   const xtermRefs = useRef(new Map<string, XTerm>());
@@ -185,7 +175,6 @@ export function TerminalScreen({
       return;
     }
     let cancelled = false;
-    const restoredNodeBinPath = loadTerminalNodeSelection(snapshot.project.id);
     commandHistoryRef.current = loadTerminalCommandHistory(snapshot.project.id);
     setSavedScripts([]);
     setSavedScriptsBusy(true);
@@ -203,7 +192,6 @@ export function TerminalScreen({
     inputStateRefs.current.clear();
     autocompleteRefs.current.clear();
     setAutocompleteByPane({});
-    setSelectedNodeBinPath(restoredNodeBinPath);
     disposeAllPanes();
     void api
       .listTerminalPtys(snapshot.project.id)
@@ -212,14 +200,14 @@ export function TerminalScreen({
         const nextPanes =
           sessions.length > 0
             ? sessions.map(paneFromSession)
-            : [createPane(snapshot.project.rootPath, restoredNodeBinPath)];
+            : [createPane(snapshot.project.rootPath, null)];
         setPanes(nextPanes);
         setActivePaneId(nextPanes[0]?.id ?? null);
       })
       .catch((err) => {
         if (cancelled) return;
         setControlError(errorMessage(err));
-        const firstPane = createPane(snapshot.project.rootPath, restoredNodeBinPath);
+        const firstPane = createPane(snapshot.project.rootPath, null);
         setPanes([firstPane]);
         setActivePaneId(firstPane.id);
       });
@@ -244,50 +232,6 @@ export function TerminalScreen({
       cancelled = true;
     };
   }, [snapshot?.project.id]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    if (!snapshot) {
-      setBranches([]);
-      return;
-    }
-
-    void api
-      .getLocalBranches(snapshot.project.id)
-      .then((nextBranches) => {
-        if (!cancelled) setBranches(nextBranches);
-      })
-      .catch((err) => {
-        if (!cancelled) setControlError(errorMessage(err));
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [snapshot]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    if (!snapshot || !activePane) {
-      setDirectoryEntries([]);
-      return;
-    }
-
-    void api
-      .listTerminalDirectories(snapshot.project.id, activePane.cwd)
-      .then((entries) => {
-        if (!cancelled) setDirectoryEntries(entries);
-      })
-      .catch((err) => {
-        if (!cancelled) setControlError(errorMessage(err));
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activePane?.cwd, snapshot?.project.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -384,12 +328,6 @@ export function TerminalScreen({
   }
 
   const repository = snapshot.repository;
-  const activeCwd = activePane?.cwd ?? snapshot.project.rootPath;
-  const directoryOptions = withCurrentDirectoryOption(directoryEntries, activeCwd);
-  const selectedRuntimeMissing =
-    selectedNodeBinPath !== null &&
-    !nodeRuntimes.some((runtime) => runtime.binPath === selectedNodeBinPath);
-
   function updatePane(id: string, patch: Partial<TerminalPaneState>) {
     setPanes((current) => current.map((pane) => (pane.id === id ? { ...pane, ...patch } : pane)));
   }
@@ -397,7 +335,7 @@ export function TerminalScreen({
   function addPane() {
     const nextPane = createPane(
       activePane?.cwd ?? snapshot?.project.rootPath ?? "",
-      selectedNodeBinPath,
+      activePane?.nodeBinPath ?? null,
     );
     setPanes((current) => [...current, nextPane]);
     setActivePaneId(nextPane.id);
@@ -418,58 +356,11 @@ export function TerminalScreen({
 
   async function chooseNodeRuntime(nextNodeBinPath: string | null) {
     setControlError(null);
-    setSelectedNodeBinPath(nextNodeBinPath);
-    if (snapshot) saveTerminalNodeSelection(snapshot.project.id, nextNodeBinPath);
 
     if (!activePane) return;
     updatePane(activePane.id, { nodeBinPath: nextNodeBinPath });
 
     await restartPane(activePane, { nodeBinPath: nextNodeBinPath });
-  }
-
-  async function chooseDirectory(path: string) {
-    if (!snapshot) return;
-    const baseCwd = activePane?.cwd ?? snapshot.project.rootPath;
-    setControlError(null);
-    try {
-      const resolved = await api.resolveTerminalCwd(snapshot.project.id, baseCwd, path);
-      if (activePane) {
-        await restartPane(activePane, { cwd: resolved });
-      } else {
-        const nextPane = createPane(resolved, selectedNodeBinPath);
-        setPanes([nextPane]);
-        setActivePaneId(nextPane.id);
-      }
-    } catch (err) {
-      setControlError(errorMessage(err));
-    }
-  }
-
-  async function browseDirectory() {
-    setControlError(null);
-    try {
-      const path = await open({ directory: true, multiple: false });
-      if (typeof path !== "string") return;
-      await chooseDirectory(path);
-    } catch (err) {
-      setControlError(errorMessage(err));
-    }
-  }
-
-  async function switchBranch(branchName: string) {
-    if (!snapshot || !branchName || branchName === snapshot.repository.currentBranch) return;
-    setControlError(null);
-    setBranchBusy(true);
-    try {
-      const nextSnapshot = await api.switchGitBranch(snapshot.project.id, branchName);
-      onSnapshotUpdated(nextSnapshot);
-      const nextBranches = await api.getLocalBranches(snapshot.project.id);
-      setBranches(nextBranches);
-    } catch (err) {
-      setControlError(errorMessage(err));
-    } finally {
-      setBranchBusy(false);
-    }
   }
 
   function removePane(id: string) {
@@ -528,7 +419,7 @@ export function TerminalScreen({
         name: normalizedName,
         command: normalizedCommand,
         cwdMode: "active_pane",
-        nodeBinPath: activePane?.nodeBinPath ?? selectedNodeBinPath,
+        nodeBinPath: activePane?.nodeBinPath ?? null,
         tags: savedScriptEditor.action === "agent" ? ["action:agent_prompt"] : [],
       });
       setSavedScripts((current) => [saved, ...current.filter((script) => script.id !== saved.id)]);
@@ -798,9 +689,13 @@ export function TerminalScreen({
 
   function renderPane(pane: TerminalPaneState, index: number) {
     const autocomplete = autocompleteByPane[pane.id] ?? null;
+    const isSelected = selectedPaneId === pane.id;
+    const paneRuntimeMissing =
+      pane.nodeBinPath !== null &&
+      !nodeRuntimes.some((runtime) => runtime.binPath === pane.nodeBinPath);
     return (
       <article
-        className={selectedPaneId === pane.id ? "terminal-pane active" : "terminal-pane"}
+        className={isSelected ? "terminal-pane active" : "terminal-pane"}
         key={pane.id}
         ref={(node) => setPaneRef(pane.id, node)}
         onFocusCapture={() => setActivePaneId(pane.id)}
@@ -854,10 +749,108 @@ export function TerminalScreen({
         {pane.error ? <div className="error-banner terminal-pane-error">{pane.error}</div> : null}
 
         <footer className="terminal-pane-status">
-          <span className="terminal-status-runtime">
-            <Cpu size={11} aria-hidden="true" />
-            {nodeRuntimeLabel(pane.nodeBinPath, nodeRuntimes)}
-          </span>
+          {isSelected ? (
+            <div className="terminal-pane-controls">
+              <section className="terminal-scripts" ref={savedScriptMenuRef} aria-label="빠른 명령">
+                <button
+                  className="terminal-quick-command-trigger"
+                  onClick={() => setSavedScriptMenuOpen((open) => !open)}
+                  type="button"
+                  aria-expanded={savedScriptMenuOpen}
+                >
+                  <Play size={13} aria-hidden="true" />
+                  <span>{savedScripts[0]?.name ?? "빠른 명령"}</span>
+                  <ChevronDown size={13} aria-hidden="true" />
+                </button>
+                {savedScriptMenuOpen ? (
+                  <div className="terminal-quick-command-popover">
+                    {savedScriptsBusy && savedScripts.length === 0 ? (
+                      <p>저장된 명령을 불러오는 중입니다.</p>
+                    ) : savedScripts.length === 0 ? (
+                      <p>자주 쓰는 명령을 추가하세요.</p>
+                    ) : (
+                      <ul>
+                        {savedScripts.map((script) => {
+                          const action = savedScriptActionFromTags(script.tags);
+                          return (
+                            <li key={script.id}>
+                              <button
+                                className="terminal-script-run"
+                                onClick={() => void runSavedScript(script)}
+                                title={script.command}
+                                type="button"
+                              >
+                                {action === "agent" ? (
+                                  <Bot size={13} aria-hidden="true" />
+                                ) : (
+                                  <Play size={13} aria-hidden="true" />
+                                )}
+                                <span>
+                                  <strong>{script.name}</strong>
+                                  <small>{singleLineScriptPreview(script.command)}</small>
+                                </span>
+                              </button>
+                              <div className="terminal-script-actions">
+                                <button
+                                  onClick={() => openSavedScriptEditor(script)}
+                                  title="빠른 명령 편집"
+                                  type="button"
+                                  aria-label={`${script.name} 편집`}
+                                >
+                                  <Pencil size={13} aria-hidden="true" />
+                                </button>
+                                <button
+                                  onClick={() => void removeSavedScript(script.id)}
+                                  title="빠른 명령 삭제"
+                                  type="button"
+                                  aria-label={`${script.name} 삭제`}
+                                >
+                                  <Trash2 size={13} aria-hidden="true" />
+                                </button>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    <button
+                      className="terminal-script-add"
+                      onClick={() => openSavedScriptEditor()}
+                      type="button"
+                    >
+                      <Plus size={15} aria-hidden="true" />
+                      <span>명령 추가</span>
+                    </button>
+                  </div>
+                ) : null}
+              </section>
+
+              <label className="terminal-select-control">
+                <Cpu size={14} aria-hidden="true" />
+                <select
+                  value={pane.nodeBinPath ?? ""}
+                  onChange={(event) => void chooseNodeRuntime(event.target.value || null)}
+                  title="이 pane의 Node runtime"
+                >
+                  <option value="">shell default</option>
+                  {paneRuntimeMissing ? (
+                    <option value={pane.nodeBinPath ?? ""}>{shortPath(pane.nodeBinPath ?? "")}</option>
+                  ) : null}
+                  {nodeRuntimes.map((runtime) => (
+                    <option key={runtime.id} value={runtime.binPath}>
+                      {runtime.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+            </div>
+          ) : (
+            <span className="terminal-status-runtime">
+              <Cpu size={11} aria-hidden="true" />
+              {nodeRuntimeLabel(pane.nodeBinPath, nodeRuntimes)}
+            </span>
+          )}
           {autocomplete ? (
             <span className="terminal-autocomplete-chip" title="Tab으로 완성">
               <kbd>Tab</kbd>
@@ -1030,145 +1023,6 @@ export function TerminalScreen({
         </aside>
 
         <div className="terminal-main">
-          <div className="terminal-split-toolbar">
-            <div className="terminal-toolbar-controls">
-              <section className="terminal-scripts" ref={savedScriptMenuRef} aria-label="빠른 명령">
-                <button
-                  className="terminal-quick-command-trigger"
-                  onClick={() => setSavedScriptMenuOpen((open) => !open)}
-                  type="button"
-                  aria-expanded={savedScriptMenuOpen}
-                >
-                  <Play size={13} aria-hidden="true" />
-                  <span>{savedScripts[0]?.name ?? "빠른 명령"}</span>
-                  <ChevronDown size={13} aria-hidden="true" />
-                </button>
-                {savedScriptMenuOpen ? (
-                  <div className="terminal-quick-command-popover">
-                    {savedScriptsBusy && savedScripts.length === 0 ? (
-                      <p>저장된 명령을 불러오는 중입니다.</p>
-                    ) : savedScripts.length === 0 ? (
-                      <p>자주 쓰는 명령을 추가하세요.</p>
-                    ) : (
-                      <ul>
-                        {savedScripts.map((script) => {
-                          const action = savedScriptActionFromTags(script.tags);
-                          return (
-                            <li key={script.id}>
-                              <button
-                                className="terminal-script-run"
-                                onClick={() => void runSavedScript(script)}
-                                title={script.command}
-                                type="button"
-                              >
-                                {action === "agent" ? (
-                                  <Bot size={13} aria-hidden="true" />
-                                ) : (
-                                  <Play size={13} aria-hidden="true" />
-                                )}
-                                <span>
-                                  <strong>{script.name}</strong>
-                                  <small>{singleLineScriptPreview(script.command)}</small>
-                                </span>
-                              </button>
-                              <div className="terminal-script-actions">
-                                <button
-                                  onClick={() => openSavedScriptEditor(script)}
-                                  title="빠른 명령 편집"
-                                  type="button"
-                                  aria-label={`${script.name} 편집`}
-                                >
-                                  <Pencil size={13} aria-hidden="true" />
-                                </button>
-                                <button
-                                  onClick={() => void removeSavedScript(script.id)}
-                                  title="빠른 명령 삭제"
-                                  type="button"
-                                  aria-label={`${script.name} 삭제`}
-                                >
-                                  <Trash2 size={13} aria-hidden="true" />
-                                </button>
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    )}
-                    <button
-                      className="terminal-script-add"
-                      onClick={() => openSavedScriptEditor()}
-                      type="button"
-                    >
-                      <Plus size={15} aria-hidden="true" />
-                      <span>명령 추가</span>
-                    </button>
-                  </div>
-                ) : null}
-              </section>
-
-              <label className="terminal-select-control">
-                <Cpu size={14} aria-hidden="true" />
-                <select
-                  value={selectedNodeBinPath ?? ""}
-                  onChange={(event) => void chooseNodeRuntime(event.target.value || null)}
-                  title="Node runtime"
-                >
-                  <option value="">shell default</option>
-                  {selectedRuntimeMissing ? (
-                    <option value={selectedNodeBinPath ?? ""}>
-                      {shortPath(selectedNodeBinPath ?? "")}
-                    </option>
-                  ) : null}
-                  {nodeRuntimes.map((runtime) => (
-                    <option key={runtime.id} value={runtime.binPath}>
-                      {runtime.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="terminal-select-control cwd">
-                <Folder size={14} aria-hidden="true" />
-                <select
-                  value={activeCwd}
-                  onChange={(event) => void chooseDirectory(event.target.value)}
-                  title="working directory"
-                >
-                  {directoryOptions.map((entry) => (
-                    <option key={`${entry.kind}:${entry.path}`} value={entry.path}>
-                      {entry.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  className="terminal-icon-action"
-                  onClick={() => void browseDirectory()}
-                  title="디렉토리 선택"
-                  type="button"
-                  aria-label="디렉토리 선택"
-                >
-                  <FolderOpen size={14} aria-hidden="true" />
-                </button>
-              </label>
-
-              <label className="terminal-select-control branch">
-                <GitBranch size={14} aria-hidden="true" />
-                <select
-                  value={repository.currentBranch ?? ""}
-                  onChange={(event) => void switchBranch(event.target.value)}
-                  disabled={branchBusy || branches.length === 0}
-                  title="Git branch"
-                >
-                  {repository.currentBranch ? null : <option value="">detached</option>}
-                  {branches.map((branch) => (
-                    <option key={branch.branchName} value={branch.branchName}>
-                      {branch.branchName}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          </div>
           {controlError ? <div className="terminal-control-error">{controlError}</div> : null}
 
           <div
@@ -1315,49 +1169,12 @@ function shortPath(path: string): string {
   return `.../${parts.slice(-2).join("/")}`;
 }
 
-function withCurrentDirectoryOption(
-  entries: TerminalDirectoryEntry[],
-  activeCwd: string,
-): TerminalDirectoryEntry[] {
-  if (entries.some((entry) => entry.path === activeCwd)) return entries;
-  return [
-    {
-      path: activeCwd,
-      label: shortPath(activeCwd),
-      kind: "current",
-    },
-    ...entries,
-  ];
-}
-
 function nodeRuntimeLabel(nodeBinPath: string | null, runtimes: NodeRuntimeSummary[]): string {
   if (!nodeBinPath) return "node shell";
   return (
     runtimes.find((runtime) => runtime.binPath === nodeBinPath)?.label ??
     `node ${shortPath(nodeBinPath)}`
   );
-}
-
-function loadTerminalNodeSelection(projectId: string): string | null {
-  try {
-    return localStorage.getItem(terminalNodeSelectionKey(projectId));
-  } catch {
-    return null;
-  }
-}
-
-function saveTerminalNodeSelection(projectId: string, nodeBinPath: string | null): void {
-  try {
-    const key = terminalNodeSelectionKey(projectId);
-    if (nodeBinPath) localStorage.setItem(key, nodeBinPath);
-    else localStorage.removeItem(key);
-  } catch {
-    // localStorage 실패가 터미널 시작을 막으면 안 된다.
-  }
-}
-
-function terminalNodeSelectionKey(projectId: string): string {
-  return `helm.terminal.nodeBinPath.${projectId}`;
 }
 
 function loadTerminalCommandHistory(projectId: string): string[] {

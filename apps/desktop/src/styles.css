@@ -5988,7 +5988,7 @@ textarea {
 .terminal-quick-command-popover {
   position: absolute;
   z-index: 20;
-  top: 34px;
+  bottom: 34px;
   left: 0;
   display: grid;
   width: 306px;
@@ -6311,8 +6311,8 @@ textarea {
 }
 
 .terminal-main {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -6432,6 +6432,7 @@ textarea {
 }
 
 .terminal-pane-grid {
+  flex: 1 1 auto;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
@@ -6498,6 +6499,9 @@ textarea {
 }
 
 .terminal-pane.active {
+  position: relative;
+  z-index: 3;
+  overflow: visible;
   border-color: color-mix(in oklch, var(--term-accent) 60%, var(--term-line));
   box-shadow:
     0 0 0 1px color-mix(in oklch, var(--term-accent) 28%, transparent),
@@ -6763,18 +6767,29 @@ textarea {
 }
 
 .terminal-pane-status {
+  position: relative;
+  z-index: 4;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  overflow-x: auto;
+  overflow: visible;
   border-top: 1px solid var(--term-line);
   background: color-mix(in oklch, var(--term-surface) 82%, black);
   color: var(--term-muted);
   font-family: var(--mono);
   font-size: 10.5px;
   padding: 5px 10px;
+}
+
+.terminal-pane-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: visible;
 }
 
 .terminal-pane-status span {
