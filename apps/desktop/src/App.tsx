@@ -160,6 +160,12 @@ export function App() {
     setScreen("controlTower");
   }
 
+  async function focusTask(projectId: string, taskId: string) {
+    await switchProject(projectId);
+    setSelectedTaskId(taskId);
+    setScreen("tasks");
+  }
+
   async function forgetProject(projectId: string) {
     const recent = recents.find((project) => project.id === projectId);
     if (!recent) return;
@@ -234,6 +240,7 @@ export function App() {
           {screen === "dashboard" ? (
             <GlobalControlTowerScreen
               onFocusProject={focusProject}
+              onFocusTask={focusTask}
               onOpenProject={openProject}
             />
           ) : null}

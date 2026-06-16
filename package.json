@@ -11,6 +11,8 @@
     "check": "node src/cli.ts --help >/dev/null && node --test",
     "handoff": "node scripts/claude-desktop-handoff.mjs",
     "handoff:once": "node scripts/claude-desktop-handoff.mjs --once",
+    "obsidian:sync": "node scripts/obsidian-sync.mjs",
+    "obsidian:backfill": "node scripts/obsidian-sync.mjs --once --backfill",
     "start": "node src/cli.ts"
   },
   "engines": {

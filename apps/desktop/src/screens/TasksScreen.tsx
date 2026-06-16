@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { FileText, GitPullRequest, MessageSquareWarning, Trash2, X } from "lucide-react";
+import { Bot, FileText, GitMerge, GitPullRequest, MessageSquareWarning, Trash2, X } from "lucide-react";
 import type {
   AgentRunSummary,
   ApprovalSummary,
@@ -168,6 +168,7 @@ export function TasksScreen({
           task={selectedTask}
           runs={taskRuns[selectedTask.id] ?? []}
           onClose={() => onSelectTask(null)}
+          onRefresh={onRefresh}
           onDeleted={async () => {
             onSelectTask(null);
             await onRefresh();
@@ -183,19 +184,23 @@ interface TaskFocusDetailProps {
   task: TaskSummary;
   runs: AgentRunSummary[];
   onClose: () => void;
+  onRefresh: () => Promise<void>;
   onDeleted: () => Promise<void>;
 }
 
-function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocusDetailProps) {
+function TaskFocusDetail({ snapshot, task, runs, onClose, onRefresh, onDeleted }: TaskFocusDetailProps) {
   const [timeline, setTimeline] = useState<TaskTimelineEntry[]>([]);
   const [changedFiles, setChangedFiles] = useState<GitFileStatus[]>([]);
   const [contextManifest, setContextManifest] = useState<RunContextManifest | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isApproving, setIsApproving] = useState(false);
+  const [approvalNotice, setApprovalNotice] = useState<string | null>(null);
   const visibleRun = selectVisibleRun(runs);
   const live = visibleRun ? deriveRunLiveState(visibleRun) : null;
   const hasActiveRun = runs.some(isRunActiveState);
   const canDeleteTask = (task.status === "Done" || task.status === "Merged") && !hasActiveRun;
+  const canApproveCompletion = task.status === "MergeWaiting" && !hasActiveRun;
   const pendingApprovals = snapshot.approvals.filter(
     (approval) =>
       approval.status === "Pending" &&
@@ -206,6 +211,7 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
   const markdownRefs = task.externalRefs.filter(
     (ref) => ref.refType === "MarkdownPlan" || ref.refTitle?.toLowerCase().includes("markdown") || ref.refValue.endsWith(".md"),
   );
+  const markdownItems = buildMarkdownItems(markdownRefs, contextManifest);
 
   useEffect(() => {
     let disposed = false;
@@ -270,6 +276,30 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
     }
   }
 
+  async function approveCompletion() {
+    if (!canApproveCompletion || isApproving) return;
+    const confirmed = window.confirm(
+      `"${task.title}" 작업을 완료 승인할까요?\nworktree 변경사항을 커밋하고 origin에 push합니다.`,
+    );
+    if (!confirmed) return;
+
+    setIsApproving(true);
+    setDetailError(null);
+    setApprovalNotice(null);
+    try {
+      const result = await api.approveTaskCompletionWithGit(snapshot.project.id, task.id);
+      setApprovalNotice(
+        `${result.branchName} 커밋 ${result.commitHash.slice(0, 12)}` +
+          (result.pushed ? " · origin push 완료" : " · push 미완료"),
+      );
+      await onRefresh();
+    } catch (error) {
+      setDetailError(messageFromError(error, "작업 완료 승인에 실패했습니다."));
+    } finally {
+      setIsApproving(false);
+    }
+  }
+
   return (
     <aside className="task-focus-detail" aria-label="작업 상세">
       <header className="task-focus-header">
@@ -278,6 +308,18 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
           <h3>{task.title}</h3>
         </div>
         <div className="task-focus-actions">
+          {canApproveCompletion ? (
+            <button
+              className="primary-button compact"
+              disabled={isApproving}
+              onClick={() => void approveCompletion()}
+              title="worktree 변경을 커밋하고 origin에 push합니다"
+              type="button"
+            >
+              <GitMerge size={16} />
+              {isApproving ? "승인 중…" : "완료 승인 · 커밋 push"}
+            </button>
+          ) : null}
           <button
             className="icon-button danger"
             disabled={!canDeleteTask || isDeleting}
@@ -294,6 +336,7 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
       </header>
 
       {detailError ? <div className="error-banner compact">{detailError}</div> : null}
+      {approvalNotice ? <div className="success-banner compact">{approvalNotice}</div> : null}
 
       <section className="observer-snapshot-panel" aria-label="Observer Snapshot">
         <div className="observer-snapshot-heading">
@@ -312,6 +355,22 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
       </section>
 
       <RunContextManifestPanel manifest={contextManifest} />
+
+      <section className="focus-section">
+        <div className="focus-section-title">
+          <Bot size={16} />
+          <h4>실행 AI</h4>
+        </div>
+        {visibleRun ? (
+          <div className="focus-runner-card">
+            <span>{roleLabel(visibleRun.roleId)}</span>
+            <strong>{runnerDisplayName(visibleRun)}</strong>
+            <small>{runnerDetail(visibleRun)}</small>
+          </div>
+        ) : (
+          <p className="focus-empty">아직 실행자가 배정되지 않았습니다.</p>
+        )}
+      </section>
 
       <section className="focus-section">
         <div className="focus-section-title">
@@ -357,12 +416,12 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
           <FileText size={16} />
           <h4>참고 Markdown</h4>
         </div>
-        {markdownRefs.length > 0 ? (
+        {markdownItems.length > 0 ? (
           <ul className="focus-list">
-            {markdownRefs.map((ref) => (
-              <li key={ref.id}>
-                <strong>{ref.refTitle ?? "Markdown"}</strong>
-                <span>{ref.refValue}</span>
+            {markdownItems.map((item) => (
+              <li key={`${item.source}:${item.path}`}>
+                <strong>{item.title}</strong>
+                <span>{item.path}</span>
               </li>
             ))}
           </ul>
@@ -807,6 +866,8 @@ function buildTaskObserverSnapshot({
     : `${TASK_STATUS_LABEL[task.status]} · 실행자 없음`;
   const activeRunCount = runs.filter((run) => ["Queued", "Running"].includes(run.status)).length;
   const latestTimeline = timeline[0]?.title ?? "기록 없음";
+  const runnerName = visibleRun ? runnerDisplayName(visibleRun) : "실행자 없음";
+  const runnerMeta = visibleRun ? runnerDetail(visibleRun) : "run 없음";
 
   return {
     headline,
@@ -821,6 +882,12 @@ function buildTaskObserverSnapshot({
         label: "환경",
         value: snapshot.project.name,
         detail: visibleRun?.artifactDir ?? snapshot.project.rootPath,
+      },
+      {
+        label: "AI",
+        value: runnerName,
+        detail: runnerMeta,
+        tone: live?.tone === "running" ? "running" : undefined,
       },
       {
         label: "문서",
@@ -845,6 +912,46 @@ function buildTaskObserverSnapshot({
       },
     ],
   };
+}
+
+interface MarkdownItem {
+  title: string;
+  path: string;
+  source: string;
+}
+
+function buildMarkdownItems(
+  refs: TaskSummary["externalRefs"],
+  manifest: RunContextManifest | null,
+): MarkdownItem[] {
+  const items = new Map<string, MarkdownItem>();
+  for (const ref of refs) {
+    items.set(ref.refValue, {
+      title: ref.refTitle ?? "Markdown",
+      path: ref.refValue,
+      source: "task-ref",
+    });
+  }
+  for (const path of manifest?.referencedMarkdown ?? []) {
+    if (!items.has(path)) {
+      items.set(path, { title: "Run 참조 Markdown", path, source: "manifest-ref" });
+    }
+  }
+  return Array.from(items.values());
+}
+
+function runnerDisplayName(run: AgentRunSummary): string {
+  return run.model ?? run.provider ?? run.connectionId ?? "알 수 없음";
+}
+
+function runnerDetail(run: AgentRunSummary): string {
+  const parts = [
+    run.provider ? `provider ${run.provider}` : null,
+    run.model ? `model ${run.model}` : null,
+    run.connectionId ? `connection ${run.connectionId}` : null,
+    `attempt ${run.attempt}`,
+  ].filter(Boolean);
+  return parts.join(" · ");
 }
 
 function firstLine(value: string): string {

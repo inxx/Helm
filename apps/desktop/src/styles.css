@@ -1238,6 +1238,67 @@ textarea {
   font-size: 12px;
 }
 
+.global-task-board-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.global-task-board-scroll {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.global-task-board-scroll .task-board {
+  height: 100%;
+  background: var(--surface);
+}
+
+.tower-view-toggle {
+  display: inline-flex;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 2px;
+}
+
+.tower-view-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: calc(var(--radius) - 3px);
+  background: transparent;
+  color: var(--text-muted);
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.tower-view-toggle button.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.08);
+}
+
+.task-card-project {
+  overflow: hidden;
+  width: max-content;
+  max-width: 100%;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .global-project-table {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -2431,6 +2492,28 @@ textarea {
   margin: 0;
 }
 
+.task-focus-actions .primary-button.compact {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.task-focus-actions .primary-button.compact:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.success-banner.compact {
+  margin: 0;
+  border: 1px solid color-mix(in oklch, var(--brand) 40%, var(--line));
+  border-radius: var(--radius);
+  background: var(--brand-weak);
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
 .observer-snapshot-panel {
   display: grid;
   gap: 10px;
@@ -2631,6 +2714,30 @@ textarea {
   overflow-wrap: anywhere;
   font-size: 12.5px;
   font-weight: 600;
+}
+
+.focus-runner-card {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  padding: 10px;
+}
+
+.focus-runner-card span,
+.focus-runner-card small {
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.focus-runner-card strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .focus-list,
@@ -2926,6 +3033,11 @@ textarea {
 .detail-panel > p {
   color: var(--soft);
   font-size: 12.5px;
+}
+
+.task-description-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .task-console {
