@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Bot, FileText, GitPullRequest, MessageSquareWarning, Trash2, X } from "lucide-react";
+import { Bot, FileText, GitMerge, GitPullRequest, MessageSquareWarning, Trash2, X } from "lucide-react";
 import type {
   AgentRunSummary,
   ApprovalSummary,
@@ -168,6 +168,7 @@ export function TasksScreen({
           task={selectedTask}
           runs={taskRuns[selectedTask.id] ?? []}
           onClose={() => onSelectTask(null)}
+          onRefresh={onRefresh}
           onDeleted={async () => {
             onSelectTask(null);
             await onRefresh();
@@ -183,19 +184,23 @@ interface TaskFocusDetailProps {
   task: TaskSummary;
   runs: AgentRunSummary[];
   onClose: () => void;
+  onRefresh: () => Promise<void>;
   onDeleted: () => Promise<void>;
 }
 
-function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocusDetailProps) {
+function TaskFocusDetail({ snapshot, task, runs, onClose, onRefresh, onDeleted }: TaskFocusDetailProps) {
   const [timeline, setTimeline] = useState<TaskTimelineEntry[]>([]);
   const [changedFiles, setChangedFiles] = useState<GitFileStatus[]>([]);
   const [contextManifest, setContextManifest] = useState<RunContextManifest | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isApproving, setIsApproving] = useState(false);
+  const [approvalNotice, setApprovalNotice] = useState<string | null>(null);
   const visibleRun = selectVisibleRun(runs);
   const live = visibleRun ? deriveRunLiveState(visibleRun) : null;
   const hasActiveRun = runs.some(isRunActiveState);
   const canDeleteTask = (task.status === "Done" || task.status === "Merged") && !hasActiveRun;
+  const canApproveCompletion = task.status === "MergeWaiting" && !hasActiveRun;
   const pendingApprovals = snapshot.approvals.filter(
     (approval) =>
       approval.status === "Pending" &&
@@ -271,6 +276,30 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
     }
   }
 
+  async function approveCompletion() {
+    if (!canApproveCompletion || isApproving) return;
+    const confirmed = window.confirm(
+      `"${task.title}" 작업을 완료 승인할까요?\nworktree 변경사항을 커밋하고 origin에 push합니다.`,
+    );
+    if (!confirmed) return;
+
+    setIsApproving(true);
+    setDetailError(null);
+    setApprovalNotice(null);
+    try {
+      const result = await api.approveTaskCompletionWithGit(snapshot.project.id, task.id);
+      setApprovalNotice(
+        `${result.branchName} 커밋 ${result.commitHash.slice(0, 12)}` +
+          (result.pushed ? " · origin push 완료" : " · push 미완료"),
+      );
+      await onRefresh();
+    } catch (error) {
+      setDetailError(messageFromError(error, "작업 완료 승인에 실패했습니다."));
+    } finally {
+      setIsApproving(false);
+    }
+  }
+
   return (
     <aside className="task-focus-detail" aria-label="작업 상세">
       <header className="task-focus-header">
@@ -279,6 +308,18 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
           <h3>{task.title}</h3>
         </div>
         <div className="task-focus-actions">
+          {canApproveCompletion ? (
+            <button
+              className="primary-button compact"
+              disabled={isApproving}
+              onClick={() => void approveCompletion()}
+              title="worktree 변경을 커밋하고 origin에 push합니다"
+              type="button"
+            >
+              <GitMerge size={16} />
+              {isApproving ? "승인 중…" : "완료 승인 · 커밋 push"}
+            </button>
+          ) : null}
           <button
             className="icon-button danger"
             disabled={!canDeleteTask || isDeleting}
@@ -295,6 +336,7 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
       </header>
 
       {detailError ? <div className="error-banner compact">{detailError}</div> : null}
+      {approvalNotice ? <div className="success-banner compact">{approvalNotice}</div> : null}
 
       <section className="observer-snapshot-panel" aria-label="Observer Snapshot">
         <div className="observer-snapshot-heading">

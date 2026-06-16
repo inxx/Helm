@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
-import { AlertTriangle, GitBranch, ListChecks, RefreshCw, ShieldAlert } from "lucide-react";
+import { AlertTriangle, GitBranch, KanbanSquare, ListChecks, RefreshCw, ShieldAlert, Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { TaskBoard } from "../components/TaskBoard";
 import { api } from "../lib/api";
 import { deriveControlTowerState } from "../lib/controlTower";
 import { shortenPath } from "../lib/recents";
@@ -8,8 +9,11 @@ import { deriveRunLiveState, isRunActiveState } from "../lib/runLiveState";
 import { TASK_STATUS_LABEL } from "../lib/status";
 import type { AgentRunSummary, ControlTowerProjectSummary, TaskSummary } from "../lib/types";
 
+type TowerView = "projects" | "tasks";
+
 interface GlobalControlTowerScreenProps {
   onFocusProject: (projectId: string) => Promise<void>;
+  onFocusTask: (projectId: string, taskId: string) => Promise<void>;
   onOpenProject: () => void;
 }
 
@@ -23,11 +27,12 @@ interface ProjectView {
   health: "attention" | "active" | "dirty" | "idle" | "unavailable";
 }
 
-export function GlobalControlTowerScreen({ onFocusProject, onOpenProject }: GlobalControlTowerScreenProps) {
+export function GlobalControlTowerScreen({ onFocusProject, onFocusTask, onOpenProject }: GlobalControlTowerScreenProps) {
   const [projects, setProjects] = useState<ControlTowerProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [view, setView] = useState<TowerView>("projects");
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -84,6 +89,7 @@ export function GlobalControlTowerScreen({ onFocusProject, onOpenProject }: Glob
   const views = useMemo(() => projects.map((project) => buildProjectView(project, now)), [projects, now]);
   const metrics = useMemo(() => buildGlobalMetrics(views), [views]);
   const attentionItems = useMemo(() => buildAttentionItems(views, now), [views, now]);
+  const combined = useMemo(() => buildCombinedTasks(projects), [projects]);
 
   if (!loading && projects.length === 0) {
     return (
@@ -105,6 +111,26 @@ export function GlobalControlTowerScreen({ onFocusProject, onOpenProject }: Glob
           <p>최근 프로젝트의 태스크, 실행, git 상태를 한 화면에서 확인합니다.</p>
         </div>
         <div className="section-header-actions">
+          <div className="tower-view-toggle" role="group" aria-label="화면 전환">
+            <button
+              aria-pressed={view === "projects"}
+              className={view === "projects" ? "active" : ""}
+              onClick={() => setView("projects")}
+              type="button"
+            >
+              <Table2 size={14} />
+              <span>프로젝트</span>
+            </button>
+            <button
+              aria-pressed={view === "tasks"}
+              className={view === "tasks" ? "active" : ""}
+              onClick={() => setView("tasks")}
+              type="button"
+            >
+              <KanbanSquare size={14} />
+              <span>전체 태스크 {combined.tasks.length}</span>
+            </button>
+          </div>
           <button className="secondary-button" disabled={loading} onClick={() => setRefreshKey((value) => value + 1)} type="button">
             <RefreshCw size={14} />
             <span>{loading ? "갱신 중" : "새로고침"}</span>
@@ -147,31 +173,56 @@ export function GlobalControlTowerScreen({ onFocusProject, onOpenProject }: Glob
           </div>
         </section>
 
-        <section className="global-project-table" aria-label="프로젝트별 현황">
-          <div className="global-project-table-header">
-            <span>프로젝트</span>
-            <span>태스크</span>
-            <span>실행</span>
-            <span>Git</span>
-            <span>마지막 신호</span>
-          </div>
-          <div className="global-project-rows">
-            {views.map((view) => (
-              <button
-                className={`global-project-row ${view.health}`}
-                key={view.source.recent.id}
-                onClick={() => onFocusProject(view.source.recent.id)}
-                type="button"
-              >
-                <ProjectIdentity view={view} />
-                <ProjectTaskCell view={view} />
-                <ProjectRunCell view={view} />
-                <ProjectGitCell view={view} />
-                <span className="global-project-signal">{formatRelativeAge(view.lastSignalAt, now)}</span>
-              </button>
-            ))}
-          </div>
-        </section>
+        {view === "tasks" ? (
+          <section className="global-task-board-pane" aria-label="전체 태스크">
+            <div className="global-panel-heading">
+              <span>전체 태스크</span>
+              <strong>{combined.tasks.length}</strong>
+            </div>
+            {combined.tasks.length > 0 ? (
+              <div className="global-task-board-scroll">
+                <TaskBoard
+                  tasks={combined.tasks}
+                  taskRuns={combined.taskRuns}
+                  projectLabels={combined.projectLabels}
+                  selectedTaskId={null}
+                  onSelectTask={(taskId) => {
+                    const projectId = taskId ? combined.taskProject[taskId] : null;
+                    if (taskId && projectId) void onFocusTask(projectId, taskId);
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="global-empty-panel">합쳐서 볼 태스크가 아직 없습니다.</div>
+            )}
+          </section>
+        ) : (
+          <section className="global-project-table" aria-label="프로젝트별 현황">
+            <div className="global-project-table-header">
+              <span>프로젝트</span>
+              <span>태스크</span>
+              <span>실행</span>
+              <span>Git</span>
+              <span>마지막 신호</span>
+            </div>
+            <div className="global-project-rows">
+              {views.map((projectView) => (
+                <button
+                  className={`global-project-row ${projectView.health}`}
+                  key={projectView.source.recent.id}
+                  onClick={() => onFocusProject(projectView.source.recent.id)}
+                  type="button"
+                >
+                  <ProjectIdentity view={projectView} />
+                  <ProjectTaskCell view={projectView} />
+                  <ProjectRunCell view={projectView} />
+                  <ProjectGitCell view={projectView} />
+                  <span className="global-project-signal">{formatRelativeAge(projectView.lastSignalAt, now)}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );
@@ -265,6 +316,35 @@ function buildProjectView(source: ControlTowerProjectSummary, now: number): Proj
     lastSignalAt: tower.lastSignalAt,
     health,
   };
+}
+
+interface CombinedTasks {
+  tasks: TaskSummary[];
+  taskRuns: Record<string, AgentRunSummary[]>;
+  projectLabels: Record<string, string>;
+  taskProject: Record<string, string>;
+}
+
+function buildCombinedTasks(projects: ControlTowerProjectSummary[]): CombinedTasks {
+  const tasks: TaskSummary[] = [];
+  const taskRuns: Record<string, AgentRunSummary[]> = {};
+  const projectLabels: Record<string, string> = {};
+  const taskProject: Record<string, string> = {};
+
+  for (const project of projects) {
+    const snapshot = project.snapshot;
+    if (!snapshot) continue;
+    projectLabels[snapshot.project.id] = snapshot.project.name;
+    for (const task of snapshot.tasks) {
+      tasks.push(task);
+      taskProject[task.id] = snapshot.project.id;
+    }
+    for (const run of project.runs) {
+      (taskRuns[run.taskId] ??= []).push(run);
+    }
+  }
+
+  return { tasks, taskRuns, projectLabels, taskProject };
 }
 
 function buildGlobalMetrics(views: ProjectView[]) {

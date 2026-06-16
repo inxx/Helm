@@ -1238,6 +1238,67 @@ textarea {
   font-size: 12px;
 }
 
+.global-task-board-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.global-task-board-scroll {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.global-task-board-scroll .task-board {
+  height: 100%;
+  background: var(--surface);
+}
+
+.tower-view-toggle {
+  display: inline-flex;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 2px;
+}
+
+.tower-view-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: calc(var(--radius) - 3px);
+  background: transparent;
+  color: var(--text-muted);
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.tower-view-toggle button.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.08);
+}
+
+.task-card-project {
+  overflow: hidden;
+  width: max-content;
+  max-width: 100%;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .global-project-table {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -2429,6 +2490,28 @@ textarea {
 
 .error-banner.compact {
   margin: 0;
+}
+
+.task-focus-actions .primary-button.compact {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.task-focus-actions .primary-button.compact:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.success-banner.compact {
+  margin: 0;
+  border: 1px solid color-mix(in oklch, var(--brand) 40%, var(--line));
+  border-radius: var(--radius);
+  background: var(--brand-weak);
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 12px;
 }
 
 .observer-snapshot-panel {

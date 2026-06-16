@@ -90,9 +90,10 @@ interface TaskBoardProps {
   taskRuns?: Record<string, AgentRunSummary[]>;
   selectedTaskId: string | null;
   onSelectTask: (taskId: string | null) => void;
+  projectLabels?: Record<string, string>;
 }
 
-export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask }: TaskBoardProps) {
+export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, projectLabels }: TaskBoardProps) {
   const tasksByStatus = groupTasksByStatus(tasks);
   const boardRef = useRef<HTMLDivElement | null>(null);
   const focusStatus = useMemo(
@@ -134,6 +135,7 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask }
                 const flowLabel = activeRun ? runFlowLabel(activeRun) : stage.next;
                 const flowCaption = activeRun ? "run" : "next";
                 const taskAriaLabel = taskCardAriaLabel(task, activeRun, flowLabel);
+                const projectLabel = projectLabels?.[task.projectId];
                 return (
                   <button
                     aria-label={taskAriaLabel}
@@ -148,6 +150,7 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask }
                       <span className={`task-stage-pill ${stage.tone}`}>{stage.label}</span>
                       <small>{relativeTime(task.lastTransitionAt)}</small>
                     </div>
+                    {projectLabel ? <span className="task-card-project">{projectLabel}</span> : null}
                     <strong className="task-card-title">{task.title}</strong>
                     {task.description ? <span className="task-card-description">{task.description}</span> : null}
                     {activeRun ? (
