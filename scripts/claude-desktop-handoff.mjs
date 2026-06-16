@@ -244,7 +244,7 @@ function resolveProjectDb(repoPath) {
   return null;
 }
 
-function createDbRecords({ projectId, dbPath, taskId, runId, task, artifactDirRel, startedAt }) {
+function createDbRecords({ agent, projectId, dbPath, taskId, runId, sourcePath, task, artifactDirRel, startedAt }) {
   const now = new Date().toISOString();
   const title = task.title ?? task.id ?? "Handoff task";
   const description = task.prompt ?? "";
@@ -253,6 +253,7 @@ function createDbRecords({ projectId, dbPath, taskId, runId, task, artifactDirRe
   // summary_path, result_path are NOT NULL in schema
   const summaryPath = join(artifactDirRel, "summary.md");
   const resultPath = join(artifactDirRel, "result.json");
+  const sourceRefType = extname(sourcePath) === ".md" ? "MarkdownPlan" : "PlainText";
 
   runSqlite(dbPath, `
 BEGIN;
@@ -265,14 +266,29 @@ INSERT OR IGNORE INTO agent_runs
   (id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
    stdout_log_path, stderr_log_path, exit_code, result_status, started_at, finished_at,
    created_at, updated_at, lifecycle_phase, claimed_at, heartbeat_at,
-   failure_kind, failure_reason, attempt, repair_request_id)
+   failure_kind, failure_reason, attempt, repair_request_id, provider)
 VALUES
   (${sqlQuote(runId)}, ${sqlQuote(projectId)}, ${sqlQuote(taskId)}, 'coder', 'Running',
    ${sqlQuote(artifactDirRel)}, ${sqlQuote(summaryPath)}, ${sqlQuote(resultPath)},
    ${sqlQuote(stdoutLogPath)}, ${sqlQuote(stderrLogPath)},
    null, null, ${sqlQuote(startedAt)}, null, ${sqlQuote(startedAt)}, ${sqlQuote(now)},
-   'claimed', ${sqlQuote(startedAt)}, ${sqlQuote(now)}, null, null, 1, null);
+   'claimed', ${sqlQuote(startedAt)}, ${sqlQuote(now)}, null, null, 1, null, ${sqlQuote(agent)});
+INSERT OR IGNORE INTO task_external_refs
+  (id, project_id, task_id, ref_type, ref_value, ref_title, created_at)
+VALUES
+  (${sqlQuote(`handoff-ref-${randomUUID().slice(0, 8)}`)}, ${sqlQuote(projectId)}, ${sqlQuote(taskId)},
+   ${sqlQuote(sourceRefType)}, ${sqlQuote(sourcePath)}, 'Handoff Plan', ${sqlQuote(startedAt)});
 COMMIT;
+`);
+}
+
+function updateTaskSourceRef({ dbPath, taskId, fromPath, toPath }) {
+  runSqlite(dbPath, `
+UPDATE task_external_refs
+SET ref_value = ${sqlQuote(toPath)}
+WHERE task_id = ${sqlQuote(taskId)}
+  AND ref_value = ${sqlQuote(fromPath)}
+  AND ref_title = 'Handoff Plan';
 `);
 }
 
@@ -386,6 +402,7 @@ async function processNextTask() {
   const runId = `handoff-${timestamp(startedAt)}-${randomUUID().slice(0, 8)}`;
   const dbTaskId = `task-${runId}`;
   const artifactDirRel = join(".helm", "artifacts", "runs", runId);
+  let dbRecord = null;
   mkdirSync(join(helmRoot, artifactDirRel), { recursive: true });
 
   try {
@@ -397,9 +414,18 @@ async function processNextTask() {
 
     process.stdout.write(`Processing: ${basename(taskPath)} -> ${agent} (${repoPath})\n`);
 
-    const dbRecord = resolveProjectDb(repoPath);
+    dbRecord = resolveProjectDb(repoPath);
     if (dbRecord) {
-      createDbRecords({ ...dbRecord, taskId: dbTaskId, runId, task, artifactDirRel, startedAt: startedAt.toISOString() });
+      createDbRecords({
+        ...dbRecord,
+        agent,
+        taskId: dbTaskId,
+        runId,
+        sourcePath: processingTaskPath,
+        task,
+        artifactDirRel,
+        startedAt: startedAt.toISOString(),
+      });
     }
 
     let result;
@@ -438,6 +464,9 @@ async function processNextTask() {
 
     writeFileSync(reportPath, report);
     renameSync(processingTaskPath, archiveTarget);
+    if (dbRecord) {
+      updateTaskSourceRef({ dbPath: dbRecord.dbPath, taskId: dbTaskId, fromPath: processingTaskPath, toPath: archiveTarget });
+    }
 
     process.stdout.write(`Report: ${reportPath}\nRun: ${runId}\n`);
   } catch (error) {
@@ -462,6 +491,9 @@ async function processNextTask() {
       }),
     );
     renameSync(processingTaskPath, failedTarget);
+    if (dbRecord) {
+      updateTaskSourceRef({ dbPath: dbRecord.dbPath, taskId: dbTaskId, fromPath: processingTaskPath, toPath: failedTarget });
+    }
     process.stderr.write(`Failed: ${formatError(error)}\nReport: ${reportPath}\n`);
   }
 

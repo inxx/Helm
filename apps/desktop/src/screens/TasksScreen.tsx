@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { FileText, GitPullRequest, MessageSquareWarning, Trash2, X } from "lucide-react";
+import { Bot, FileText, GitPullRequest, MessageSquareWarning, Trash2, X } from "lucide-react";
 import type {
   AgentRunSummary,
   ApprovalSummary,
@@ -206,6 +206,7 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
   const markdownRefs = task.externalRefs.filter(
     (ref) => ref.refType === "MarkdownPlan" || ref.refTitle?.toLowerCase().includes("markdown") || ref.refValue.endsWith(".md"),
   );
+  const markdownItems = buildMarkdownItems(markdownRefs, contextManifest);
 
   useEffect(() => {
     let disposed = false;
@@ -315,6 +316,22 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
 
       <section className="focus-section">
         <div className="focus-section-title">
+          <Bot size={16} />
+          <h4>실행 AI</h4>
+        </div>
+        {visibleRun ? (
+          <div className="focus-runner-card">
+            <span>{roleLabel(visibleRun.roleId)}</span>
+            <strong>{runnerDisplayName(visibleRun)}</strong>
+            <small>{runnerDetail(visibleRun)}</small>
+          </div>
+        ) : (
+          <p className="focus-empty">아직 실행자가 배정되지 않았습니다.</p>
+        )}
+      </section>
+
+      <section className="focus-section">
+        <div className="focus-section-title">
           <GitPullRequest size={16} />
           <h4>현재 작업</h4>
         </div>
@@ -357,12 +374,12 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onDeleted }: TaskFocus
           <FileText size={16} />
           <h4>참고 Markdown</h4>
         </div>
-        {markdownRefs.length > 0 ? (
+        {markdownItems.length > 0 ? (
           <ul className="focus-list">
-            {markdownRefs.map((ref) => (
-              <li key={ref.id}>
-                <strong>{ref.refTitle ?? "Markdown"}</strong>
-                <span>{ref.refValue}</span>
+            {markdownItems.map((item) => (
+              <li key={`${item.source}:${item.path}`}>
+                <strong>{item.title}</strong>
+                <span>{item.path}</span>
               </li>
             ))}
           </ul>
@@ -807,6 +824,8 @@ function buildTaskObserverSnapshot({
     : `${TASK_STATUS_LABEL[task.status]} · 실행자 없음`;
   const activeRunCount = runs.filter((run) => ["Queued", "Running"].includes(run.status)).length;
   const latestTimeline = timeline[0]?.title ?? "기록 없음";
+  const runnerName = visibleRun ? runnerDisplayName(visibleRun) : "실행자 없음";
+  const runnerMeta = visibleRun ? runnerDetail(visibleRun) : "run 없음";
 
   return {
     headline,
@@ -821,6 +840,12 @@ function buildTaskObserverSnapshot({
         label: "환경",
         value: snapshot.project.name,
         detail: visibleRun?.artifactDir ?? snapshot.project.rootPath,
+      },
+      {
+        label: "AI",
+        value: runnerName,
+        detail: runnerMeta,
+        tone: live?.tone === "running" ? "running" : undefined,
       },
       {
         label: "문서",
@@ -845,6 +870,46 @@ function buildTaskObserverSnapshot({
       },
     ],
   };
+}
+
+interface MarkdownItem {
+  title: string;
+  path: string;
+  source: string;
+}
+
+function buildMarkdownItems(
+  refs: TaskSummary["externalRefs"],
+  manifest: RunContextManifest | null,
+): MarkdownItem[] {
+  const items = new Map<string, MarkdownItem>();
+  for (const ref of refs) {
+    items.set(ref.refValue, {
+      title: ref.refTitle ?? "Markdown",
+      path: ref.refValue,
+      source: "task-ref",
+    });
+  }
+  for (const path of manifest?.referencedMarkdown ?? []) {
+    if (!items.has(path)) {
+      items.set(path, { title: "Run 참조 Markdown", path, source: "manifest-ref" });
+    }
+  }
+  return Array.from(items.values());
+}
+
+function runnerDisplayName(run: AgentRunSummary): string {
+  return run.model ?? run.provider ?? run.connectionId ?? "알 수 없음";
+}
+
+function runnerDetail(run: AgentRunSummary): string {
+  const parts = [
+    run.provider ? `provider ${run.provider}` : null,
+    run.model ? `model ${run.model}` : null,
+    run.connectionId ? `connection ${run.connectionId}` : null,
+    `attempt ${run.attempt}`,
+  ].filter(Boolean);
+  return parts.join(" · ");
 }
 
 function firstLine(value: string): string {

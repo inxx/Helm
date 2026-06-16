@@ -655,7 +655,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
           </div>
           <h2>{task.title}</h2>
         </div>
-        {task.description ? <p>{task.description}</p> : <p className="muted">설명 없음</p>}
+        {task.description ? <p className="task-description-text">{task.description}</p> : <p className="muted">설명 없음</p>}
         <div className="task-status-control" aria-label="태스크 상태 변경">
           <label>
             <span>상태 변경</span>
