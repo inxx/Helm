@@ -156,7 +156,12 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
                     {activeRun ? (
                       <div className={`task-card-run ${runTone(activeRun)}`}>
                         <span>{runStatusLabel(activeRun)}</span>
-                        <strong>{roleLabel(activeRun.roleId)}</strong>
+                        <strong>
+                          {roleLabel(activeRun.roleId)}
+                          {runnerModelLabel(activeRun) ? (
+                            <span className="task-card-run-model"> · {runnerModelLabel(activeRun)}</span>
+                          ) : null}
+                        </strong>
                         <small>{runHint(activeRun)}</small>
                       </div>
                     ) : null}
@@ -205,6 +210,10 @@ function runStatusLabel(run: AgentRunSummary): string {
   return deriveRunLiveState(run).label;
 }
 
+function runnerModelLabel(run: AgentRunSummary): string | null {
+  return run.model ?? run.provider ?? null;
+}
+
 function runTone(run: AgentRunSummary): "running" | "queued" | "attention" | "done" {
   return deriveRunLiveState(run).tone;
 }
@@ -235,7 +244,8 @@ function taskCardAriaLabel(task: TaskSummary, activeRun: AgentRunSummary | null,
   const parts = [`${task.title}`, `현재 단계 ${TASK_STATUS_LABEL[task.status]}`];
   if (activeRun) {
     const live = deriveRunLiveState(activeRun);
-    parts.push(`${roleLabel(activeRun.roleId)} ${live.label}`);
+    const model = runnerModelLabel(activeRun);
+    parts.push(`${roleLabel(activeRun.roleId)}${model ? ` ${model}` : ""} ${live.label}`);
   } else {
     parts.push(`다음 액션 ${flowLabel}`);
   }

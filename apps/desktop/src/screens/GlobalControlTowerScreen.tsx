@@ -283,10 +283,11 @@ function ProjectRunCell({ view }: { view: ProjectView }) {
   const topRun = view.attentionRuns[0] ?? view.activeRuns[0] ?? view.source.runs[0];
   if (!topRun) return <span className="global-project-muted">실행 없음</span>;
   const live = deriveRunLiveState(topRun);
+  const model = topRun.model ?? topRun.provider;
   return (
     <span className="global-project-stack">
       <strong>{live.label}</strong>
-      <small>{roleLabel(topRun.roleId)}</small>
+      <small>{model ? `${roleLabel(topRun.roleId)} · ${model}` : roleLabel(topRun.roleId)}</small>
     </span>
   );
 }

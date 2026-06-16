@@ -949,7 +949,7 @@ function runnerDetail(run: AgentRunSummary): string {
     run.provider ? `provider ${run.provider}` : null,
     run.model ? `model ${run.model}` : null,
     run.connectionId ? `connection ${run.connectionId}` : null,
-    `attempt ${run.attempt}`,
+    run.attempt > 1 ? `attempt ${run.attempt}` : null,
   ].filter(Boolean);
   return parts.join(" · ");
 }
