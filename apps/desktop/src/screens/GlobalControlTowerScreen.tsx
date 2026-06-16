@@ -40,6 +40,15 @@ export function GlobalControlTowerScreen({ onFocusProject, onFocusTask, onOpenPr
     return () => window.clearInterval(timer);
   }, []);
 
+  // 핸드오프 watcher는 외부 프로세스로 Tauri 이벤트를 발행하지 않으므로
+  // 10초마다 폴링해서 DB 변경을 반영한다.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!loading) setRefreshKey((value) => value + 1);
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [loading]);
+
   useEffect(() => {
     let disposed = false;
     setLoading(true);
@@ -274,10 +283,11 @@ function ProjectRunCell({ view }: { view: ProjectView }) {
   const topRun = view.attentionRuns[0] ?? view.activeRuns[0] ?? view.source.runs[0];
   if (!topRun) return <span className="global-project-muted">실행 없음</span>;
   const live = deriveRunLiveState(topRun);
+  const model = topRun.model ?? topRun.provider;
   return (
     <span className="global-project-stack">
       <strong>{live.label}</strong>
-      <small>{roleLabel(topRun.roleId)}</small>
+      <small>{model ? `${roleLabel(topRun.roleId)} · ${model}` : roleLabel(topRun.roleId)}</small>
     </span>
   );
 }

@@ -13,7 +13,7 @@ describe("agents", () => {
   it("builds Claude prompt commands", () => {
     assert.deepEqual(buildAgentCommand("claude", "hello", {}), {
       command: "claude",
-      args: ["-p", "hello"],
+      args: ["-p", "--dangerously-skip-permissions", "hello"],
     });
   });
 

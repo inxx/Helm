@@ -2124,6 +2124,11 @@ textarea {
   white-space: nowrap;
 }
 
+.task-card-run-model {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
 .task-card-run small {
   min-width: 0;
   overflow-wrap: anywhere;

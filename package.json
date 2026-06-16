@@ -9,8 +9,9 @@
   },
   "scripts": {
     "check": "node src/cli.ts --help >/dev/null && node --test",
-    "handoff": "node scripts/claude-desktop-handoff.mjs",
-    "handoff:once": "node scripts/claude-desktop-handoff.mjs --once",
+    "handoff": "node scripts/claude-desktop-handoff.mjs --on-report 'node scripts/obsidian-sync.mjs --report'",
+    "handoff:once": "node scripts/claude-desktop-handoff.mjs --once --on-report 'node scripts/obsidian-sync.mjs --report'",
+    "handoff:no-sync": "node scripts/claude-desktop-handoff.mjs",
     "obsidian:sync": "node scripts/obsidian-sync.mjs",
     "obsidian:backfill": "node scripts/obsidian-sync.mjs --once --backfill",
     "start": "node src/cli.ts"

@@ -32,11 +32,25 @@ const APP_SETTINGS_PATH = join(
 
 const args = parseArgs(process.argv.slice(2));
 const inboxPath = resolve(args.inbox ?? join(helmRoot, ".helm", "inbox"));
-const processingPath = resolve(args.processing ?? join(helmRoot, ".helm", "processing"));
-const reportsPath = resolve(args.reports ?? join(helmRoot, ".helm", "outbox", "reports"));
-const archivePath = resolve(args.archive ?? join(helmRoot, ".helm", "outbox", "archive"));
-const failedPath = resolve(args.failed ?? join(helmRoot, ".helm", "outbox", "failed"));
+const processingPath = resolve(
+  args.processing ?? join(helmRoot, ".helm", "processing"),
+);
+const reportsPath = resolve(
+  args.reports ?? join(helmRoot, ".helm", "outbox", "reports"),
+);
+const archivePath = resolve(
+  args.archive ?? join(helmRoot, ".helm", "outbox", "archive"),
+);
+const failedPath = resolve(
+  args.failed ?? join(helmRoot, ".helm", "outbox", "failed"),
+);
 const pollIntervalMs = args.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+// 성공 보고서 작성 직후 실행할 훅 명령. 공백으로 분리하며, 보고서 경로가
+// 마지막 인자로 자동 추가된다. 셸을 거치지 않으므로(spawn 배열 인자) 안전하다.
+const onReportCommand = args.onReport ?? process.env.HELM_ON_REPORT ?? null;
+
+// Helm 루트의 .helm/config.json에 지정된 기본 agent. frontmatter보다 우선한다.
+const helmDefaultAgent = readHelmDefaultAgent();
 
 ensureDirectories();
 
@@ -74,6 +88,7 @@ function parseArgs(argv) {
     failed: undefined,
     agent: undefined,
     pollIntervalMs: undefined,
+    onReport: undefined,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -161,13 +176,28 @@ function parseArgs(argv) {
     }
 
     if (arg === "--poll-interval") {
-      parsed.pollIntervalMs = readPollInterval(readOptionValue(argv, index, "--poll-interval"));
+      parsed.pollIntervalMs = readPollInterval(
+        readOptionValue(argv, index, "--poll-interval"),
+      );
       index += 1;
       continue;
     }
 
     if (arg?.startsWith("--poll-interval=")) {
-      parsed.pollIntervalMs = readPollInterval(arg.slice("--poll-interval=".length));
+      parsed.pollIntervalMs = readPollInterval(
+        arg.slice("--poll-interval=".length),
+      );
+      continue;
+    }
+
+    if (arg === "--on-report") {
+      parsed.onReport = readOptionValue(argv, index, "--on-report");
+      index += 1;
+      continue;
+    }
+
+    if (arg?.startsWith("--on-report=")) {
+      parsed.onReport = arg.slice("--on-report=".length);
       continue;
     }
 
@@ -189,10 +219,33 @@ function readOptionValue(argv, index, option) {
 
 function readAgent(value) {
   if (!AGENTS.has(value)) {
-    throw new Error(`지원하지 않는 agent입니다: ${value} (지원: ${[...AGENTS].join(", ")})`);
+    throw new Error(
+      `지원하지 않는 agent입니다: ${value} (지원: ${[...AGENTS].join(", ")})`,
+    );
   }
 
   return value;
+}
+
+function readHelmDefaultAgent() {
+  const configPath = join(helmRoot, ".helm", "config.json");
+
+  if (!existsSync(configPath)) {
+    return null;
+  }
+
+  let config;
+  try {
+    config = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch (error) {
+    throw new Error(`${configPath} 파일을 읽지 못했습니다: ${error.message}`);
+  }
+
+  if (config.defaultAgent === undefined) {
+    return null;
+  }
+
+  return readAgent(String(config.defaultAgent));
 }
 
 function readPollInterval(value) {
@@ -206,7 +259,13 @@ function readPollInterval(value) {
 }
 
 function ensureDirectories() {
-  for (const directory of [inboxPath, processingPath, reportsPath, archivePath, failedPath]) {
+  for (const directory of [
+    inboxPath,
+    processingPath,
+    reportsPath,
+    archivePath,
+    failedPath,
+  ]) {
     mkdirSync(directory, { recursive: true });
   }
 }
@@ -223,28 +282,55 @@ function runSqlite(dbPath, sql) {
   return spawnSync("sqlite3", [dbPath], { input: sql, encoding: "utf8" });
 }
 
-// repoPath의 자체 DB를 우선 사용. 없으면 Helm DB로 fallback.
+// repoPath가 속한 project를 찾는다. repoPath 자신부터 상위 디렉터리로 거슬러 올라가며
+// 각 디렉터리의 .helm/helm.sqlite에 그 디렉터리를 root_path로 가진 project가 있으면 그 project로 귀속한다.
+// (예: zelda/coco·zelda/noah 같은 모노레포 하위 경로 작업이 zelda 단일 project로 통합 추적된다.)
+// 어떤 조상에서도 못 찾으면 Helm 자체 DB/project로 fallback한다(repoPath 미지정 등).
 function resolveProjectDb(repoPath) {
-  const resolved = resolve(repoPath);
-  const candidates = [
-    { dbPath: join(resolved, ".helm", "helm.sqlite"), rootPath: resolved },
-    { dbPath: join(helmRoot, ".helm", "helm.sqlite"), rootPath: helmRoot },
-  ];
+  let dir = resolve(repoPath);
 
-  for (const { dbPath, rootPath } of candidates) {
-    if (!existsSync(dbPath)) continue;
-    const result = spawnSync(
-      "sqlite3",
-      ["-separator", "\t", dbPath, `SELECT id FROM projects WHERE root_path = ${sqlQuote(rootPath)} LIMIT 1;`],
-      { encoding: "utf8" },
-    );
-    const line = result.stdout?.trim().split("\n").find(Boolean);
-    if (line?.trim()) return { projectId: line.trim(), dbPath };
+  while (true) {
+    const match = lookupProjectAt(dir);
+    if (match) return match;
+
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
-  return null;
+
+  return lookupProjectAt(helmRoot);
 }
 
-function createDbRecords({ agent, projectId, dbPath, taskId, runId, sourcePath, task, artifactDirRel, startedAt }) {
+// dir/.helm/helm.sqlite에 root_path === dir인 project가 등록돼 있으면 {projectId, dbPath}를 반환한다.
+function lookupProjectAt(dir) {
+  const dbPath = join(dir, ".helm", "helm.sqlite");
+  if (!existsSync(dbPath)) return null;
+
+  const result = spawnSync(
+    "sqlite3",
+    [
+      "-separator",
+      "\t",
+      dbPath,
+      `SELECT id FROM projects WHERE root_path = ${sqlQuote(dir)} LIMIT 1;`,
+    ],
+    { encoding: "utf8" },
+  );
+  const projectId = result.stdout?.trim().split("\n").find(Boolean)?.trim();
+  return projectId ? { projectId, dbPath } : null;
+}
+
+function createDbRecords({
+  agent,
+  projectId,
+  dbPath,
+  taskId,
+  runId,
+  sourcePath,
+  task,
+  artifactDirRel,
+  startedAt,
+}) {
   const now = new Date().toISOString();
   const title = task.title ?? task.id ?? "Handoff task";
   const description = task.prompt ?? "";
@@ -253,9 +339,12 @@ function createDbRecords({ agent, projectId, dbPath, taskId, runId, sourcePath, 
   // summary_path, result_path are NOT NULL in schema
   const summaryPath = join(artifactDirRel, "summary.md");
   const resultPath = join(artifactDirRel, "result.json");
-  const sourceRefType = extname(sourcePath) === ".md" ? "MarkdownPlan" : "PlainText";
+  const sourceRefType =
+    extname(sourcePath) === ".md" ? "MarkdownPlan" : "PlainText";
 
-  runSqlite(dbPath, `
+  runSqlite(
+    dbPath,
+    `
 BEGIN;
 INSERT OR IGNORE INTO tasks
   (id, project_id, epic_id, title, description, status, status_reason, sort_order, created_at, updated_at, last_transition_at)
@@ -279,17 +368,21 @@ VALUES
   (${sqlQuote(`handoff-ref-${randomUUID().slice(0, 8)}`)}, ${sqlQuote(projectId)}, ${sqlQuote(taskId)},
    ${sqlQuote(sourceRefType)}, ${sqlQuote(sourcePath)}, 'Handoff Plan', ${sqlQuote(startedAt)});
 COMMIT;
-`);
+`,
+  );
 }
 
 function updateTaskSourceRef({ dbPath, taskId, fromPath, toPath }) {
-  runSqlite(dbPath, `
+  runSqlite(
+    dbPath,
+    `
 UPDATE task_external_refs
 SET ref_value = ${sqlQuote(toPath)}
 WHERE task_id = ${sqlQuote(taskId)}
   AND ref_value = ${sqlQuote(fromPath)}
   AND ref_title = 'Handoff Plan';
-`);
+`,
+  );
 }
 
 function updateDbRecords({ dbPath, taskId, runId, exitCode, finishedAt }) {
@@ -299,7 +392,9 @@ function updateDbRecords({ dbPath, taskId, runId, exitCode, finishedAt }) {
   const taskStatus = succeeded ? "Done" : "Blocked";
   const resultStatus = succeeded ? "pass" : "fail";
 
-  runSqlite(dbPath, `
+  runSqlite(
+    dbPath,
+    `
 BEGIN;
 UPDATE agent_runs
 SET status = ${sqlQuote(runStatus)}, exit_code = ${exitCode}, result_status = ${sqlQuote(resultStatus)},
@@ -310,7 +405,8 @@ UPDATE tasks
 SET status = ${sqlQuote(taskStatus)}, updated_at = ${sqlQuote(now)}, last_transition_at = ${sqlQuote(now)}
 WHERE id = ${sqlQuote(taskId)};
 COMMIT;
-`);
+`,
+  );
 }
 
 // ── Hermes execution ──────────────────────────────────────────────────────────
@@ -370,13 +466,129 @@ function runHermes(prompt, repoPath) {
     });
 
     child.on("error", (error) => {
-      resolveResult({ code: 1, stdout, stderr: stderr ? `${stderr}${error.message}` : error.message });
+      resolveResult({
+        code: 1,
+        stdout,
+        stderr: stderr ? `${stderr}${error.message}` : error.message,
+      });
     });
 
     child.on("close", (code) => {
       resolveResult({ code: code ?? 1, stdout, stderr });
     });
   });
+}
+
+// hermes-api(REST)의 persistent 세션으로 동기 실행한다. oneshot(runHermes)과
+// 달리 세션을 유지해 session_id를 report/ledger에 남긴다. background delegation
+// 재주입은 API 경로에서 지원되지 않아(검증 결과) 동기 단일 턴으로 동작한다.
+// API 키/URL이 없거나 접속 불가하면 null을 반환해 호출부가 oneshot으로
+// fallback하게 한다(키 미설정 시 회귀 방지 목적의 의도된 fallback).
+function resolveHermesApi() {
+  const appSettings = loadAppSettings();
+  const connection = appSettings?.orchestrator?.connection;
+  const baseUrl = (process.env.HERMES_API_URL ?? "http://127.0.0.1:8642").replace(
+    /\/+$/,
+    "",
+  );
+  const apiKey = process.env.HERMES_API_KEY ?? connection?.apiKey ?? null;
+  const model = appSettings?.model ?? connection?.defaultModel ?? null;
+  return { baseUrl, apiKey, model };
+}
+
+async function runHermesSession(prompt, repoPath) {
+  const { baseUrl, apiKey, model } = resolveHermesApi();
+
+  if (!apiKey) {
+    return null; // 키 미설정 → oneshot fallback
+  }
+
+  const timeoutMs = readPositiveInt(process.env.HERMES_TIMEOUT_MS, 600_000);
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+  };
+
+  let sessionId;
+  try {
+    const session = await fetchJson(
+      `${baseUrl}/api/sessions`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(model ? { model } : {}),
+      },
+      timeoutMs,
+    );
+    sessionId = session?.session?.id;
+  } catch {
+    return null; // API 접속 불가 → oneshot fallback
+  }
+
+  if (!sessionId) {
+    return null;
+  }
+
+  const sessionHeader = `Session: ${sessionId}\n\n`;
+
+  try {
+    const chat = await fetchJson(
+      `${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/chat`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          message: prompt,
+          // 컨테이너에 마운트된 작업 디렉터리에서만 파일 접근이 가능하므로
+          // 호스트 repoPath를 맥락으로만 알려둔다(경로 매핑은 범위 외).
+          instructions: `작업 대상 repo(호스트 경로): ${repoPath}. 파일/셸 접근은 이 Hermes 컨테이너에 마운트된 작업 디렉터리로 한정된다.`,
+        }),
+      },
+      timeoutMs,
+    );
+
+    const content = chat?.message?.content;
+
+    if (!content || !String(content).trim()) {
+      return {
+        code: 1,
+        stdout: `${sessionHeader}(빈 응답)`,
+        stderr:
+          "Hermes 세션이 최종 응답을 생성하지 못했습니다(provider 오류/한도 가능성).",
+      };
+    }
+
+    return { code: 0, stdout: `${sessionHeader}${content}`, stderr: "" };
+  } catch (error) {
+    return {
+      code: 1,
+      stdout: sessionHeader,
+      stderr: `Hermes 세션 chat 실패: ${formatError(error)}`,
+    };
+  }
+}
+
+async function fetchJson(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    const text = await response.text();
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${text.slice(0, 300)}`);
+    }
+
+    return text ? JSON.parse(text) : null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function readPositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 async function watchLoop() {
@@ -408,11 +620,13 @@ async function processNextTask() {
   try {
     const task = readTask(processingTaskPath);
     const reportName = `${timestamp(startedAt)}-${sanitizeFileName(task.id ?? task.title ?? basename(taskPath, extname(taskPath)))}.md`;
-    const agent = args.agent ?? task.agent ?? "codex";
+    const agent = args.agent ?? helmDefaultAgent ?? task.agent ?? "codex";
     const repoPath = resolve(task.repoPath ?? helmRoot);
     const prompt = buildExecutionPrompt(task);
 
-    process.stdout.write(`Processing: ${basename(taskPath)} -> ${agent} (${repoPath})\n`);
+    process.stdout.write(
+      `Processing: ${basename(taskPath)} -> ${agent} (${repoPath})\n`,
+    );
 
     dbRecord = resolveProjectDb(repoPath);
     if (dbRecord) {
@@ -430,7 +644,11 @@ async function processNextTask() {
 
     let result;
     if (agent === "hermes") {
-      result = await runHermes(prompt, repoPath);
+      // persistent 세션 우선. 키 미설정/API 미가용(null)일 때만 oneshot fallback.
+      result = await runHermesSession(prompt, repoPath);
+      if (!result) {
+        result = await runHermes(prompt, repoPath);
+      }
     } else {
       const runArgs = ["run", "--agent", agent];
       if (args.dryRun) runArgs.push("--dry-run");
@@ -441,12 +659,26 @@ async function processNextTask() {
     const finishedAt = new Date();
 
     // stdout/stderr를 artifact 파일로 저장
-    if (result.stdout) writeFileSync(join(helmRoot, artifactDirRel, "stdout.log"), result.stdout);
-    if (result.stderr) writeFileSync(join(helmRoot, artifactDirRel, "stderr.log"), result.stderr);
+    if (result.stdout)
+      writeFileSync(
+        join(helmRoot, artifactDirRel, "stdout.log"),
+        result.stdout,
+      );
+    if (result.stderr)
+      writeFileSync(
+        join(helmRoot, artifactDirRel, "stderr.log"),
+        result.stderr,
+      );
 
     // SQLite bridge: 실행 후 상태 업데이트
     if (dbRecord) {
-      updateDbRecords({ dbPath: dbRecord.dbPath, taskId: dbTaskId, runId, exitCode: result.code, finishedAt: finishedAt.toISOString() });
+      updateDbRecords({
+        dbPath: dbRecord.dbPath,
+        taskId: dbTaskId,
+        runId,
+        exitCode: result.code,
+        finishedAt: finishedAt.toISOString(),
+      });
     }
 
     const report = formatReport({
@@ -459,16 +691,32 @@ async function processNextTask() {
       result,
       runId,
     });
-    const reportPath = join(result.code === 0 ? reportsPath : failedPath, reportName);
-    const archiveTarget = uniquePath(result.code === 0 ? archivePath : failedPath, basename(processingTaskPath));
+    const reportPath = join(
+      result.code === 0 ? reportsPath : failedPath,
+      reportName,
+    );
+    const archiveTarget = uniquePath(
+      result.code === 0 ? archivePath : failedPath,
+      basename(processingTaskPath),
+    );
 
     writeFileSync(reportPath, report);
     renameSync(processingTaskPath, archiveTarget);
     if (dbRecord) {
-      updateTaskSourceRef({ dbPath: dbRecord.dbPath, taskId: dbTaskId, fromPath: processingTaskPath, toPath: archiveTarget });
+      updateTaskSourceRef({
+        dbPath: dbRecord.dbPath,
+        taskId: dbTaskId,
+        fromPath: processingTaskPath,
+        toPath: archiveTarget,
+      });
     }
 
     process.stdout.write(`Report: ${reportPath}\nRun: ${runId}\n`);
+
+    // 성공 보고서에 한해 post-report 훅을 실행한다(예: Obsidian 동기화).
+    if (result.code === 0) {
+      await runReportHook(reportPath);
+    }
   } catch (error) {
     const finishedAt = new Date();
     const reportName = `${timestamp(startedAt)}-${sanitizeFileName(basename(taskPath, extname(taskPath)))}.md`;
@@ -478,7 +726,13 @@ async function processNextTask() {
     // SQLite bridge: 예외 발생 시에도 실패 상태로 업데이트
     const fallbackDb = resolveProjectDb(helmRoot);
     if (fallbackDb) {
-      updateDbRecords({ dbPath: fallbackDb.dbPath, taskId: dbTaskId, runId, exitCode: 1, finishedAt: finishedAt.toISOString() });
+      updateDbRecords({
+        dbPath: fallbackDb.dbPath,
+        taskId: dbTaskId,
+        runId,
+        exitCode: 1,
+        finishedAt: finishedAt.toISOString(),
+      });
     }
 
     writeFileSync(
@@ -492,9 +746,16 @@ async function processNextTask() {
     );
     renameSync(processingTaskPath, failedTarget);
     if (dbRecord) {
-      updateTaskSourceRef({ dbPath: dbRecord.dbPath, taskId: dbTaskId, fromPath: processingTaskPath, toPath: failedTarget });
+      updateTaskSourceRef({
+        dbPath: dbRecord.dbPath,
+        taskId: dbTaskId,
+        fromPath: processingTaskPath,
+        toPath: failedTarget,
+      });
     }
-    process.stderr.write(`Failed: ${formatError(error)}\nReport: ${reportPath}\n`);
+    process.stderr.write(
+      `Failed: ${formatError(error)}\nReport: ${reportPath}\n`,
+    );
   }
 
   return true;
@@ -620,6 +881,8 @@ function buildExecutionPrompt(task) {
     "",
     "---",
     "Helm 실행 규칙:",
+    "- 이 작업은 Helm이 이미 위임한 것이다. 다시 Helm/Hermes inbox로 이관하지 말고 이 세션에서 직접 구현한다.",
+    "- 계획만 보고하고 멈추지 말고, 파일을 직접 수정해 구현을 완료한다.",
     "- 작업 범위를 벗어난 변경은 하지 않는다.",
     "- 구현 후 가능한 검증 명령을 실행한다.",
     "- 완료 시 변경 파일, 검증 결과, 남은 리스크를 한국어로 보고한다.",
@@ -649,7 +912,11 @@ function runHelm(runArgs, cwd) {
     });
 
     child.on("error", (error) => {
-      resolveResult({ code: 1, stdout, stderr: stderr ? `${stderr}${error.message}` : error.message });
+      resolveResult({
+        code: 1,
+        stdout,
+        stderr: stderr ? `${stderr}${error.message}` : error.message,
+      });
     });
 
     child.on("close", (code) => {
@@ -658,7 +925,16 @@ function runHelm(runArgs, cwd) {
   });
 }
 
-function formatReport({ task, agent, repoPath, sourcePath, startedAt, finishedAt, result, runId }) {
+function formatReport({
+  task,
+  agent,
+  repoPath,
+  sourcePath,
+  startedAt,
+  finishedAt,
+  result,
+  runId,
+}) {
   return [
     "# Helm 자동 실행 보고",
     "",
@@ -703,6 +979,36 @@ function formatFailureReport({ sourcePath, startedAt, finishedAt, error }) {
   ].join("\n");
 }
 
+function runReportHook(reportPath) {
+  if (!onReportCommand) {
+    return Promise.resolve();
+  }
+
+  const parts = onReportCommand.split(/\s+/).filter(Boolean);
+  const [command, ...commandArgs] = parts;
+  if (!command) {
+    return Promise.resolve();
+  }
+
+  // 셸을 거치지 않고 배열 인자로 실행한다. 보고서 경로는 마지막 인자로 추가하므로
+  // 경로에 공백이 있어도 안전하다. 훅이 실패해도 작업 처리에는 영향을 주지 않는다.
+  return new Promise((resolveHook) => {
+    const child = spawn(command, [...commandArgs, reportPath], {
+      cwd: helmRoot,
+      stdio: "inherit",
+    });
+
+    child.on("error", (error) => {
+      process.stderr.write(`on-report 훅 실행 실패: ${formatError(error)}\n`);
+      resolveHook();
+    });
+
+    child.on("close", () => {
+      resolveHook();
+    });
+  });
+}
+
 function extractSessionId(stdout) {
   return /^Session: (?<id>\S+)/m.exec(stdout)?.groups?.id ?? null;
 }
@@ -726,15 +1032,20 @@ function uniquePath(directory, name) {
 }
 
 function timestamp(date) {
-  return date.toISOString().replaceAll(/[-:.TZ]/g, "").slice(0, 14);
+  return date
+    .toISOString()
+    .replaceAll(/[-:.TZ]/g, "")
+    .slice(0, 14);
 }
 
 function sanitizeFileName(value) {
-  return String(value)
-    .trim()
-    .replaceAll(/[^A-Za-z0-9가-힣._-]+/g, "-")
-    .replaceAll(/^-+|-+$/g, "")
-    .slice(0, 80) || "task";
+  return (
+    String(value)
+      .trim()
+      .replaceAll(/[^A-Za-z0-9가-힣._-]+/g, "-")
+      .replaceAll(/^-+|-+$/g, "")
+      .slice(0, 80) || "task"
+  );
 }
 
 function sleep(ms) {
@@ -760,6 +1071,9 @@ Options:
   --inbox <path>            작업 파일을 읽을 경로입니다.
   --reports <path>          성공 보고서 경로입니다.
   --poll-interval <ms>      watcher polling 간격입니다. 기본값: ${DEFAULT_POLL_INTERVAL_MS}
+  --on-report <command>     성공 보고서 작성 후 실행할 명령입니다. 보고서 경로가
+                            마지막 인자로 추가됩니다. 환경변수 HELM_ON_REPORT 로도
+                            지정할 수 있습니다.
   -h, --help                도움말을 출력합니다.
 `;
 }
