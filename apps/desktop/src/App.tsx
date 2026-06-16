@@ -106,6 +106,23 @@ export function App() {
     }
   }, [screen]);
 
+  // 핸드오프 watcher는 외부 프로세스로 Tauri 이벤트 없이 DB를 직접 수정하므로
+  // 10초마다 스냅샷을 폴링해 태스크/실행 상태를 최신 상태로 유지한다.
+  useEffect(() => {
+    if (!snapshot) return;
+    const projectId = snapshot.project.id;
+    const timer = window.setInterval(async () => {
+      if (busy) return;
+      try {
+        const next = await api.getProjectSnapshot(projectId);
+        applySnapshotUpdate(next);
+      } catch {
+        // 폴링 실패는 무시 — 다음 주기에 재시도
+      }
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [snapshot?.project.id, busy]);
+
   function hydrateSnapshot(next: ProjectSnapshot, nextScreen: Screen = "controlTower") {
     setSnapshot(next);
     setSelectedTaskId(null);
