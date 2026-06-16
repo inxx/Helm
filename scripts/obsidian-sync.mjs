@@ -38,12 +38,31 @@ async function main() {
     return;
   }
 
-  if (!existsSync(reportsPath)) {
-    console.error(`[obsidian-sync] 리포트 경로가 없습니다: ${reportsPath}`);
-    process.exit(1);
-  }
   if (!existsSync(templatePath)) {
     console.error(`[obsidian-sync] 세션 템플릿이 없습니다: ${templatePath}`);
+    process.exit(1);
+  }
+
+  // 단일 파일 모드: handoff 워처의 --on-report 훅이 보고서 경로 하나를 넘겨 호출한다.
+  if (args.report) {
+    const reportPath = resolve(args.report);
+    if (!existsSync(reportPath)) {
+      console.error(`[obsidian-sync] 보고서가 없습니다: ${reportPath}`);
+      process.exit(1);
+    }
+    const state = loadState();
+    const key = basename(reportPath);
+    const prior = state.synced[key];
+    if (prior && !prior.baseline && prior.note) {
+      console.log(`[obsidian-sync] 이미 변환됨, 건너뜀: ${key}`);
+      return;
+    }
+    syncReport(reportPath, key, state);
+    return;
+  }
+
+  if (!existsSync(reportsPath)) {
+    console.error(`[obsidian-sync] 리포트 경로가 없습니다: ${reportsPath}`);
     process.exit(1);
   }
 
@@ -53,7 +72,7 @@ async function main() {
   if (args.backfill) {
     // 과거 미변환 리포트까지 전부 변환한다.
     for (const file of existing) {
-      if (!state.synced[file]) syncReport(file, state);
+      if (!state.synced[file]) syncReport(join(reportsPath, file), file, state);
     }
   } else {
     // 기본: 기존 리포트는 baseline(본 것)으로만 기록하고 변환하지 않는다.
@@ -89,22 +108,21 @@ async function main() {
         debounce.delete(filename);
         const fresh = loadState();
         if (fresh.synced[filename]) return;
-        syncReport(filename, fresh);
+        syncReport(join(reportsPath, filename), filename, fresh);
         saveState(fresh);
       }, 800),
     );
   });
 }
 
-function syncReport(file, state) {
-  const reportPath = join(reportsPath, file);
+function syncReport(reportPath, key, state) {
   if (!existsSync(reportPath)) return;
 
   let parsed;
   try {
     parsed = parseReport(readFileSync(reportPath, "utf8"));
   } catch (error) {
-    console.error(`[obsidian-sync] 파싱 실패 (${file}):`, error.message);
+    console.error(`[obsidian-sync] 파싱 실패 (${key}):`, error.message);
     return;
   }
 
@@ -121,9 +139,9 @@ function syncReport(file, state) {
   const notePath = uniquePath(sessionsDir, `${date}-${topic}.md`);
 
   writeFileSync(notePath, note);
-  state.synced[file] = { note: notePath, baseline: false };
+  state.synced[key] = { note: notePath, baseline: false };
   saveState(state);
-  console.log(`[obsidian-sync] ${file} → ${notePath}`);
+  console.log(`[obsidian-sync] ${key} → ${notePath}`);
 }
 
 function buildNote({ parsed, project, app, date, status, changedFiles, reportPath }) {
@@ -303,6 +321,8 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === "--once") parsed.once = true;
     else if (arg === "--backfill") parsed.backfill = true;
+    else if (arg === "--report") parsed.report = argv[++i];
+    else if (arg?.startsWith("--report=")) parsed.report = arg.slice("--report=".length);
     else if (arg === "--help" || arg === "-h") parsed.help = true;
     else if (arg === "--reports") parsed.reports = argv[++i];
     else if (arg?.startsWith("--reports=")) parsed.reports = arg.slice("--reports=".length);
@@ -319,6 +339,7 @@ function printUsage() {
   node scripts/obsidian-sync.mjs [옵션]
 
 옵션:
+  --report <path>     보고서 한 건만 변환하고 종료 (handoff --on-report 훅용)
   --once              기존 미변환 리포트만 처리하고 종료(감시 안 함)
   --backfill          기존 리포트를 baseline 처리하지 않고 전부 변환
   --reports <path>    리포트 디렉토리 (기본 .helm/outbox/reports)
