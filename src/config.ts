@@ -4,6 +4,7 @@ import { isAgentName, type AgentName } from "./harness/agents.ts";
 
 export type HelmConfig = {
   agentBinaries?: Partial<Record<AgentName, string>>;
+  defaultAgent?: AgentName;
   defaultCheckCommand?: string;
   prBaseBranch?: string;
 };
@@ -29,6 +30,7 @@ export function loadHelmConfig(repoPath: string): HelmConfig {
 
   return {
     agentBinaries: readAgentBinaries(rawConfig.agentBinaries, configPath),
+    defaultAgent: readDefaultAgent(rawConfig.defaultAgent, configPath),
     defaultCheckCommand: readOptionalString(
       rawConfig.defaultCheckCommand,
       "defaultCheckCommand",
@@ -58,6 +60,20 @@ function readAgentBinaries(value: unknown, configPath: string): HelmConfig["agen
   }
 
   return binaries;
+}
+
+function readDefaultAgent(value: unknown, configPath: string): AgentName | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const agent = readRequiredString(value, "defaultAgent", configPath);
+
+  if (!isAgentName(agent)) {
+    throw new Error(`${configPath} defaultAgent는 지원하지 않는 agent입니다: ${agent}`);
+  }
+
+  return agent;
 }
 
 function readOptionalString(value: unknown, key: string, configPath: string): string | undefined {

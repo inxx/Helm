@@ -49,6 +49,9 @@ const pollIntervalMs = args.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 // 마지막 인자로 자동 추가된다. 셸을 거치지 않으므로(spawn 배열 인자) 안전하다.
 const onReportCommand = args.onReport ?? process.env.HELM_ON_REPORT ?? null;
 
+// Helm 루트의 .helm/config.json에 지정된 기본 agent. frontmatter보다 우선한다.
+const helmDefaultAgent = readHelmDefaultAgent();
+
 ensureDirectories();
 
 if (args.help) {
@@ -222,6 +225,27 @@ function readAgent(value) {
   }
 
   return value;
+}
+
+function readHelmDefaultAgent() {
+  const configPath = join(helmRoot, ".helm", "config.json");
+
+  if (!existsSync(configPath)) {
+    return null;
+  }
+
+  let config;
+  try {
+    config = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch (error) {
+    throw new Error(`${configPath} 파일을 읽지 못했습니다: ${error.message}`);
+  }
+
+  if (config.defaultAgent === undefined) {
+    return null;
+  }
+
+  return readAgent(String(config.defaultAgent));
 }
 
 function readPollInterval(value) {
@@ -484,7 +508,7 @@ async function processNextTask() {
   try {
     const task = readTask(processingTaskPath);
     const reportName = `${timestamp(startedAt)}-${sanitizeFileName(task.id ?? task.title ?? basename(taskPath, extname(taskPath)))}.md`;
-    const agent = args.agent ?? task.agent ?? "codex";
+    const agent = args.agent ?? helmDefaultAgent ?? task.agent ?? "codex";
     const repoPath = resolve(task.repoPath ?? helmRoot);
     const prompt = buildExecutionPrompt(task);
 
