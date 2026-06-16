@@ -218,36 +218,33 @@ function sqlQuote(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-function runSqlite(sql) {
-  const dbPath = join(helmRoot, ".helm", "helm.sqlite");
+function runSqlite(dbPath, sql) {
   if (!existsSync(dbPath)) return null;
-  return spawnSync("sqlite3", [dbPath], { cwd: helmRoot, input: sql, encoding: "utf8" });
+  return spawnSync("sqlite3", [dbPath], { input: sql, encoding: "utf8" });
 }
 
-function findProjectId(repoPath) {
-  const dbPath = join(helmRoot, ".helm", "helm.sqlite");
-  if (!existsSync(dbPath)) return null;
+// repoPath의 자체 DB를 우선 사용. 없으면 Helm DB로 fallback.
+function resolveProjectDb(repoPath) {
   const resolved = resolve(repoPath);
-  const result = spawnSync(
-    "sqlite3",
-    ["-separator", "\t", dbPath, `SELECT id FROM projects WHERE root_path = ${sqlQuote(resolved)} LIMIT 1;`],
-    { cwd: helmRoot, encoding: "utf8" },
-  );
-  if (result.status !== 0) return null;
-  const line = result.stdout.trim().split("\n").find(Boolean);
-  if (line?.trim()) return line.trim();
-  // fallback: Helm project itself
-  const fallback = spawnSync(
-    "sqlite3",
-    ["-separator", "\t", dbPath, `SELECT id FROM projects WHERE root_path = ${sqlQuote(helmRoot)} LIMIT 1;`],
-    { cwd: helmRoot, encoding: "utf8" },
-  );
-  if (fallback.status !== 0) return null;
-  const fbLine = fallback.stdout.trim().split("\n").find(Boolean);
-  return fbLine?.trim() || null;
+  const candidates = [
+    { dbPath: join(resolved, ".helm", "helm.sqlite"), rootPath: resolved },
+    { dbPath: join(helmRoot, ".helm", "helm.sqlite"), rootPath: helmRoot },
+  ];
+
+  for (const { dbPath, rootPath } of candidates) {
+    if (!existsSync(dbPath)) continue;
+    const result = spawnSync(
+      "sqlite3",
+      ["-separator", "\t", dbPath, `SELECT id FROM projects WHERE root_path = ${sqlQuote(rootPath)} LIMIT 1;`],
+      { encoding: "utf8" },
+    );
+    const line = result.stdout?.trim().split("\n").find(Boolean);
+    if (line?.trim()) return { projectId: line.trim(), dbPath };
+  }
+  return null;
 }
 
-function createDbRecords({ projectId, taskId, runId, task, artifactDirRel, startedAt }) {
+function createDbRecords({ projectId, dbPath, taskId, runId, task, artifactDirRel, startedAt }) {
   const now = new Date().toISOString();
   const title = task.title ?? task.id ?? "Handoff task";
   const description = task.prompt ?? "";
@@ -257,7 +254,7 @@ function createDbRecords({ projectId, taskId, runId, task, artifactDirRel, start
   const summaryPath = join(artifactDirRel, "summary.md");
   const resultPath = join(artifactDirRel, "result.json");
 
-  runSqlite(`
+  runSqlite(dbPath, `
 BEGIN;
 INSERT OR IGNORE INTO tasks
   (id, project_id, epic_id, title, description, status, status_reason, sort_order, created_at, updated_at, last_transition_at)
@@ -279,14 +276,14 @@ COMMIT;
 `);
 }
 
-function updateDbRecords({ projectId, taskId, runId, exitCode, finishedAt }) {
+function updateDbRecords({ dbPath, taskId, runId, exitCode, finishedAt }) {
   const now = new Date().toISOString();
   const succeeded = exitCode === 0;
   const runStatus = succeeded ? "Succeeded" : "Failed";
   const taskStatus = succeeded ? "Done" : "Blocked";
   const resultStatus = succeeded ? "pass" : "fail";
 
-  runSqlite(`
+  runSqlite(dbPath, `
 BEGIN;
 UPDATE agent_runs
 SET status = ${sqlQuote(runStatus)}, exit_code = ${exitCode}, result_status = ${sqlQuote(resultStatus)},
@@ -400,9 +397,9 @@ async function processNextTask() {
 
     process.stdout.write(`Processing: ${basename(taskPath)} -> ${agent} (${repoPath})\n`);
 
-    const projectId = findProjectId(repoPath);
-    if (projectId) {
-      createDbRecords({ projectId, taskId: dbTaskId, runId, task, artifactDirRel, startedAt: startedAt.toISOString() });
+    const dbRecord = resolveProjectDb(repoPath);
+    if (dbRecord) {
+      createDbRecords({ ...dbRecord, taskId: dbTaskId, runId, task, artifactDirRel, startedAt: startedAt.toISOString() });
     }
 
     let result;
@@ -422,8 +419,8 @@ async function processNextTask() {
     if (result.stderr) writeFileSync(join(helmRoot, artifactDirRel, "stderr.log"), result.stderr);
 
     // SQLite bridge: 실행 후 상태 업데이트
-    if (projectId) {
-      updateDbRecords({ projectId, taskId: dbTaskId, runId, exitCode: result.code, finishedAt: finishedAt.toISOString() });
+    if (dbRecord) {
+      updateDbRecords({ dbPath: dbRecord.dbPath, taskId: dbTaskId, runId, exitCode: result.code, finishedAt: finishedAt.toISOString() });
     }
 
     const report = formatReport({
@@ -450,9 +447,9 @@ async function processNextTask() {
     const failedTarget = uniquePath(failedPath, basename(processingTaskPath));
 
     // SQLite bridge: 예외 발생 시에도 실패 상태로 업데이트
-    const projectId = findProjectId(helmRoot);
-    if (projectId) {
-      updateDbRecords({ projectId, taskId: dbTaskId, runId, exitCode: 1, finishedAt: finishedAt.toISOString() });
+    const fallbackDb = resolveProjectDb(helmRoot);
+    if (fallbackDb) {
+      updateDbRecords({ dbPath: fallbackDb.dbPath, taskId: dbTaskId, runId, exitCode: 1, finishedAt: finishedAt.toISOString() });
     }
 
     writeFileSync(
