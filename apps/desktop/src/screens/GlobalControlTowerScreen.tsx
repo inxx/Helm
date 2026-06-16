@@ -40,6 +40,15 @@ export function GlobalControlTowerScreen({ onFocusProject, onFocusTask, onOpenPr
     return () => window.clearInterval(timer);
   }, []);
 
+  // 핸드오프 watcher는 외부 프로세스로 Tauri 이벤트를 발행하지 않으므로
+  // 10초마다 폴링해서 DB 변경을 반영한다.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!loading) setRefreshKey((value) => value + 1);
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [loading]);
+
   useEffect(() => {
     let disposed = false;
     setLoading(true);
