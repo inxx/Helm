@@ -69,7 +69,7 @@ export function buildAgentCommand(
   }
 
   if (agent === "claude") {
-    return { command, args: ["-p", prompt] };
+    return { command, args: ["-p", "--dangerously-skip-permissions", prompt] };
   }
 
   return { command, args: ["-p", prompt] };
