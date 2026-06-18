@@ -898,17 +898,10 @@ h3 {
   grid-template-columns: minmax(0, 1fr) auto;
   flex-shrink: 0;
   gap: 10px;
+  width: 100%;
   border-top: 1px solid var(--line);
   background: var(--surface);
   padding: 12px 14px;
-}
-
-.session-orchestrator-composer.empty {
-  box-sizing: border-box;
-  width: min(100%, 760px);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-1);
 }
 
 .session-orchestrator-composer textarea {
@@ -1080,12 +1073,14 @@ h3 {
 
 .session-chat-empty {
   display: grid;
-  flex: 1;
+  flex: 1 1 auto;
   width: 100%;
   min-width: 0;
+  min-height: 0;
   place-content: center;
   justify-items: center;
   gap: 8px;
+  overflow-y: auto;
   color: var(--text-muted);
   padding: 22px 18px;
   text-align: center;

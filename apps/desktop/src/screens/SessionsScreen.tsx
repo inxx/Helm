@@ -493,23 +493,25 @@ export function SessionsScreen({
             </form>
           </>
         ) : (
-          <div className="session-chat-empty">
-            <MessageSquare size={20} />
-            <h2>오케스트레이터와 대화하세요</h2>
-            <p>새 작업 지시를 보내거나, 세션을 선택해 상세 진행사항을 확인합니다.</p>
-            {orchestratorMessages.map((message) => (
-              <SessionMessage
-                icon={message.role === "user" ? "user" : "bot"}
-                key={message.id}
-                role={message.role}
-                timestamp={null}
-                title={message.role === "user" ? "요청" : "오케스트레이터"}
-              >
-                <p>{message.content}</p>
-              </SessionMessage>
-            ))}
+          <>
+            <div className="session-chat-empty">
+              <MessageSquare size={20} />
+              <h2>오케스트레이터와 대화하세요</h2>
+              <p>새 작업 지시를 보내거나, 세션을 선택해 상세 진행사항을 확인합니다.</p>
+              {orchestratorMessages.map((message) => (
+                <SessionMessage
+                  icon={message.role === "user" ? "user" : "bot"}
+                  key={message.id}
+                  role={message.role}
+                  timestamp={null}
+                  title={message.role === "user" ? "요청" : "오케스트레이터"}
+                >
+                  <p>{message.content}</p>
+                </SessionMessage>
+              ))}
+            </div>
             <form
-              className="session-orchestrator-composer empty"
+              className="session-orchestrator-composer"
               onSubmit={(event) => {
                 event.preventDefault();
                 void submitOrchestratorInstruction();
@@ -519,8 +521,13 @@ export function SessionsScreen({
                 ref={composerRef}
                 disabled={orchestratorBusy}
                 onChange={(event) => setOrchestratorInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+                  event.preventDefault();
+                  void submitOrchestratorInstruction();
+                }}
                 placeholder="오케스트레이터에게 새 작업 지시..."
-                rows={3}
+                rows={2}
                 value={orchestratorInput}
               />
               <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
@@ -528,7 +535,7 @@ export function SessionsScreen({
                 <span>{orchestratorBusy ? "전송 중" : "보내기"}</span>
               </button>
             </form>
-          </div>
+          </>
         )}
       </section>
 
