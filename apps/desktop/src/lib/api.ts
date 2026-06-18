@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentRunSummary,
+  AgentSessionSummary,
   AppSettings,
   AiConnection,
   AiConnectionCheckResult,
@@ -196,6 +197,9 @@ export const api = {
   listProjectRuns(projectId: string, limit = 120) {
     return invoke<AgentRunSummary[]>("list_project_runs", { projectId, limit });
   },
+  listAgentSessions(projectId: string, limit = 120) {
+    return invoke<AgentSessionSummary[]>("list_agent_sessions", { projectId, limit });
+  },
   listTaskTimeline(projectId: string, taskId: string) {
     return invoke<TaskTimelineEntry[]>("list_task_timeline", { projectId, taskId });
   },
@@ -268,7 +272,7 @@ export const api = {
       nodeBinPath,
     });
   },
-  listTerminalPtys(projectId: string) {
+  listTerminalPtys(projectId?: string | null) {
     return invoke<TerminalPtySummary[]>("list_terminal_ptys", { projectId });
   },
   getTerminalPtySnapshot(terminalId: string) {

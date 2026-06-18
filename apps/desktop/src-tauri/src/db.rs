@@ -1,19 +1,21 @@
 use crate::git;
 use crate::models::{
-    AgentRunSummary, ApprovalSummary, AuditLogEntry, CommandError, CommandResult,
-    CoordinationExportSummary, CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput,
-    DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitFileStatus, PlanDraftRevisionSummary,
-    PlanningApprovalSummary, PlanningMaterializationSummary, PlanningMessageSummary,
-    PlanningSessionDetail, PlanningSessionSummary, ProjectSettingsPatch, ProjectSummary,
-    RunEventSummary, SavePlanDraftRevisionInput, SaveTerminalScriptInput, TaskCounts,
-    TaskExternalRefInput, TaskExternalRefSummary, TaskGraphConflictSummary, TaskGraphExportSummary,
-    TaskSummary, TaskTimelineEntry, TaskWorktreeSummary, TerminalSavedScriptSummary,
+    AgentRunSummary, AgentSessionSummary, ApprovalSummary, AuditLogEntry, CommandError,
+    CommandResult, CoordinationExportSummary, CreateEpicInput, CreatePlanningSessionInput,
+    CreateTaskInput, DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitFileStatus,
+    PlanDraftRevisionSummary, PlanningApprovalSummary, PlanningMaterializationSummary,
+    PlanningMessageSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectSettingsPatch,
+    ProjectSummary, RunEventSummary, SavePlanDraftRevisionInput, SaveTerminalScriptInput,
+    TaskCounts, TaskExternalRefInput, TaskExternalRefSummary, TaskGraphConflictSummary,
+    TaskGraphExportSummary, TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
+    TerminalSavedScriptSummary,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
+use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -719,7 +721,14 @@ pub fn effective_settings(conn: &Connection, project_id: &str) -> CommandResult<
         jira_config: settings.remove("jiraConfig"),
         obsidian_vault_path: settings
             .remove("obsidianVaultPath")
-            .and_then(|value| value.as_str().map(str::to_string)),
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_string)
+            })
+            .or_else(default_obsidian_vault_path),
         token_budget: settings
             .remove("tokenBudget")
             .and_then(|value| value.as_i64()),
@@ -728,6 +737,22 @@ pub fn effective_settings(conn: &Connection, project_id: &str) -> CommandResult<
             .and_then(|value| value.as_i64())
             .or(Some(30)),
     })
+}
+
+fn default_obsidian_vault_path() -> Option<String> {
+    #[cfg(test)]
+    {
+        return None;
+    }
+    #[cfg(not(test))]
+    {
+        let home = env::var("HOME").ok()?;
+        let path = Path::new(&home)
+            .join("Documents")
+            .join("Obsidian Vault")
+            .join("Claude");
+        path.is_dir().then(|| path.to_string_lossy().to_string())
+    }
 }
 
 pub fn update_settings(
@@ -1055,6 +1080,17 @@ pub fn save_plan_draft_revision(
         .unwrap_or_else(|| plan_markdown_from_draft_json(&input.draft_json, &session.goal_text));
     let artifact_path = planning_draft_artifact_path(session_id, revision);
     let content_hash = stable_content_hash(&plan_markdown);
+    let obsidian_artifact_path = write_obsidian_plan_artifact(
+        conn,
+        project_id,
+        session_id,
+        revision,
+        &title,
+        &timestamp,
+        &artifact_path,
+        &content_hash,
+        &plan_markdown,
+    )?;
     let draft_json = serde_json::to_string(&input.draft_json).map_err(|err| {
         CommandError::with_details(
             "ValidationFailed",
@@ -1161,7 +1197,8 @@ pub fn save_plan_draft_revision(
             "taskCount": validation.task_count,
             "taskGraphCount": validation.task_graph_count,
             "barrierCount": validation.barrier_count,
-            "verificationGateCount": validation.verification_gate_count
+            "verificationGateCount": validation.verification_gate_count,
+            "obsidianArtifactPath": obsidian_artifact_path
         }),
     )?;
     tx.commit().map_err(|err| {
@@ -1251,7 +1288,7 @@ pub fn materialize_plan_draft(
                id, project_id, title, description, status, sort_order,
                created_at, updated_at, last_transition_at
              )
-             VALUES (?1, ?2, ?3, ?4, 'Planned', ?5, ?6, ?6, ?6)",
+             VALUES (?1, ?2, ?3, ?4, 'Ready', ?5, ?6, ?6, ?6)",
             params![
                 task_id,
                 project_id,
@@ -1262,6 +1299,22 @@ pub fn materialize_plan_draft(
             ],
         )
         .map_err(|err| CommandError::database("계획 Task를 저장하지 못했습니다.", err))?;
+        tx.execute(
+            "INSERT INTO approvals (
+               id, project_id, entity_type, entity_id, approval_type, status,
+               requested_reason, decision_reason, requested_at, decided_at, created_at, updated_at
+             )
+             VALUES (?1, ?2, 'Task', ?3, 'PlanApproval', 'Approved', ?4, ?5, ?6, ?6, ?6, ?6)",
+            params![
+                new_id(),
+                project_id,
+                task_id,
+                "Approved Plan Document materialized this Task",
+                "Plan Document approval covers generated Task",
+                timestamp
+            ],
+        )
+        .map_err(|err| CommandError::database("계획 Task 승인 기록을 저장하지 못했습니다.", err))?;
         insert_planning_task_refs(&tx, project_id, &task_id, &session, &draft, draft_task)?;
         tx.execute(
             "INSERT INTO planning_materialization_items (
@@ -2648,6 +2701,45 @@ pub fn run_host_role(
         return Err(err);
     }
 
+    let summary_text = fs::read_to_string(artifact_path.join("summary.md")).unwrap_or_default();
+    match write_obsidian_run_artifact(
+        conn,
+        project_id,
+        &task,
+        &run,
+        final_status,
+        result_status.as_deref(),
+        changed_files.len(),
+        &finished_at,
+        &summary_text,
+    ) {
+        Ok(Some(path)) => {
+            append_and_emit_run_event(
+                conn,
+                project_id,
+                &run.task_id,
+                run_id,
+                "artifact",
+                "Obsidian run document saved",
+                json!({ "obsidianArtifactPath": path }),
+                &mut event_sink,
+            )?;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            append_and_emit_run_event(
+                conn,
+                project_id,
+                &run.task_id,
+                run_id,
+                "system",
+                "Obsidian run document failed",
+                json!({ "error": error.message }),
+                &mut event_sink,
+            )?;
+        }
+    }
+
     append_and_emit_run_event(
         conn,
         project_id,
@@ -3108,6 +3200,90 @@ pub fn list_project_runs(
         .query_map(params![project_id, bounded_limit], map_agent_run)
         .map_err(|err| CommandError::database("프로젝트 실행 기록을 읽지 못했습니다.", err))?;
     collect_rows(rows, "프로젝트 실행 기록을 읽지 못했습니다.")
+}
+
+pub fn list_agent_sessions(
+    conn: &Connection,
+    project_id: &str,
+    limit: i64,
+) -> CommandResult<Vec<AgentSessionSummary>> {
+    ensure_project_exists(conn, project_id)?;
+    let bounded_limit = limit.clamp(1, 500);
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                agent_runs.id,
+                agent_runs.project_id,
+                agent_runs.task_id,
+                agent_runs.id,
+                COALESCE(NULLIF(tasks.title, ''), agent_runs.role_id || ' session'),
+                agent_runs.status,
+                agent_runs.provider,
+                agent_runs.connection_id,
+                agent_runs.model,
+                agent_runs.role_id,
+                tasks.status,
+                task_worktrees.branch_name,
+                task_worktrees.worktree_path,
+                COALESCE(
+                  (SELECT run_events.created_at
+                     FROM run_events
+                    WHERE run_events.run_id = agent_runs.id
+                      AND run_events.kind NOT IN ('stdout', 'stderr')
+                    ORDER BY run_events.seq DESC
+                    LIMIT 1),
+                  agent_runs.heartbeat_at,
+                  agent_runs.finished_at,
+                  agent_runs.started_at,
+                  agent_runs.updated_at,
+                  agent_runs.created_at
+                ),
+                CASE
+                  WHEN EXISTS (
+                    SELECT 1 FROM approvals
+                     WHERE approvals.project_id = agent_runs.project_id
+                       AND approvals.entity_type = 'AgentRun'
+                       AND approvals.entity_id = agent_runs.id
+                       AND approvals.approval_type = 'RunApproval'
+                       AND approvals.status = 'Pending'
+                  ) THEN 'approval'
+                  WHEN agent_runs.status IN ('Queued', 'Prepared') THEN 'start'
+                  WHEN agent_runs.status IN ('Running', 'NeedsInput') THEN 'watch'
+                  WHEN agent_runs.status IN ('Succeeded', 'Completed') THEN 'review'
+                  WHEN agent_runs.status IN ('Failed', 'Cancelled') THEN 'retry'
+                  ELSE 'open'
+                END,
+                NULL,
+                (SELECT COUNT(*) FROM run_events WHERE run_events.run_id = agent_runs.id),
+                agent_runs.created_at,
+                agent_runs.updated_at
+             FROM agent_runs
+             LEFT JOIN tasks ON tasks.id = agent_runs.task_id AND tasks.project_id = agent_runs.project_id
+             LEFT JOIN task_worktrees
+               ON task_worktrees.task_id = agent_runs.task_id
+              AND task_worktrees.project_id = agent_runs.project_id
+              AND task_worktrees.status = 'Active'
+             WHERE agent_runs.project_id = ?1
+             ORDER BY COALESCE(
+                (SELECT run_events.created_at
+                   FROM run_events
+                  WHERE run_events.run_id = agent_runs.id
+                    AND run_events.kind NOT IN ('stdout', 'stderr')
+                  ORDER BY run_events.seq DESC
+                  LIMIT 1),
+                agent_runs.heartbeat_at,
+                agent_runs.finished_at,
+                agent_runs.started_at,
+                agent_runs.updated_at,
+                agent_runs.created_at
+             ) DESC
+             LIMIT ?2",
+        )
+        .map_err(|err| CommandError::database("세션 요약을 읽지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id, bounded_limit], map_agent_session)
+        .map_err(|err| CommandError::database("세션 요약을 읽지 못했습니다.", err))?;
+    collect_rows(rows, "세션 요약을 읽지 못했습니다.")
 }
 
 pub fn task_graph_path(root: &Path) -> PathBuf {
@@ -4749,6 +4925,30 @@ fn map_agent_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunSummary> {
     })
 }
 
+fn map_agent_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentSessionSummary> {
+    Ok(AgentSessionSummary {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        task_id: row.get(2)?,
+        source_run_id: row.get(3)?,
+        title: row.get(4)?,
+        status: row.get(5)?,
+        provider: row.get(6)?,
+        connection_id: row.get(7)?,
+        model: row.get(8)?,
+        role_id: row.get(9)?,
+        task_status: row.get(10)?,
+        branch: row.get(11)?,
+        worktree_path: row.get(12)?,
+        last_signal_at: row.get(13)?,
+        next_action: row.get(14)?,
+        changed_file_count: row.get(15)?,
+        event_count: row.get(16)?,
+        created_at: row.get(17)?,
+        updated_at: row.get(18)?,
+    })
+}
+
 fn map_run_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunEventSummary> {
     let payload_raw: String = row.get(7)?;
     Ok(RunEventSummary {
@@ -5800,6 +6000,174 @@ fn planning_title_from_goal(goal: &str) -> String {
 
 fn planning_draft_artifact_path(session_id: &str, revision: i64) -> String {
     format!(".helm/planning/{session_id}/draft-v{revision}.md")
+}
+
+fn write_obsidian_plan_artifact(
+    conn: &Connection,
+    project_id: &str,
+    session_id: &str,
+    revision: i64,
+    title: &str,
+    timestamp: &str,
+    helm_artifact_path: &str,
+    content_hash: &str,
+    plan_markdown: &str,
+) -> CommandResult<Option<String>> {
+    let settings = effective_settings(conn, project_id)?;
+    let Some(vault_path) = settings
+        .obsidian_vault_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(None);
+    };
+    let project = get_project(conn, project_id)?;
+    let date = timestamp.split('T').next().unwrap_or("unknown-date");
+    let session_short = session_id.chars().take(8).collect::<String>();
+    let file_name = format!(
+        "{}-{}-{}-draft-v{}.md",
+        date,
+        slug_for_path(title),
+        session_short,
+        revision
+    );
+    let relative_path = PathBuf::from("projects")
+        .join(slug_for_path(&project.name))
+        .join("desktop")
+        .join("plans")
+        .join(file_name);
+    let path = Path::new(vault_path).join(&relative_path);
+    let parent = path.parent().ok_or_else(|| {
+        CommandError::validation("Obsidian Plan Document 경로가 올바르지 않습니다.")
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|err| CommandError::io("Obsidian Plan Document 폴더를 만들지 못했습니다.", err))?;
+    let content = format!(
+        "---\n\
+         date: {timestamp}\n\
+         project: {}\n\
+         app: desktop\n\
+         title: {}\n\
+         status: draft\n\
+         helmSessionId: {session_id}\n\
+         helmDraftRevision: {revision}\n\
+         helmArtifactPath: {helm_artifact_path}\n\
+         contentHash: {content_hash}\n\
+         ---\n\n\
+         {plan_markdown}\n",
+        project.name,
+        title.replace('\n', " ")
+    );
+    let tmp_path = path.with_extension("md.tmp");
+    fs::write(&tmp_path, content)
+        .map_err(|err| CommandError::io("Obsidian Plan Document를 저장하지 못했습니다.", err))?;
+    fs::rename(&tmp_path, &path)
+        .map_err(|err| CommandError::io("Obsidian Plan Document를 교체하지 못했습니다.", err))?;
+    Ok(Some(relative_path.to_string_lossy().to_string()))
+}
+
+fn write_obsidian_run_artifact(
+    conn: &Connection,
+    project_id: &str,
+    task: &TaskSummary,
+    run: &AgentRunSummary,
+    final_status: &str,
+    result_status: Option<&str>,
+    changed_file_count: usize,
+    finished_at: &str,
+    summary: &str,
+) -> CommandResult<Option<String>> {
+    let settings = effective_settings(conn, project_id)?;
+    let Some(vault_path) = settings
+        .obsidian_vault_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(None);
+    };
+    let project = get_project(conn, project_id)?;
+    let date = finished_at.split('T').next().unwrap_or("unknown-date");
+    let run_short = run.id.chars().take(8).collect::<String>();
+    let file_name = format!(
+        "{}-{}-{}-{}.md",
+        date,
+        slug_for_path(&task.title),
+        run_short,
+        slug_for_path(&run.role_id)
+    );
+    let relative_path = PathBuf::from("projects")
+        .join(slug_for_path(&project.name))
+        .join("desktop")
+        .join("sessions")
+        .join(file_name);
+    let path = Path::new(vault_path).join(&relative_path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| CommandError::validation("Obsidian 실행 문서 경로가 올바르지 않습니다."))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| CommandError::io("Obsidian 실행 문서 폴더를 만들지 못했습니다.", err))?;
+    let summary = if summary.trim().is_empty() {
+        "_요약 없음_"
+    } else {
+        summary.trim()
+    };
+    let content = format!(
+        "---\n\
+         date: {finished_at}\n\
+         project: {}\n\
+         app: desktop\n\
+         title: {}\n\
+         status: {final_status}\n\
+         resultStatus: {}\n\
+         helmTaskId: {}\n\
+         helmRunId: {}\n\
+         roleId: {}\n\
+         helmArtifactPath: {}\n\
+         changedFileCount: {changed_file_count}\n\
+         ---\n\n\
+         # {}\n\n\
+         ## 실행 요약\n\n\
+         {summary}\n",
+        project.name,
+        task.title.replace('\n', " "),
+        result_status.unwrap_or("-"),
+        task.id,
+        run.id,
+        run.role_id,
+        run.artifact_dir,
+        task.title
+    );
+    let tmp_path = path.with_extension("md.tmp");
+    fs::write(&tmp_path, content)
+        .map_err(|err| CommandError::io("Obsidian 실행 문서를 저장하지 못했습니다.", err))?;
+    fs::rename(&tmp_path, &path)
+        .map_err(|err| CommandError::io("Obsidian 실행 문서를 교체하지 못했습니다.", err))?;
+    Ok(Some(relative_path.to_string_lossy().to_string()))
+}
+
+fn slug_for_path(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+    for ch in value.trim().chars() {
+        if ch.is_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            previous_dash = false;
+        } else if !previous_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_dash = true;
+        }
+        if slug.chars().count() >= 48 {
+            break;
+        }
+    }
+    let trimmed = slug.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "plan".to_string()
+    } else {
+        trimmed
+    }
 }
 
 fn write_planning_artifact(root: &Path, relative_path: &str, content: &str) -> CommandResult<()> {
@@ -8434,6 +8802,14 @@ impl ResolvedRolePolicy {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamInstructionDoc {
+    path: String,
+    content_hash: String,
+    content: String,
+}
+
 fn resolve_role_policy(root: &Path, role_policies: &Value, role_id: &str) -> ResolvedRolePolicy {
     let mut result = ResolvedRolePolicy {
         role_id: role_id.to_string(),
@@ -8481,6 +8857,82 @@ fn resolve_role_policy(root: &Path, role_policies: &Value, role_id: &str) -> Res
         }
     }
     result
+}
+
+fn resolve_team_instruction_docs(root: &Path) -> Vec<TeamInstructionDoc> {
+    let mut docs = ["AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md"]
+        .into_iter()
+        .filter_map(|path| {
+            let raw = fs::read_to_string(root.join(path)).ok()?;
+            let content = raw.trim();
+            if content.is_empty() {
+                return None;
+            }
+            Some(TeamInstructionDoc {
+                path: path.to_string(),
+                content_hash: stable_content_hash(content),
+                content: truncate_for_context(content, 8000),
+            })
+        })
+        .collect::<Vec<_>>();
+    docs.extend(resolve_project_skill_docs(root));
+    docs
+}
+
+fn resolve_project_skill_docs(root: &Path) -> Vec<TeamInstructionDoc> {
+    let mut skill_paths = Vec::new();
+    for base in [
+        ".agents/skills",
+        ".codex/skills",
+        ".claude/skills",
+        "skills",
+    ] {
+        let dir = root.join(base);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let skill_path = entry.path().join("SKILL.md");
+            if skill_path.is_file() {
+                skill_paths.push((
+                    format!("{}/{}", base, entry.file_name().to_string_lossy()),
+                    skill_path,
+                ));
+            }
+        }
+    }
+    skill_paths.sort_by(|left, right| left.0.cmp(&right.0));
+    skill_paths
+        .into_iter()
+        .take(12)
+        .filter_map(|(skill_dir, path)| {
+            let raw = fs::read_to_string(path).ok()?;
+            let content = raw.trim();
+            if content.is_empty() {
+                return None;
+            }
+            Some(TeamInstructionDoc {
+                path: format!("{skill_dir}/SKILL.md"),
+                content_hash: stable_content_hash(content),
+                content: truncate_for_context(content, 8000),
+            })
+        })
+        .collect()
+}
+
+fn team_instruction_markdown(docs: &[TeamInstructionDoc]) -> String {
+    if docs.is_empty() {
+        return "- 프로젝트 팀 지시 문서 없음".to_string();
+    }
+    docs.iter()
+        .map(|doc| {
+            format!(
+                "### {}\n\n- contentHash: {}\n\n{}",
+                doc.path, doc.content_hash, doc.content
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn validate_repo_relative_policy_path(path: &str) -> CommandResult<()> {
@@ -8538,6 +8990,7 @@ fn build_context_pack_markdown(
     let contract = role_context_contract(role_id);
     let changed_files = git::changed_files(root)?;
     let recent_commits = git::recent_commits(root, 5)?;
+    let team_docs = resolve_team_instruction_docs(root);
     let refs = task
         .external_refs
         .iter()
@@ -8575,6 +9028,7 @@ fn build_context_pack_markdown(
          ### Blocking Conditions\n\n{}\n\n\
          ### Forbidden\n\n{}\n\n\
          ## Role Policy\n\n{}\n\n\
+         ## Team Instructions\n\n{}\n\n\
          ## Worktree Setup\n\n{}\n\n\
          ## External Refs\n\n{}\n\n\
          ## Changed Files\n\n{}\n\n\
@@ -8602,6 +9056,7 @@ fn build_context_pack_markdown(
         markdown_list(contract.blocking_conditions.as_ref()),
         markdown_list(contract.forbidden.as_ref()),
         role_policy_markdown(role_policy),
+        team_instruction_markdown(&team_docs),
         worktree_setup_markdown(worktree_setup),
         if refs.is_empty() {
             "- 없음"
@@ -8630,6 +9085,7 @@ fn build_context_manifest(
     role_policy: Option<&ResolvedRolePolicy>,
 ) -> CommandResult<Value> {
     let contract = role_context_contract(role_id);
+    let team_docs = resolve_team_instruction_docs(root);
     Ok(json!({
         "schemaVersion": 1,
         "generatedAt": now(),
@@ -8638,6 +9094,7 @@ fn build_context_manifest(
         "roleId": role_id,
         "roleContract": contract.to_json(role_id),
         "rolePolicy": role_policy.map(ResolvedRolePolicy::to_json),
+        "teamInstructions": team_docs,
         "worktree": worktree,
         "worktreeSetup": worktree_setup.cloned(),
         "git": {
@@ -8652,6 +9109,7 @@ fn build_context_manifest(
             "git.recentCommits",
             "roleContract",
             "rolePolicy",
+            "teamInstructions",
             "worktreeSetup"
         ],
         "expectedArtifacts": [
@@ -9246,6 +9704,89 @@ mod tests {
         })
     }
 
+    fn valid_multi_task_planning_draft() -> Value {
+        json!({
+            "title": "Multi task planning",
+            "summary": "채팅으로 들어온 작업을 여러 Task로 나누고 모두 실행 준비한다.",
+            "scope": ["chat", "planning", "handoff"],
+            "tasks": [
+                {
+                    "id": "task-1",
+                    "title": "Chat intake",
+                    "description": "오케스트레이터 입력을 계획 세션으로 넘긴다.",
+                    "subtasks": ["입력 저장", "계획자 호출"],
+                    "acceptanceCriteria": ["채팅 입력이 계획 세션으로 생성된다."],
+                    "risks": [],
+                    "testPlan": ["npm test"]
+                },
+                {
+                    "id": "task-2",
+                    "title": "Agent handoff",
+                    "description": "승인된 계획의 Task를 다음 role 실행으로 넘긴다.",
+                    "subtasks": ["Task materialize", "다음 role queue"],
+                    "acceptanceCriteria": ["생성 Task가 모두 Queued run을 가진다."],
+                    "risks": [],
+                    "testPlan": ["cargo test"]
+                }
+            ],
+            "openQuestions": [],
+            "risks": [],
+            "executablePlan": {
+                "taskGraph": [
+                    { "id": "task-1", "title": "Chat intake", "dependsOn": [], "parallelizable": true, "batch": "batch-1" },
+                    { "id": "task-2", "title": "Agent handoff", "dependsOn": ["task-1"], "parallelizable": false, "batch": "batch-2" }
+                ],
+                "taskCards": [
+                    {
+                        "id": "task-1",
+                        "title": "Chat intake",
+                        "ownerRole": "coder",
+                        "goal": "오케스트레이터 입력을 계획 세션으로 넘긴다.",
+                        "inputs": ["chat message"],
+                        "outputs": ["planning session"],
+                        "acceptanceCriteria": ["채팅 입력이 계획 세션으로 생성된다."],
+                        "verificationGates": ["gate-1"]
+                    },
+                    {
+                        "id": "task-2",
+                        "title": "Agent handoff",
+                        "ownerRole": "coder",
+                        "goal": "승인된 계획의 Task를 다음 role 실행으로 넘긴다.",
+                        "inputs": ["approved plan"],
+                        "outputs": ["queued runs"],
+                        "acceptanceCriteria": ["생성 Task가 모두 Queued run을 가진다."],
+                        "verificationGates": ["gate-2"]
+                    }
+                ],
+                "ownershipMap": [
+                    {
+                        "ownerRole": "coder",
+                        "responsibilities": ["구현", "검증"],
+                        "artifacts": ["code", "tests"],
+                        "approver": "code_reviewer"
+                    }
+                ],
+                "barriers": [],
+                "verificationGates": [
+                    {
+                        "id": "gate-1",
+                        "title": "Chat intake check",
+                        "type": "command",
+                        "command": "npm test",
+                        "requiredEvidence": ["test output"]
+                    },
+                    {
+                        "id": "gate-2",
+                        "title": "Handoff check",
+                        "type": "command",
+                        "command": "cargo test",
+                        "requiredEvidence": ["test output"]
+                    }
+                ]
+            }
+        })
+    }
+
     #[test]
     fn planning_session_revision_and_materialization_are_durable() {
         let repo = test_repo();
@@ -9264,6 +9805,25 @@ mod tests {
         .expect("create planning session");
         assert_eq!(session.session.status, "Drafting");
         assert_eq!(session.messages.len(), 1);
+        let vault = repo.root.join("obsidian-vault");
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: None,
+                ai_connections: None,
+                role_assignments: None,
+                role_policies: None,
+                conductor_config: None,
+                worktree_root: None,
+                worktree_setup: None,
+                jira_config: None,
+                obsidian_vault_path: Some(Some(vault.to_string_lossy().to_string())),
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("enable obsidian vault");
 
         let saved = save_plan_draft_revision(
             &mut conn,
@@ -9302,6 +9862,21 @@ mod tests {
             .root
             .join(draft.artifact_path.as_ref().expect("artifact path"))
             .exists());
+        let obsidian_plan_dir = vault
+            .join("projects")
+            .join(slug_for_path(&project.name))
+            .join("desktop")
+            .join("plans");
+        let obsidian_files = fs::read_dir(&obsidian_plan_dir)
+            .expect("obsidian plan dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("obsidian files");
+        assert_eq!(obsidian_files.len(), 1);
+        let obsidian_content =
+            fs::read_to_string(obsidian_files[0].path()).expect("obsidian plan content");
+        assert!(obsidian_content.contains("helmDraftRevision: 1"));
+        assert!(obsidian_content.contains("helmArtifactPath: .helm/planning/"));
+        assert!(obsidian_content.contains("# DB backed planning"));
 
         let sessions = list_planning_sessions(&conn, &project.id).expect("list sessions");
         assert_eq!(sessions.len(), 1);
@@ -9334,6 +9909,14 @@ mod tests {
         let materialized =
             materialize_plan_draft(&mut conn, &project.id, &draft.id).expect("materialize draft");
         assert_eq!(materialized.task_ids.len(), 1);
+        let first_task_id = materialized.task_ids[0].clone();
+        let first_task = get_task(&conn, &first_task_id).expect("materialized task");
+        assert_eq!(first_task.status, "Ready");
+        let next_run =
+            prepare_next_role_context(&mut conn, &repo.root, &project.id, &first_task_id)
+                .expect("materialized task starts next role");
+        assert_eq!(next_run.role_id, "coder");
+        assert_eq!(next_run.status, "Queued");
         let materialized_again =
             materialize_plan_draft(&mut conn, &project.id, &draft.id).expect("idempotent");
         assert_eq!(materialized_again.id, materialized.id);
@@ -9685,6 +10268,122 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![latest_run_id.as_str(), older_run_id.as_str(),]
         );
+    }
+
+    #[test]
+    fn materialized_multi_task_plan_can_queue_every_created_task() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let session = create_planning_session(
+            &mut conn,
+            &project.id,
+            CreatePlanningSessionInput {
+                title: Some("Multi task planning".to_string()),
+                goal_text: "채팅 지시를 여러 Task로 나누고 모두 실행 준비한다.".to_string(),
+                jira_ref: None,
+                jira_state: None,
+            },
+        )
+        .expect("create planning session");
+        let saved = save_plan_draft_revision(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &session.session.id,
+            SavePlanDraftRevisionInput {
+                draft_json: valid_multi_task_planning_draft(),
+                plan_markdown: Some("# Multi task planning".to_string()),
+                planner_message: Some("multi draft 저장".to_string()),
+            },
+        )
+        .expect("save draft");
+        let draft_id = saved
+            .session
+            .current_draft_id
+            .as_deref()
+            .expect("draft id")
+            .to_string();
+        approve_plan_draft(
+            &mut conn,
+            &project.id,
+            &draft_id,
+            DecidePlanDraftInput {
+                reason: Some("multi approval".to_string()),
+            },
+        )
+        .expect("approve draft");
+        let materialized =
+            materialize_plan_draft(&mut conn, &project.id, &draft_id).expect("materialize");
+        assert_eq!(materialized.task_ids.len(), 2);
+
+        let mut queued_roles = Vec::new();
+        for task_id in &materialized.task_ids {
+            let run = prepare_next_role_context(&mut conn, &repo.root, &project.id, task_id)
+                .expect("queue next role");
+            assert_eq!(run.status, "Queued");
+            queued_roles.push(run.role_id);
+        }
+
+        assert_eq!(queued_roles, vec!["coder", "coder"]);
+    }
+
+    #[test]
+    fn list_agent_sessions_projects_runs_into_session_cards() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let run_id = new_id();
+
+        conn.execute(
+            "INSERT INTO task_worktrees (
+               id, project_id, task_id, branch_name, worktree_path, base_branch, head_hash,
+               status, created_at, updated_at
+             )
+             VALUES (?1, ?2, ?3, 'feature/acp-session', '/tmp/helm-acp-session', 'main', NULL,
+                     'Active', '2026-06-18T00:00:00Z', '2026-06-18T00:00:00Z')",
+            params![new_id(), &project.id, &task.id],
+        )
+        .expect("worktree");
+        conn.execute(
+            "INSERT INTO agent_runs (
+               id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+               stdout_log_path, stderr_log_path, provider, connection_id, model, started_at, created_at, updated_at
+             )
+             VALUES (?1, ?2, ?3, 'coder', 'Running', '.helm/artifacts/runs/session',
+                     'summary.md', 'structured-result.json', 'stdout.log', 'stderr.log',
+                     'codex', 'codex-local', 'gpt-5', '2026-06-18T00:00:00Z',
+                     '2026-06-18T00:00:00Z', '2026-06-18T00:00:00Z')",
+            params![&run_id, &project.id, &task.id],
+        )
+        .expect("run");
+        conn.execute(
+            "INSERT INTO run_events (
+               id, project_id, task_id, run_id, seq, kind, message, payload_json, created_at
+             )
+             VALUES (?1, ?2, ?3, ?4, 1, 'status', 'working', '{}', '2026-06-18T00:01:00Z')",
+            params![new_id(), &project.id, &task.id, &run_id],
+        )
+        .expect("event");
+
+        let sessions = list_agent_sessions(&conn, &project.id, 10).expect("sessions");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, run_id);
+        assert_eq!(sessions[0].source_run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(sessions[0].title, task.title);
+        assert_eq!(sessions[0].provider.as_deref(), Some("codex"));
+        assert_eq!(sessions[0].model.as_deref(), Some("gpt-5"));
+        assert_eq!(sessions[0].branch.as_deref(), Some("feature/acp-session"));
+        assert_eq!(
+            sessions[0].worktree_path.as_deref(),
+            Some("/tmp/helm-acp-session")
+        );
+        assert_eq!(
+            sessions[0].last_signal_at.as_deref(),
+            Some("2026-06-18T00:01:00Z")
+        );
+        assert_eq!(sessions[0].next_action, "watch");
+        assert_eq!(sessions[0].event_count, 1);
     }
 
     #[test]
@@ -10146,6 +10845,108 @@ mod tests {
     }
 
     #[test]
+    fn prepare_role_context_includes_project_team_instruction_docs() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        fs::write(
+            repo.root.join("AGENTS.md"),
+            "# Team Skill\n\n- 프로젝트 공용 스킬을 따른다.\n",
+        )
+        .expect("agents");
+        fs::create_dir_all(repo.root.join(".claude")).expect("claude dir");
+        fs::write(
+            repo.root.join(".claude").join("CLAUDE.md"),
+            "# Claude Team Rules\n\n- 리뷰 전 타입체크를 실행한다.\n",
+        )
+        .expect("claude");
+        fs::create_dir_all(repo.root.join(".agents").join("skills").join("team-skill"))
+            .expect("skill dir");
+        fs::write(
+            repo.root
+                .join(".agents")
+                .join("skills")
+                .join("team-skill")
+                .join("SKILL.md"),
+            "# Team Shared Skill\n\n- 공용 스킬 절차를 적용한다.\n",
+        )
+        .expect("skill");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "planner")
+            .expect("context");
+        let artifact_dir = repo.root.join(&run.artifact_dir);
+        let context_pack =
+            fs::read_to_string(artifact_dir.join("context-pack.md")).expect("context pack");
+        assert!(context_pack.contains("## Team Instructions"));
+        assert!(context_pack.contains("AGENTS.md"));
+        assert!(context_pack.contains("프로젝트 공용 스킬을 따른다."));
+        assert!(context_pack.contains(".claude/CLAUDE.md"));
+        assert!(context_pack.contains(".agents/skills/team-skill/SKILL.md"));
+        assert!(context_pack.contains("공용 스킬 절차를 적용한다."));
+
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(artifact_dir.join("context-pack.json")).expect("manifest"),
+        )
+        .expect("manifest json");
+        let docs = manifest["teamInstructions"].as_array().expect("team docs");
+        assert_eq!(docs.len(), 3);
+        assert_eq!(docs[0]["path"], "AGENTS.md");
+        assert_eq!(docs[2]["path"], ".agents/skills/team-skill/SKILL.md");
+        assert!(docs[0]["contentHash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("fnv1a64:")));
+    }
+
+    #[test]
+    fn write_obsidian_run_artifact_saves_session_note_when_vault_is_configured() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let vault = repo.root.join("obsidian-vault");
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: None,
+                ai_connections: None,
+                role_assignments: None,
+                role_policies: None,
+                conductor_config: None,
+                worktree_root: None,
+                worktree_setup: None,
+                jira_config: None,
+                obsidian_vault_path: Some(Some(vault.to_string_lossy().to_string())),
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("enable obsidian vault");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "planner")
+            .expect("context");
+
+        let relative_path = write_obsidian_run_artifact(
+            &conn,
+            &project.id,
+            &task,
+            &run,
+            "Succeeded",
+            Some("pass"),
+            2,
+            "2026-06-18T04:00:00Z",
+            "검증 완료",
+        )
+        .expect("write obsidian")
+        .expect("obsidian path");
+        let content = fs::read_to_string(vault.join(relative_path)).expect("obsidian content");
+        assert!(content.contains("status: Succeeded"));
+        assert!(content.contains("resultStatus: pass"));
+        assert!(content.contains("changedFileCount: 2"));
+        assert!(content.contains("검증 완료"));
+    }
+
+    #[test]
     fn create_run_approval_records_pending_agent_run_approval() {
         let repo = test_repo();
         let (mut conn, project) = open_test_project(&repo);
@@ -10224,6 +11025,7 @@ mod tests {
         let repo = test_repo();
         let (mut conn, project) = open_test_project(&repo);
         let task = create_test_task(&mut conn, &project.id);
+        let vault = repo.root.join("obsidian-vault");
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("desktop app dir")
@@ -10278,7 +11080,7 @@ mod tests {
                 worktree_root: None,
                 worktree_setup: None,
                 jira_config: None,
-                obsidian_vault_path: None,
+                obsidian_vault_path: Some(Some(vault.to_string_lossy().to_string())),
                 token_budget: None,
                 artifact_retention_days: None,
             },
@@ -10356,6 +11158,17 @@ mod tests {
             )
             .expect("gate count");
         assert_eq!(gate_count, 3);
+
+        let session_dir = vault
+            .join("projects")
+            .join(slug_for_path(&project.name))
+            .join("desktop")
+            .join("sessions");
+        let session_notes = fs::read_dir(session_dir)
+            .expect("obsidian sessions")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("obsidian session files");
+        assert_eq!(session_notes.len(), 5);
     }
 
     #[test]

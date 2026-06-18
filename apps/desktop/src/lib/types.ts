@@ -570,6 +570,28 @@ export interface AgentRunSummary {
   updatedAt: string;
 }
 
+export interface AgentSessionSummary {
+  id: string;
+  projectId: string;
+  taskId: string | null;
+  sourceRunId: string | null;
+  title: string;
+  status: string;
+  provider: string | null;
+  connectionId: string | null;
+  model: string | null;
+  roleId: string | null;
+  taskStatus: TaskStatus | string | null;
+  branch: string | null;
+  worktreePath: string | null;
+  lastSignalAt: string | null;
+  nextAction: "approval" | "start" | "watch" | "review" | "retry" | "open" | string;
+  changedFileCount: number | null;
+  eventCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface RunEventSummary {
   id: string;
   projectId: string;

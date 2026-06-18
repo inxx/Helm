@@ -6,13 +6,18 @@ import type { ApprovalSummary, ProjectSnapshot } from "../lib/types";
 interface ApprovalInboxProps {
   snapshot: ProjectSnapshot;
   onRefresh: () => Promise<void>;
+  compact?: boolean;
+  entityIds?: string[];
 }
 
-export function ApprovalInbox({ snapshot, onRefresh }: ApprovalInboxProps) {
+export function ApprovalInbox({ snapshot, onRefresh, compact = false, entityIds }: ApprovalInboxProps) {
   const { showToast } = useToast();
   const [reasonById, setReasonById] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
-  const approvals = snapshot.approvals;
+  const entityFilter = entityIds ? new Set(entityIds) : null;
+  const approvals = snapshot.approvals.filter(
+    (approval) => approval.status === "Pending" && (!entityFilter || entityFilter.has(approval.entityId)),
+  );
 
   async function decide(approval: ApprovalSummary, decision: "approve" | "reject") {
     const reason = reasonById[approval.id] || (decision === "approve" ? "확인 완료" : "반려");
@@ -20,6 +25,11 @@ export function ApprovalInbox({ snapshot, onRefresh }: ApprovalInboxProps) {
     try {
       if (decision === "approve") {
         await api.approveApproval(snapshot.project.id, approval.id, reason);
+        if (approval.approvalType === "PlanApproval" && approval.entityType === "Task") {
+          await api.startNextRoleRun(snapshot.project.id, approval.entityId).catch(() => undefined);
+        } else if (approval.approvalType === "RunApproval" && approval.entityType === "AgentRun") {
+          await api.runHostRole(snapshot.project.id, approval.entityId).catch(() => undefined);
+        }
       } else {
         await api.rejectApproval(snapshot.project.id, approval.id, reason);
       }
@@ -34,7 +44,9 @@ export function ApprovalInbox({ snapshot, onRefresh }: ApprovalInboxProps) {
         title: decision === "approve" ? "승인 완료" : "반려 완료",
         description:
           decision === "approve" && approval.approvalType === "PlanApproval"
-            ? "계획 승인이 반영됐습니다. Task 상세에서 다음 role 실행을 준비하세요."
+            ? "계획 승인이 반영됐고 다음 role 실행 준비를 시작했습니다."
+            : decision === "approve" && approval.approvalType === "RunApproval"
+              ? "실행 승인이 반영됐고 작업자 실행을 시작했습니다."
             : `${approvalLabel(approval.approvalType)} 상태가 반영되었습니다.`,
       });
     } catch (error) {
@@ -49,7 +61,7 @@ export function ApprovalInbox({ snapshot, onRefresh }: ApprovalInboxProps) {
   }
 
   return (
-    <section className="approval-inbox">
+    <section className={compact ? "approval-inbox compact" : "approval-inbox"}>
       <h2>승인 대기</h2>
       {approvals.length === 0 ? <p className="muted">승인 대기 항목이 없습니다.</p> : null}
       <ul className="plain-list">

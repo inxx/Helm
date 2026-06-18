@@ -12,6 +12,8 @@ import type {
 
 interface PlanningScreenProps {
   snapshot: ProjectSnapshot | null;
+  initialGoalText?: string | null;
+  onInitialGoalConsumed?: () => void;
   onOpenProject: () => void;
   onRefresh: () => Promise<void>;
   onOpenTask: (taskId: string) => void;
@@ -135,7 +137,14 @@ interface PlannerDraftParseResult {
 const PLANNER_SOFT_NOTICE_MS = 12_000;
 const PLANNER_REFINE_DELAY_MS = 2_000;
 
-export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask }: PlanningScreenProps) {
+export function PlanningScreen({
+  snapshot,
+  initialGoalText,
+  onInitialGoalConsumed,
+  onOpenProject,
+  onRefresh,
+  onOpenTask,
+}: PlanningScreenProps) {
   const { showToast } = useToast();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [goal, setGoal] = useState("");
@@ -144,6 +153,7 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   const [sessions, setSessions] = useState<PlanningSessionStub[]>([]);
   const [plannerOperation, setPlannerOperation] = useState<"planner" | "approve" | null>(null);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [loadedSessions, setLoadedSessions] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
   const sessionsRef = useRef<PlanningSessionStub[]>([]);
@@ -173,13 +183,22 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
   useEffect(() => () => cancelPlannerRefinement(), []);
 
   useEffect(() => {
+    const trimmed = initialGoalText?.trim();
+    if (!snapshot || !trimmed || !loadedSessions || plannerOperation) return;
+    onInitialGoalConsumed?.();
+    void startPlannerSession(trimmed);
+  }, [initialGoalText, loadedSessions, onInitialGoalConsumed, plannerOperation, snapshot?.project.id]);
+
+  useEffect(() => {
     if (!snapshot) {
       setSessions([]);
       setActiveSessionId(null);
+      setLoadedSessions(false);
       return;
     }
 
     let cancelled = false;
+    setLoadedSessions(false);
     setLoadingSessions(true);
     api
       .listPlanningSessions(snapshot.project.id)
@@ -204,7 +223,10 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
         });
       })
       .finally(() => {
-        if (!cancelled) setLoadingSessions(false);
+        if (!cancelled) {
+          setLoadingSessions(false);
+          setLoadedSessions(true);
+        }
       });
 
     return () => {
@@ -268,8 +290,8 @@ export function PlanningScreen({ snapshot, onOpenProject, onRefresh, onOpenTask 
     return session.messages.some((message) => message.id === messageId);
   }
 
-  async function startPlannerSession() {
-    const trimmed = goal.trim();
+  async function startPlannerSession(initialGoal?: string) {
+    const trimmed = (initialGoal ?? goal).trim();
     const trimmedJiraRef = jiraRef.trim();
     if (!trimmed || plannerOperation) return;
 

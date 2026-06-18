@@ -107,6 +107,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const [rolePolicies, setRolePolicies] = useState<RolePolicy[]>([]);
   const [conductorConfig, setConductorConfig] = useState<ConductorConfig>(emptyConductorConfig());
   const [jiraConfig, setJiraConfig] = useState<JiraConfig>(emptyJiraConfig());
+  const [obsidianVaultPath, setObsidianVaultPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [updaterBusy, setUpdaterBusy] = useState(false);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -151,6 +152,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     setRolePolicies(normalizeRolePolicies(snapshot.settings.rolePolicies));
     setConductorConfig(normalizeConductorConfig(snapshot.settings.conductorConfig));
     setJiraConfig(normalizeJiraConfig(snapshot.settings.jiraConfig));
+    setObsidianVaultPath(snapshot.settings.obsidianVaultPath ?? "");
     setWorktreeRoot(snapshot.settings.worktreeRoot ?? "");
     setWorktreeSetup(snapshot.settings.worktreeSetup ? JSON.stringify(snapshot.settings.worktreeSetup, null, 2) : "");
     void api.listRunnerTemplates(snapshot.project.id).then(setTemplates);
@@ -232,6 +234,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         worktreeRoot: worktreeRoot.trim() ? worktreeRoot.trim() : null,
         worktreeSetup: parsedWorktreeSetup,
         jiraConfig: normalizeJiraConfig(jiraConfig),
+        obsidianVaultPath: obsidianVaultPath.trim() ? obsidianVaultPath.trim() : null,
       });
       await onRefresh();
       showToast({
@@ -1549,6 +1552,17 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                   />
                   <small className="muted">
                     비워두면 <code>.helm/worktree-setup.json</code>이 있으면 사용합니다. Helm은 자동 실행하지 않고 Context Pack에만 포함합니다.
+                  </small>
+                </label>
+                <label className="settings-field">
+                  <span>Obsidian vault path</span>
+                  <input
+                    placeholder="/Users/mediquitous/Documents/Obsidian Vault/Claude"
+                    value={obsidianVaultPath}
+                    onChange={(event) => setObsidianVaultPath(event.target.value)}
+                  />
+                  <small className="muted">
+                    작업 보고서와 계획 문서가 연결될 Vault입니다. 비워두면 프로젝트별 Obsidian 연동을 끕니다.
                   </small>
                 </label>
               </section>
