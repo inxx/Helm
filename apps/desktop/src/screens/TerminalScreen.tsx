@@ -24,6 +24,7 @@ import { api } from "../lib/api";
 import type {
   NodeRuntimeSummary,
   ProjectSnapshot,
+  TerminalDirectoryEntry,
   TerminalPtySnapshot,
   TerminalPtySummary,
   TerminalSavedScriptSummary,
@@ -134,6 +135,7 @@ export function TerminalScreen({
   const [savedScriptsBusy, setSavedScriptsBusy] = useState(false);
   const [savedScriptMenuOpen, setSavedScriptMenuOpen] = useState(false);
   const [savedScriptEditor, setSavedScriptEditor] = useState<SavedScriptEditorState | null>(null);
+  const [directoriesByPane, setDirectoriesByPane] = useState<Record<string, TerminalDirectoryEntry[]>>({});
 
   const selectedPaneId = activePaneId ?? panes[0]?.id ?? null;
   const activePane = panes.find((pane) => pane.id === selectedPaneId) ?? panes[0] ?? null;
@@ -327,7 +329,8 @@ export function TerminalScreen({
     );
   }
 
-  const repository = snapshot.repository;
+  const project = snapshot.project;
+
   function updatePane(id: string, patch: Partial<TerminalPaneState>) {
     setPanes((current) => current.map((pane) => (pane.id === id ? { ...pane, ...patch } : pane)));
   }
@@ -361,6 +364,23 @@ export function TerminalScreen({
     updatePane(activePane.id, { nodeBinPath: nextNodeBinPath });
 
     await restartPane(activePane, { nodeBinPath: nextNodeBinPath });
+  }
+
+  async function loadPaneDirectories(pane: TerminalPaneState) {
+    if (!snapshot) return;
+    try {
+      const directories = await api.listTerminalDirectories(snapshot.project.id, pane.cwd);
+      setDirectoriesByPane((current) => ({ ...current, [pane.id]: directories }));
+      setControlError(null);
+    } catch (err) {
+      setControlError(errorMessage(err));
+    }
+  }
+
+  async function choosePaneCwd(pane: TerminalPaneState, nextCwd: string) {
+    if (!nextCwd || nextCwd === pane.cwd) return;
+    setControlError(null);
+    await restartPane(pane, { cwd: nextCwd });
   }
 
   function removePane(id: string) {
@@ -675,6 +695,12 @@ export function TerminalScreen({
     restoringPaneIds.current.delete(id);
     pendingOutputRefs.current.delete(id);
     inputStateRefs.current.delete(id);
+    setDirectoriesByPane((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
     setPaneAutocomplete(id, null);
     if (options.stopPty) {
       void api.stopTerminalPty(id).catch(() => undefined);
@@ -689,6 +715,7 @@ export function TerminalScreen({
 
   function renderPane(pane: TerminalPaneState, index: number) {
     const autocomplete = autocompleteByPane[pane.id] ?? null;
+    const cwdOptions = cwdOptionsForPane(pane, directoriesByPane[pane.id] ?? []);
     const isSelected = selectedPaneId === pane.id;
     const paneRuntimeMissing =
       pane.nodeBinPath !== null &&
@@ -713,10 +740,25 @@ export function TerminalScreen({
               aria-hidden="true"
             />
             <strong>pane {index + 1}</strong>
-            <span className="terminal-pane-path" title={pane.cwd}>
-              <Folder size={12} aria-hidden="true" />
-              <span>{pane.cwd}</span>
+            <span className="terminal-pane-project" title={project.rootPath}>
+              {project.name}
             </span>
+            <label className="terminal-pane-path" title={pane.cwd}>
+              <Folder size={12} aria-hidden="true" />
+              <select
+                onChange={(event) => void choosePaneCwd(pane, event.target.value)}
+                onFocus={() => void loadPaneDirectories(pane)}
+                onMouseDown={() => void loadPaneDirectories(pane)}
+                value={pane.cwd}
+                aria-label={`pane ${index + 1} 경로`}
+              >
+                {cwdOptions.map((directory) => (
+                  <option key={directory.path} value={directory.path}>
+                    {directory.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="terminal-pane-actions">
             <button
@@ -1014,12 +1056,6 @@ export function TerminalScreen({
             <Plus size={14} aria-hidden="true" />
             <span>새 pane</span>
           </button>
-          <div className="terminal-workspace-state">
-            <span>branch</span>
-            <strong>{repository.currentBranch ?? "detached"}</strong>
-            <span>changes</span>
-            <strong>{repository.dirtyCount}</strong>
-          </div>
         </aside>
 
         <div className="terminal-main">
@@ -1167,6 +1203,16 @@ function shortPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
   if (parts.length <= 2) return path || "/";
   return `.../${parts.slice(-2).join("/")}`;
+}
+
+function cwdOptionsForPane(
+  pane: TerminalPaneState,
+  directories: TerminalDirectoryEntry[],
+): TerminalDirectoryEntry[] {
+  return [
+    { path: pane.cwd, label: shortPath(pane.cwd), kind: "current" },
+    ...directories.filter((directory) => directory.path !== pane.cwd),
+  ];
 }
 
 function nodeRuntimeLabel(nodeBinPath: string | null, runtimes: NodeRuntimeSummary[]): string {
