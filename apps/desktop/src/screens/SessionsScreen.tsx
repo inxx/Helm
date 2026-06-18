@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Bot, Check, FileText, Folder, GitBranch, Loader2, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, Send, Square, SquareTerminal, Trash2, User } from "lucide-react";
+import { Bot, Check, FileText, Folder, GitBranch, Loader2, MessageSquare, MoreHorizontal, Pencil, Plus, Send, Square, SquareTerminal, Trash2, User, X } from "lucide-react";
 import { ApprovalInbox } from "../components/ApprovalInbox";
 import { api } from "../lib/api";
 import { shortenPath, type RecentProject } from "../lib/recents";
@@ -57,9 +57,10 @@ export function SessionsScreen({
   const [orchestratorMessages, setOrchestratorMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string }>>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [savingRoleId, setSavingRoleId] = useState<RoleAssignment["roleId"] | null>(null);
+  const [savingStageAi, setSavingStageAi] = useState(false);
   const [editingStageAi, setEditingStageAi] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [draftRoleAssignments, setDraftRoleAssignments] = useState<RoleAssignment[] | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [stoppingTerminalId, setStoppingTerminalId] = useState<string | null>(null);
   const [composingNewSession, setComposingNewSession] = useState(false);
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
@@ -96,6 +97,8 @@ export function SessionsScreen({
     if (!snapshot) {
       setSessions([]);
       setActiveSessionId(null);
+      setEditingStageAi(false);
+      setDraftRoleAssignments(null);
       return;
     }
     let disposed = false;
@@ -127,7 +130,12 @@ export function SessionsScreen({
     return () => {
       disposed = true;
     };
-  }, [snapshot?.project.id, composingNewSession, selectedTaskId, refreshKey]);
+  }, [snapshot?.project.id, composingNewSession, selectedTaskId, reloadKey]);
+
+  useEffect(() => {
+    setEditingStageAi(false);
+    setDraftRoleAssignments(null);
+  }, [snapshot?.project.id]);
 
   useEffect(() => {
     if (!snapshot || !activeSession?.sourceRunId || !activeSession.taskId) {
@@ -185,7 +193,7 @@ export function SessionsScreen({
         },
       ]);
       await onRefresh();
-      setRefreshKey((value) => value + 1);
+      setReloadKey((value) => value + 1);
     } catch (error) {
       setLoadError(messageFromError(error, "오케스트레이터 지시를 저장하지 못했습니다."));
     } finally {
@@ -193,11 +201,40 @@ export function SessionsScreen({
     }
   }
 
-  async function updateRoleConnection(roleId: RoleAssignment["roleId"], connectionId: string) {
+  function beginStageAiEdit() {
+    if (!snapshot) return;
+    setDraftRoleAssignments(cloneRoleAssignments(snapshot.settings.roleAssignments));
+    setEditingStageAi(true);
+    setLoadError(null);
+  }
+
+  function cancelStageAiEdit() {
+    setDraftRoleAssignments(null);
+    setEditingStageAi(false);
+    setLoadError(null);
+  }
+
+  async function saveStageAiEdit() {
     const projectId = snapshot?.project.id;
-    if (!projectId || savingRoleId) return;
+    if (!projectId || savingStageAi || !draftRoleAssignments) return;
+    setSavingStageAi(true);
+    setLoadError(null);
+    try {
+      await api.updateProjectSettings(projectId, { roleAssignments: draftRoleAssignments });
+      await onRefresh();
+      setDraftRoleAssignments(null);
+      setEditingStageAi(false);
+    } catch (error) {
+      setLoadError(messageFromError(error, "단계별 AI 설정을 저장하지 못했습니다."));
+    } finally {
+      setSavingStageAi(false);
+    }
+  }
+
+  function updateRoleConnection(roleId: RoleAssignment["roleId"], connectionId: string) {
+    if (!snapshot || savingStageAi) return;
     const connection = snapshot.settings.aiConnections.find((item) => item.id === connectionId);
-    const nextAssignments = snapshot.settings.roleAssignments.map((assignment) => {
+    setDraftRoleAssignments((current) => (current ?? cloneRoleAssignments(snapshot.settings.roleAssignments)).map((assignment) => {
       if (assignment.roleId !== roleId) return assignment;
       const selections = connection
         ? [{ connectionId: connection.id, model: connection.defaultModel ?? null, effort: null }]
@@ -207,23 +244,12 @@ export function SessionsScreen({
         selections,
         connectionIds: selections.map((selection) => selection.connectionId),
       };
-    });
-    setSavingRoleId(roleId);
-    setLoadError(null);
-    try {
-      await api.updateProjectSettings(projectId, { roleAssignments: nextAssignments });
-      await onRefresh();
-    } catch (error) {
-      setLoadError(messageFromError(error, "단계별 AI 설정을 저장하지 못했습니다."));
-    } finally {
-      setSavingRoleId(null);
-    }
+    }));
   }
 
-  async function updateRoleModel(roleId: RoleAssignment["roleId"], model: string) {
-    const projectId = snapshot?.project.id;
-    if (!projectId || savingRoleId) return;
-    const nextAssignments = snapshot.settings.roleAssignments.map((assignment) => {
+  function updateRoleModel(roleId: RoleAssignment["roleId"], model: string) {
+    if (!snapshot || savingStageAi) return;
+    setDraftRoleAssignments((current) => (current ?? cloneRoleAssignments(snapshot.settings.roleAssignments)).map((assignment) => {
       if (assignment.roleId !== roleId) return assignment;
       const selection = assignment.selections[0];
       if (!selection) return assignment;
@@ -231,17 +257,7 @@ export function SessionsScreen({
         ...assignment,
         selections: [{ ...selection, model: model.trim() ? model.trim() : null }],
       };
-    });
-    setSavingRoleId(roleId);
-    setLoadError(null);
-    try {
-      await api.updateProjectSettings(projectId, { roleAssignments: nextAssignments });
-      await onRefresh();
-    } catch (error) {
-      setLoadError(messageFromError(error, "단계별 AI 모델을 저장하지 못했습니다."));
-    } finally {
-      setSavingRoleId(null);
-    }
+    }));
   }
 
   async function stopTerminal(terminalId: string) {
@@ -270,15 +286,6 @@ export function SessionsScreen({
         <div className="sessions-project-header">
           <Folder size={18} aria-hidden />
           <h2>프로젝트</h2>
-          <button
-            className="sessions-icon-button"
-            disabled={loading}
-            onClick={() => setRefreshKey((value) => value + 1)}
-            title="새로고침"
-            type="button"
-          >
-            <RefreshCw size={14} />
-          </button>
         </div>
         {loadError ? <div className="error-banner compact">{loadError}</div> : null}
         <div className="session-list">
@@ -625,13 +632,26 @@ export function SessionsScreen({
         <div className="session-context-section">
           <div className="session-context-section-title">
             <span>Stage AI</span>
-            <button className="session-context-link" onClick={() => setEditingStageAi((value) => !value)} type="button">
-              {editingStageAi ? <Check size={12} /> : <Pencil size={12} />}
-              {editingStageAi ? "저장" : "편집"}
-            </button>
+            {editingStageAi ? (
+              <span className="session-context-actions">
+                <button className="session-context-link" disabled={savingStageAi} onClick={() => void saveStageAiEdit()} type="button">
+                  {savingStageAi ? <Loader2 size={12} className="loading-icon" /> : <Check size={12} />}
+                  저장
+                </button>
+                <button className="session-context-link" disabled={savingStageAi} onClick={cancelStageAiEdit} type="button">
+                  <X size={12} />
+                  취소
+                </button>
+              </span>
+            ) : (
+              <button className="session-context-link" onClick={beginStageAiEdit} type="button">
+                <Pencil size={12} />
+                편집
+              </button>
+            )}
           </div>
           <div className="session-context-list">
-            {snapshot.settings.roleAssignments.map((assignment) => (
+            {(editingStageAi ? draftRoleAssignments ?? snapshot.settings.roleAssignments : snapshot.settings.roleAssignments).map((assignment) => (
               <RoleAssignmentRow
                 assignment={assignment}
                 connections={snapshot.settings.aiConnections.filter((connection) => connection.enabled)}
@@ -639,7 +659,7 @@ export function SessionsScreen({
                 key={assignment.roleId}
                 onChange={(connectionId) => void updateRoleConnection(assignment.roleId, connectionId)}
                 onModelChange={(model) => void updateRoleModel(assignment.roleId, model)}
-                saving={savingRoleId === assignment.roleId}
+                saving={savingStageAi}
                 snapshot={snapshot}
               />
             ))}
@@ -726,6 +746,14 @@ function RoleAssignmentRow({
 function modelChoices(connection: AiConnection | undefined, selectedModel: string): string[] {
   if (!connection) return [];
   return [...new Set([...(connection.availableModels ?? []), connection.defaultModel ?? "", selectedModel].filter(Boolean))];
+}
+
+function cloneRoleAssignments(assignments: RoleAssignment[]): RoleAssignment[] {
+  return assignments.map((assignment) => ({
+    ...assignment,
+    selections: assignment.selections.map((selection) => ({ ...selection })),
+    connectionIds: [...assignment.connectionIds],
+  }));
 }
 
 function SessionMessage(props: {
