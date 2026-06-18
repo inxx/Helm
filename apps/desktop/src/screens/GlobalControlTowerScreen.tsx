@@ -168,7 +168,10 @@ export function GlobalControlTowerScreen({ onFocusProject, onFocusTask, onOpenPr
                 <button
                   className={`global-attention-card ${item.tone}`}
                   key={item.id}
-                  onClick={() => onFocusProject(item.projectId)}
+                  onClick={() => {
+                    if (item.taskId) void onFocusTask(item.projectId, item.taskId);
+                    else void onFocusProject(item.projectId);
+                  }}
                   type="button"
                 >
                   <span>{item.projectName}</span>
@@ -380,6 +383,7 @@ function buildAttentionItems(views: ProjectView[], now: number) {
         return {
           id: `${run.id}:run`,
           projectId: view.source.recent.id,
+          taskId: run.taskId,
           projectName,
           title: live.label,
           summary: `${roleLabel(run.roleId)} · ${live.summary}`,
@@ -390,6 +394,7 @@ function buildAttentionItems(views: ProjectView[], now: number) {
       const taskItems = view.blockedTasks.map((task) => ({
         id: `${task.id}:task`,
         projectId: view.source.recent.id,
+        taskId: task.id,
         projectName,
         title: TASK_STATUS_LABEL[task.status],
         summary: task.title,
@@ -401,6 +406,7 @@ function buildAttentionItems(views: ProjectView[], now: number) {
             {
               id: `${view.source.recent.id}:error`,
               projectId: view.source.recent.id,
+              taskId: null,
               projectName,
               title: "프로젝트 확인 실패",
               summary: view.source.error.message,

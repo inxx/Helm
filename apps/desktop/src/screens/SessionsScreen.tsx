@@ -1,0 +1,619 @@
+import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import { Bot, FileText, GitBranch, Loader2, MessageSquare, RefreshCw, Send, Settings, SquareTerminal, User } from "lucide-react";
+import { ApprovalInbox } from "../components/ApprovalInbox";
+import { api } from "../lib/api";
+import { roleLabel } from "../lib/runnerReadiness";
+import type {
+  AgentSessionSummary,
+  GitFileStatus,
+  ProjectSnapshot,
+  RoleAssignment,
+  RunEventSummary,
+  TaskSummary,
+  TerminalPtySummary,
+  AiConnection,
+} from "../lib/types";
+
+interface SessionsScreenProps {
+  snapshot: ProjectSnapshot | null;
+  selectedTaskId: string | null;
+  onSelectTask: (taskId: string | null) => void;
+  onOpenProject: () => void;
+  onGoTerminal: () => void;
+  onGoSettings: () => void;
+  onGoPlanning: (goalText?: string) => void;
+  onRefresh: () => Promise<void>;
+}
+
+export function SessionsScreen({
+  snapshot,
+  selectedTaskId,
+  onSelectTask,
+  onOpenProject,
+  onGoTerminal,
+  onGoSettings,
+  onGoPlanning,
+  onRefresh,
+}: SessionsScreenProps) {
+  const [sessions, setSessions] = useState<AgentSessionSummary[]>([]);
+  const [terminalPtys, setTerminalPtys] = useState<TerminalPtySummary[]>([]);
+  const [changedFiles, setChangedFiles] = useState<GitFileStatus[]>([]);
+  const [orchestratorInput, setOrchestratorInput] = useState("");
+  const [orchestratorBusy, setOrchestratorBusy] = useState(false);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [events, setEvents] = useState<RunEventSummary[]>([]);
+  const [summaryText, setSummaryText] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [savingRoleId, setSavingRoleId] = useState<RoleAssignment["roleId"] | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const taskById = useMemo(
+    () => new Map(snapshot?.tasks.map((task) => [task.id, task]) ?? []),
+    [snapshot?.tasks],
+  );
+  const activeSession = useMemo(() => {
+    if (sessions.length === 0) return null;
+    if (activeSessionId) {
+      const exact = sessions.find((session) => session.id === activeSessionId);
+      if (exact) return exact;
+    }
+    if (selectedTaskId) {
+      const taskSession = sessions.find((session) => session.taskId === selectedTaskId);
+      if (taskSession) return taskSession;
+    }
+    return sessions[0];
+  }, [activeSessionId, selectedTaskId, sessions]);
+  const selectedTask = selectedTaskId ? taskById.get(selectedTaskId) ?? null : null;
+  const activeTask = activeSession?.taskId ? taskById.get(activeSession.taskId) ?? selectedTask : selectedTask;
+  const activeApprovalEntityIds = [activeTask?.id, activeSession?.sourceRunId].filter(Boolean) as string[];
+  const activeApprovalCount =
+    activeApprovalEntityIds.length > 0
+      ? snapshot?.approvals.filter(
+          (approval) => approval.status === "Pending" && activeApprovalEntityIds.includes(approval.entityId),
+        ).length ?? 0
+      : 0;
+  const pendingApprovalCount = snapshot?.approvals.filter((approval) => approval.status === "Pending").length ?? 0;
+
+  useEffect(() => {
+    if (!snapshot) {
+      setSessions([]);
+      setActiveSessionId(null);
+      return;
+    }
+    let disposed = false;
+    setLoading(true);
+    setLoadError(null);
+    void Promise.all([
+      api.listAgentSessions(snapshot.project.id, 200),
+      api.listTerminalPtys(null).catch(() => []),
+      api.getChangedFiles(snapshot.project.id).catch(() => []),
+    ])
+      .then(([items, ptys, files]) => {
+        if (disposed) return;
+        setSessions(items);
+        setTerminalPtys(ptys);
+        setChangedFiles(files);
+        if (selectedTaskId) {
+          setActiveSessionId(items.find((session) => session.taskId === selectedTaskId)?.id ?? items[0]?.id ?? null);
+        } else {
+          setActiveSessionId((current) => (current && items.some((session) => session.id === current) ? current : items[0]?.id ?? null));
+        }
+      })
+      .catch((error) => {
+        if (!disposed) setLoadError(messageFromError(error, "세션 목록을 불러오지 못했습니다."));
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [snapshot?.project.id, selectedTaskId, refreshKey]);
+
+  useEffect(() => {
+    if (!snapshot || !activeSession?.sourceRunId || !activeSession.taskId) {
+      setEvents([]);
+      setSummaryText(null);
+      return;
+    }
+    let disposed = false;
+    setEvents([]);
+    setSummaryText(null);
+    void Promise.all([
+      api.listRunEvents(snapshot.project.id, activeSession.sourceRunId).catch(() => []),
+      api.readRunArtifact(snapshot.project.id, activeSession.sourceRunId, "summary.md").catch(() => null),
+    ]).then(([nextEvents, nextSummary]) => {
+      if (disposed) return;
+      setEvents(nextEvents);
+      setSummaryText(nextSummary);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [activeSession?.sourceRunId, activeSession?.taskId, snapshot?.project.id]);
+
+  if (!snapshot) {
+    return (
+      <section className="empty-state">
+        <h2>프로젝트를 열어주세요</h2>
+        <p>세션 채팅은 프로젝트의 실행 기록과 작업 맥락을 기준으로 구성됩니다.</p>
+        <button className="primary-button" onClick={onOpenProject} type="button">
+          프로젝트 열기
+        </button>
+      </section>
+    );
+  }
+
+  async function submitOrchestratorInstruction() {
+    const goalText = orchestratorInput.trim();
+    if (!goalText || orchestratorBusy) return;
+    setOrchestratorBusy(true);
+    setLoadError(null);
+    try {
+      setOrchestratorInput("");
+      onGoPlanning(goalText);
+    } catch (error) {
+      setLoadError(messageFromError(error, "오케스트레이터 지시를 계획 세션으로 넘기지 못했습니다."));
+    } finally {
+      setOrchestratorBusy(false);
+    }
+  }
+
+  async function updateRoleConnection(roleId: RoleAssignment["roleId"], connectionId: string) {
+    const projectId = snapshot?.project.id;
+    if (!projectId || savingRoleId) return;
+    const connection = snapshot.settings.aiConnections.find((item) => item.id === connectionId);
+    const nextAssignments = snapshot.settings.roleAssignments.map((assignment) => {
+      if (assignment.roleId !== roleId) return assignment;
+      const selections = connection
+        ? [{ connectionId: connection.id, model: connection.defaultModel ?? null, effort: null }]
+        : [];
+      return {
+        ...assignment,
+        selections,
+        connectionIds: selections.map((selection) => selection.connectionId),
+      };
+    });
+    setSavingRoleId(roleId);
+    setLoadError(null);
+    try {
+      await api.updateProjectSettings(projectId, { roleAssignments: nextAssignments });
+      await onRefresh();
+    } catch (error) {
+      setLoadError(messageFromError(error, "단계별 AI 설정을 저장하지 못했습니다."));
+    } finally {
+      setSavingRoleId(null);
+    }
+  }
+
+  async function updateRoleModel(roleId: RoleAssignment["roleId"], model: string) {
+    const projectId = snapshot?.project.id;
+    if (!projectId || savingRoleId) return;
+    const nextAssignments = snapshot.settings.roleAssignments.map((assignment) => {
+      if (assignment.roleId !== roleId) return assignment;
+      const selection = assignment.selections[0];
+      if (!selection) return assignment;
+      return {
+        ...assignment,
+        selections: [{ ...selection, model: model.trim() ? model.trim() : null }],
+      };
+    });
+    setSavingRoleId(roleId);
+    setLoadError(null);
+    try {
+      await api.updateProjectSettings(projectId, { roleAssignments: nextAssignments });
+      await onRefresh();
+    } catch (error) {
+      setLoadError(messageFromError(error, "단계별 AI 모델을 저장하지 못했습니다."));
+    } finally {
+      setSavingRoleId(null);
+    }
+  }
+
+  return (
+    <div className="sessions-layout">
+      <aside className="sessions-rail" aria-label="세션 목록">
+        <div className="sessions-rail-header">
+          <div>
+            <h2>세션</h2>
+            <p>{snapshot.project.name}</p>
+          </div>
+          <button
+            className="sessions-icon-button"
+            disabled={loading}
+            onClick={() => setRefreshKey((value) => value + 1)}
+            title="새로고침"
+            type="button"
+          >
+            <RefreshCw size={14} />
+          </button>
+        </div>
+        {loadError ? <div className="error-banner compact">{loadError}</div> : null}
+        <div className="session-list">
+          {sessions.length === 0 ? (
+            <div className="session-list-empty">
+              <MessageSquare size={16} />
+              <span>아직 세션이 없습니다.</span>
+            </div>
+          ) : null}
+          {sessions.map((session) => {
+            const active = session.id === activeSession?.id;
+            return (
+              <button
+                className={active ? "session-row active" : "session-row"}
+                key={session.id}
+                onClick={() => {
+                  setActiveSessionId(session.id);
+                  onSelectTask(session.taskId);
+                }}
+                type="button"
+              >
+                <span className={`session-status-dot ${session.nextAction}`} />
+                <span className="session-row-main">
+                  <strong>{session.title}</strong>
+                  <small>{session.provider ?? "provider 미정"} · {formatRelative(session.lastSignalAt)}</small>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </aside>
+
+      <section className="session-chat" aria-label="세션 채팅 상세">
+        {activeSession || activeTask ? (
+          <>
+            <header className="session-chat-header">
+              <div>
+                <h1>{activeSession?.title ?? activeTask?.title}</h1>
+                <p>
+                  {activeSession?.provider ?? "provider 미정"}
+                  {activeSession?.model ? ` · ${activeSession.model}` : ""}
+                </p>
+              </div>
+              <div className="session-header-actions">
+                {activeSession?.branch ? (
+                  <span className="session-meta-pill">
+                    <GitBranch size={13} />
+                    {activeSession.branch}
+                  </span>
+                ) : null}
+                <button className="secondary-button" onClick={onGoTerminal} type="button">
+                  <SquareTerminal size={14} />
+                  <span>터미널</span>
+                </button>
+              </div>
+            </header>
+            <div className="session-chat-scroll">
+              <SessionMessage role="assistant" icon="bot" title="오케스트레이터" timestamp={activeSession?.lastSignalAt ?? null}>
+                <p>
+                  작업 지시는 아래 입력으로 정리해 계획자에게 넘깁니다. 승인된 계획만 Task로 만들고 단계별 AI 설정에 따라 실행합니다.
+                </p>
+              </SessionMessage>
+              <SessionMessage role="user" icon="user" title="요청" timestamp={activeTask?.createdAt ?? activeSession?.createdAt ?? null}>
+                <strong>{activeTask?.title ?? activeSession?.title}</strong>
+                {activeTask?.description ? <p>{activeTask.description}</p> : null}
+              </SessionMessage>
+              {activeSession ? (
+                <SessionMessage role="assistant" icon="bot" title="진행 상태" timestamp={activeSession.lastSignalAt ?? activeSession.updatedAt}>
+                  <p>{sessionStatusCopy(activeSession)}</p>
+                </SessionMessage>
+              ) : (
+                <SessionMessage role="assistant" icon="bot" title="대기" timestamp={activeTask?.updatedAt ?? null}>
+                  <p>아직 연결된 실행 세션이 없습니다. 실행이 시작되면 이 화면에 진행 이벤트가 누적됩니다.</p>
+                </SessionMessage>
+              )}
+              {activeApprovalCount > 0 ? (
+                <SessionMessage role="assistant" icon="bot" title="승인 요청" timestamp={activeSession?.lastSignalAt ?? activeTask?.updatedAt ?? null}>
+                  <ApprovalInbox
+                    compact
+                    entityIds={activeApprovalEntityIds}
+                    onRefresh={onRefresh}
+                    snapshot={snapshot}
+                  />
+                </SessionMessage>
+              ) : null}
+              {events.map((event) => (
+                <SessionMessage
+                  icon={event.kind === "artifact" ? "file" : "bot"}
+                  key={event.id}
+                  role={event.kind === "stdout" || event.kind === "stderr" ? "tool" : "assistant"}
+                  timestamp={event.createdAt}
+                  title={event.kind}
+                >
+                  <p>{event.message}</p>
+                </SessionMessage>
+              ))}
+              {summaryText && activeSession ? (
+                <SessionMessage icon="file" role="assistant" timestamp={activeSession.updatedAt} title="요약">
+                  <pre>{summaryText.trim()}</pre>
+                </SessionMessage>
+              ) : null}
+            </div>
+            <form
+              className="session-orchestrator-composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitOrchestratorInstruction();
+              }}
+            >
+              <textarea
+                disabled={orchestratorBusy}
+                onChange={(event) => setOrchestratorInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+                  event.preventDefault();
+                  void submitOrchestratorInstruction();
+                }}
+                placeholder="오케스트레이터에게 새 작업 지시..."
+                rows={2}
+                value={orchestratorInput}
+              />
+              <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
+                {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
+                <span>{orchestratorBusy ? "넘기는 중" : "계획자에게 넘기기"}</span>
+              </button>
+            </form>
+          </>
+        ) : (
+          <div className="session-chat-empty">
+            <MessageSquare size={20} />
+            <h2>열 세션을 선택하세요</h2>
+            <p>칸반에서 카드를 클릭하면 이 화면에서 상세 진행사항을 확인합니다.</p>
+            <form
+              className="session-orchestrator-composer empty"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitOrchestratorInstruction();
+              }}
+            >
+              <textarea
+                disabled={orchestratorBusy}
+                onChange={(event) => setOrchestratorInput(event.target.value)}
+                placeholder="오케스트레이터에게 새 작업 지시..."
+                rows={3}
+                value={orchestratorInput}
+              />
+              <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
+                {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
+                <span>{orchestratorBusy ? "넘기는 중" : "계획자에게 넘기기"}</span>
+              </button>
+            </form>
+          </div>
+        )}
+      </section>
+
+      <aside className="session-context-panel" aria-label="환경">
+        <h3>Environment</h3>
+        {pendingApprovalCount > 0 ? (
+          <div className="session-context-approval">
+            <ApprovalInbox compact snapshot={snapshot} onRefresh={onRefresh} />
+          </div>
+        ) : null}
+        <ContextRow label="Project" value={snapshot.project.name} />
+        <ContextRow label="Branch" value={activeSession?.branch ?? snapshot.repository.currentBranch ?? "-"} />
+        <ContextRow label="Worktree" value={activeSession?.worktreePath ?? "-"} />
+        <ContextRow label="Changed files" value={changedFileCountLabel(changedFiles, activeSession)} />
+        <ContextRow label="Events" value={activeSession?.eventCount?.toString() ?? "0"} />
+        <ContextRow label="Obsidian" value={snapshot.settings.obsidianVaultPath ?? "미설정"} />
+        <div className="session-context-section">
+          <div className="session-context-section-title">
+            <span>Changes</span>
+            <strong>{changedFiles.length}</strong>
+          </div>
+          {changedFiles.length > 0 ? (
+            <div className="session-context-list">
+              {changedFiles.slice(0, 6).map((file) => (
+                <div className="session-context-file-row" key={`${file.status}:${file.path}`}>
+                  <span>{file.status}</span>
+                  <strong title={file.path}>{file.path}</strong>
+                </div>
+              ))}
+              {changedFiles.length > 6 ? (
+                <p className="session-context-empty">외 {changedFiles.length - 6}개 파일</p>
+              ) : null}
+            </div>
+          ) : (
+            <p className="session-context-empty">Git 변경 파일 없음</p>
+          )}
+        </div>
+        <div className="session-context-section">
+          <div className="session-context-section-title">
+            <span>Current AI</span>
+            <strong>{activeSession ? currentAiLabel(activeSession) : "-"}</strong>
+          </div>
+          <div className="session-context-section-title">
+            <span>Local servers</span>
+            <strong>{terminalPtys.filter((pty) => pty.running).length}</strong>
+          </div>
+          {terminalPtys.length > 0 ? (
+            <div className="session-context-list">
+              {terminalPtys.slice(0, 4).map((pty) => (
+                <button className="session-context-list-row" key={pty.terminalId} onClick={onGoTerminal} type="button">
+                  <span className={pty.running ? "session-run-dot running" : "session-run-dot"} />
+                  <strong>{shortPath(pty.cwd)}</strong>
+                  <small>{pty.running ? "running" : pty.exitCode === null ? "starting" : `exit ${pty.exitCode}`}</small>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="session-context-empty">터미널 세션 없음</p>
+          )}
+        </div>
+        <div className="session-context-section">
+          <div className="session-context-section-title">
+            <span>Stage AI</span>
+            <button className="session-context-link" onClick={onGoSettings} type="button">
+              <Settings size={12} />
+              설정
+            </button>
+          </div>
+          <div className="session-context-list">
+            {snapshot.settings.roleAssignments.map((assignment) => (
+              <RoleAssignmentRow
+                assignment={assignment}
+                connections={snapshot.settings.aiConnections.filter((connection) => connection.enabled)}
+                key={assignment.roleId}
+                onChange={(connectionId) => void updateRoleConnection(assignment.roleId, connectionId)}
+                onModelChange={(model) => void updateRoleModel(assignment.roleId, model)}
+                saving={savingRoleId === assignment.roleId}
+                snapshot={snapshot}
+              />
+            ))}
+          </div>
+          <p className="session-context-empty">
+            역할 정책 {snapshot.settings.rolePolicies.filter((policy) => policy.enabled).length}개가 Context Pack에 포함됩니다.
+          </p>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function RoleAssignmentRow({
+  assignment,
+  connections,
+  onChange,
+  onModelChange,
+  saving,
+  snapshot,
+}: {
+  assignment: RoleAssignment;
+  connections: AiConnection[];
+  onChange: (connectionId: string) => void;
+  onModelChange: (model: string) => void;
+  saving: boolean;
+  snapshot: ProjectSnapshot;
+}) {
+  const labels = assignment.selections.length > 0
+    ? assignment.selections.map((selection) => {
+        const connection = snapshot.settings.aiConnections.find((item) => item.id === selection.connectionId);
+        return `${connection?.label ?? selection.connectionId}${selection.model ? ` · ${selection.model}` : ""}`;
+      })
+    : assignment.connectionIds;
+  const selectedConnectionId = assignment.selections[0]?.connectionId ?? assignment.connectionIds[0] ?? "";
+  const selectedConnection = snapshot.settings.aiConnections.find((item) => item.id === selectedConnectionId);
+  const selectedModel = assignment.selections[0]?.model ?? selectedConnection?.defaultModel ?? "";
+  const modelOptions = modelChoices(selectedConnection, selectedModel);
+  return (
+    <div className="session-context-list-row static session-role-assignment-row">
+      <div>
+        <strong>{roleLabel(assignment.roleId)}</strong>
+        <small>{labels.length > 0 ? labels.join(", ") : "미설정"}</small>
+      </div>
+      <select
+        aria-label={`${roleLabel(assignment.roleId)} AI 변경`}
+        disabled={saving || connections.length === 0}
+        onChange={(event) => onChange(event.target.value)}
+        value={selectedConnectionId}
+      >
+        <option value="">미설정</option>
+        {connections.map((connection) => (
+          <option key={connection.id} value={connection.id}>
+            {connection.label}
+          </option>
+        ))}
+      </select>
+      {selectedConnection ? (
+        <select
+          aria-label={`${roleLabel(assignment.roleId)} 모델 변경`}
+          disabled={saving}
+          onChange={(event) => onModelChange(event.target.value)}
+          value={selectedModel}
+        >
+          <option value="">CLI 기본 모델</option>
+          {modelOptions.map((model) => (
+            <option key={model} value={model}>
+              {model}
+            </option>
+          ))}
+        </select>
+      ) : null}
+    </div>
+  );
+}
+
+function modelChoices(connection: AiConnection | undefined, selectedModel: string): string[] {
+  if (!connection) return [];
+  return [...new Set([...(connection.availableModels ?? []), connection.defaultModel ?? "", selectedModel].filter(Boolean))];
+}
+
+function SessionMessage(props: {
+  role: "user" | "assistant" | "tool";
+  icon: "user" | "bot" | "file";
+  title: string;
+  timestamp: string | null;
+  children: ReactNode;
+}) {
+  const Icon = props.icon === "user" ? User : props.icon === "file" ? FileText : Bot;
+  return (
+    <article className={`session-message ${props.role}`}>
+      <div className="session-message-avatar">
+        <Icon size={14} />
+      </div>
+      <div className="session-message-body">
+        <header>
+          <strong>{props.title}</strong>
+          <time>{formatRelative(props.timestamp)}</time>
+        </header>
+        <div className="session-message-content">{props.children}</div>
+      </div>
+    </article>
+  );
+}
+
+function ContextRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="session-context-row">
+      <span>{label}</span>
+      <strong title={value}>{value}</strong>
+    </div>
+  );
+}
+
+function sessionStatusCopy(session: AgentSessionSummary): string {
+  if (session.nextAction === "approval") return "사용자 승인이 필요합니다. 승인 전에는 다음 단계로 진행하지 않습니다.";
+  if (session.nextAction === "watch") return "작업자가 실행 중입니다. 이벤트와 산출물은 아래 타임라인에 누적됩니다.";
+  if (session.nextAction === "review") return "실행이 끝났습니다. 변경 파일과 검증 결과를 확인할 차례입니다.";
+  if (session.nextAction === "retry") return "실행 실패 또는 취소 상태입니다. 실패 이유를 확인하고 재시도 여부를 결정해야 합니다.";
+  if (session.nextAction === "start") return "실행 대기 상태입니다. 작업자가 세션을 가져가면 상세 이벤트가 표시됩니다.";
+  return "세션 상세를 확인합니다.";
+}
+
+function currentAiLabel(session: AgentSessionSummary): string {
+  const role = session.roleId ? roleLabel(session.roleId) : "역할 미정";
+  const runner = session.model ?? session.provider ?? session.connectionId ?? "AI 미정";
+  return `${role} · ${runner}`;
+}
+
+function changedFileCountLabel(files: GitFileStatus[], session: AgentSessionSummary | null): string {
+  if (files.length > 0) return files.length.toString();
+  return session?.changedFileCount?.toString() ?? "-";
+}
+
+function shortPath(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length <= 2) return path || "/";
+  return `.../${parts.slice(-2).join("/")}`;
+}
+
+function formatRelative(value: string | null | undefined): string {
+  const time = value ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(time)) return "-";
+  const diffMs = Math.max(0, Date.now() - time);
+  if (diffMs < 60_000) return "방금 전";
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) return `${minutes}분 전`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}시간 전`;
+  return `${Math.floor(hours / 24)}일 전`;
+}
+
+function messageFromError(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return fallback;
+}

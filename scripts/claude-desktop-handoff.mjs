@@ -409,6 +409,30 @@ COMMIT;
   );
 }
 
+// 실행 중 heartbeat를 주기적으로 갱신한다. handoff run은 run_event를 발신하지 않아
+// heartbeat_at이 시작 시각에 멈춰 있으므로, 이 갱신이 없으면 20분 넘는 run이
+// deriveRunLiveState에서 "정체 후보"로 오탐된다. status='Running' 가드로 이미
+// 종료된 run은 건드리지 않아 finalize 직후의 stray tick도 no-op이 된다.
+const HEARTBEAT_INTERVAL_MS = 60_000;
+
+function touchRunHeartbeat({ dbPath, runId }) {
+  const now = new Date().toISOString();
+  runSqlite(
+    dbPath,
+    `UPDATE agent_runs
+SET heartbeat_at = ${sqlQuote(now)}, updated_at = ${sqlQuote(now)}
+WHERE id = ${sqlQuote(runId)} AND status = 'Running';`,
+  );
+}
+
+function startRunHeartbeat({ dbPath, runId }) {
+  const timer = setInterval(() => {
+    touchRunHeartbeat({ dbPath, runId });
+  }, HEARTBEAT_INTERVAL_MS);
+  timer.unref?.();
+  return timer;
+}
+
 // ── Hermes execution ──────────────────────────────────────────────────────────
 
 function loadAppSettings() {
@@ -615,6 +639,7 @@ async function processNextTask() {
   const dbTaskId = `task-${runId}`;
   const artifactDirRel = join(".helm", "artifacts", "runs", runId);
   let dbRecord = null;
+  let heartbeatTimer = null;
   mkdirSync(join(helmRoot, artifactDirRel), { recursive: true });
 
   try {
@@ -639,6 +664,10 @@ async function processNextTask() {
         task,
         artifactDirRel,
         startedAt: startedAt.toISOString(),
+      });
+      heartbeatTimer = startRunHeartbeat({
+        dbPath: dbRecord.dbPath,
+        runId,
       });
     }
 
@@ -756,6 +785,8 @@ async function processNextTask() {
     process.stderr.write(
       `Failed: ${formatError(error)}\nReport: ${reportPath}\n`,
     );
+  } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
   }
 
   return true;

@@ -602,6 +602,30 @@ pub struct AgentRunSummary {
     pub updated_at: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionSummary {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub source_run_id: Option<String>,
+    pub title: String,
+    pub status: String,
+    pub provider: Option<String>,
+    pub connection_id: Option<String>,
+    pub model: Option<String>,
+    pub role_id: Option<String>,
+    pub task_status: Option<String>,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub last_signal_at: Option<String>,
+    pub next_action: String,
+    pub changed_file_count: Option<i64>,
+    pub event_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RunEventSummary {

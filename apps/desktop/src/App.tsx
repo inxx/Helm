@@ -1,28 +1,32 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { GitBranch, ListChecks, Settings, SquareTerminal } from "lucide-react";
+import { ClipboardList, GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
+import { PlanningScreen } from "./screens/PlanningScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
+import { SessionsScreen } from "./screens/SessionsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
 
-type Screen = "tasks" | "git" | "terminal" | "settings";
+type Screen = "planning" | "sessions" | "tasks" | "git" | "terminal" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItems = [
+  { id: "planning" as const, label: "계획", icon: ClipboardList },
+  { id: "sessions" as const, label: "채팅", icon: MessageSquare },
   { id: "tasks" as const, label: "태스크", icon: ListChecks },
   { id: "git" as const, label: "깃", icon: GitBranch },
-  { id: "terminal" as const, label: "터미널", icon: SquareTerminal },
+  { id: "terminal" as const, label: "통합 터미널", icon: SquareTerminal },
   { id: "settings" as const, label: "설정", icon: Settings },
 ];
 
 export function App() {
-  const [screen, setScreen] = useState<Screen>("tasks");
+  const [screen, setScreen] = useState<Screen>("sessions");
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [recents, setRecents] = useState<RecentProject[]>(() => loadRecents());
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -30,6 +34,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
   const [terminalMounted, setTerminalMounted] = useState(false);
+  const [pendingPlanningGoal, setPendingPlanningGoal] = useState<string | null>(null);
 
   const selectedTask = useMemo<TaskSummary | null>(() => {
     if (!snapshot || !selectedTaskId) return null;
@@ -49,7 +54,7 @@ export function App() {
         saveRecents(launch.recentProjects);
 
         if (launch.snapshot) {
-          hydrateSnapshot(launch.snapshot, "tasks");
+          hydrateSnapshot(launch.snapshot, "sessions");
         } else if (launch.restoreError) {
           setError(launch.restoreError.message);
         }
@@ -119,7 +124,7 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [snapshot?.project.id, busy]);
 
-  function hydrateSnapshot(next: ProjectSnapshot, nextScreen: Screen = "tasks") {
+  function hydrateSnapshot(next: ProjectSnapshot, nextScreen: Screen = "sessions") {
     setSnapshot(next);
     setSelectedTaskId(null);
     setScreen(nextScreen);
@@ -185,7 +190,7 @@ export function App() {
       if (snapshot?.project.id === projectId) {
         setSnapshot(null);
         setSelectedTaskId(null);
-        setScreen("tasks");
+        setScreen("sessions");
       }
     } catch (err) {
       setError(errorMessage(err));
@@ -214,11 +219,6 @@ export function App() {
     }
   }
 
-  function openTask(taskId: string) {
-    setSelectedTaskId(taskId);
-    setScreen("tasks");
-  }
-
   return (
     <AppShell
       navItems={navItems}
@@ -240,12 +240,43 @@ export function App() {
         </section>
       ) : (
         <>
+          {screen === "sessions" ? (
+            <SessionsScreen
+              snapshot={snapshot}
+              selectedTaskId={selectedTaskId}
+              onSelectTask={setSelectedTaskId}
+              onOpenProject={openProject}
+              onGoTerminal={() => setScreen("terminal")}
+              onGoSettings={() => setScreen("settings")}
+              onGoPlanning={(goalText) => {
+                if (goalText) setPendingPlanningGoal(goalText);
+                setScreen("planning");
+              }}
+              onRefresh={refresh}
+            />
+          ) : null}
+          {screen === "planning" ? (
+            <PlanningScreen
+              snapshot={snapshot}
+              initialGoalText={pendingPlanningGoal}
+              onInitialGoalConsumed={() => setPendingPlanningGoal(null)}
+              onOpenProject={openProject}
+              onRefresh={refresh}
+              onOpenTask={(taskId) => {
+                setSelectedTaskId(taskId);
+                setScreen("sessions");
+              }}
+            />
+          ) : null}
           {screen === "tasks" ? (
             <TasksScreen
               snapshot={snapshot}
               selectedTask={selectedTask}
               selectedTaskId={selectedTaskId}
-              onSelectTask={setSelectedTaskId}
+              onSelectTask={(taskId) => {
+                setSelectedTaskId(taskId);
+                if (taskId) setScreen("sessions");
+              }}
               onOpenProject={openProject}
               onRefresh={refresh}
               onGoGit={() => setScreen("git")}
@@ -264,6 +295,9 @@ export function App() {
                 snapshot={snapshot}
                 isActive={screen === "terminal"}
                 onOpenProject={openProject}
+                recents={recents}
+                activeProjectId={snapshot?.project.id ?? null}
+                onSwitchProject={switchProject}
                 onSnapshotUpdated={applySnapshotUpdate}
               />
             </div>

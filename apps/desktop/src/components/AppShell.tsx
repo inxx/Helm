@@ -39,19 +39,13 @@ export function AppShell<T extends string>({
   children,
 }: AppShellProps<T>) {
   return (
-    <div className="grid h-screen min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-background text-foreground">
-      <header
-        className="flex items-stretch border-b border-border bg-background"
-        role="tablist"
-        aria-label="도메인 탭"
-      >
-        <div className="flex w-[232px] flex-shrink-0 items-center gap-2.5 border-r border-border bg-sidebar px-3.5">
-          <span className="grid h-7 w-7 place-items-center rounded-md bg-slate-900 font-mono text-sm font-semibold text-emerald-400">
-            H
-          </span>
-          <span className="text-sm font-semibold tracking-tight">Helm</span>
+    <div className="app-shell">
+      <header className="app-topbar" role="tablist" aria-label="도메인 탭">
+        <div className="app-topbar-brand">
+          <span className="brand-mark">H</span>
+          <span className="brand-name">Helm</span>
         </div>
-        <div className="flex min-w-0 items-stretch gap-0.5 overflow-x-auto px-3 pt-1">
+        <div className="app-tabs">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = item.id === activeScreen;
@@ -62,14 +56,9 @@ export function AppShell<T extends string>({
                 role="tab"
                 aria-selected={isActive}
                 onClick={() => onNavigate(item.id)}
-                className={cn(
-                  "inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 border-transparent px-3 pt-2 pb-2.5 text-sm font-medium tracking-tight transition-colors",
-                  isActive
-                    ? "border-primary text-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
+                className={cn("app-tab", isActive && "active")}
               >
-                <Icon size={15} className={cn("flex-shrink-0", isActive && "text-primary")} />
+                <Icon size={15} aria-hidden="true" />
                 <span>{item.label}</span>
               </button>
             );
@@ -77,53 +66,33 @@ export function AppShell<T extends string>({
         </div>
       </header>
 
-      <div
-        className={cn(
-          "grid min-h-0 overflow-hidden",
-          hideSidebar ? "grid-cols-[minmax(0,1fr)]" : "grid-cols-[232px_minmax(0,1fr)]",
-        )}
-      >
+      <div className={cn("app-body", hideSidebar && "no-sidebar")}>
         {!hideSidebar && (
-        <aside className="flex flex-col gap-3 border-r border-border bg-sidebar p-3.5">
-          <div className="flex min-h-0 flex-col gap-1.5">
-            <h3 className="px-1 text-[10.5px] font-semibold tracking-wider text-muted-foreground uppercase">
-              프로젝트
-            </h3>
+        <aside className="sidebar">
+          <div className="sidebar-projects">
+            <h3 className="sidebar-title">프로젝트</h3>
             {recents.length === 0 ? (
-              <p className="mt-0.5 px-1 text-xs text-muted-foreground">
-                아직 열린 프로젝트가 없습니다.
-              </p>
+              <p className="sidebar-empty">아직 열린 프로젝트가 없습니다.</p>
             ) : (
-              <ul className="m-0 flex list-none flex-col gap-0.5 overflow-y-auto p-0">
+              <ul className="sidebar-project-list">
                 {recents.map((project) => {
                   const isActive = project.id === activeProjectId;
                   const isDisabled = busy && !isActive;
                   return (
-                    <li key={project.id} className="flex items-center gap-1">
+                    <li key={project.id} className="sidebar-project-row">
                       <button
                         type="button"
                         onClick={() => onSwitchProject(project.id)}
                         title={project.rootPath}
                         disabled={isDisabled}
                         className={cn(
-                          "flex min-w-0 flex-1 flex-col items-start gap-px rounded-md px-2.5 py-1.5 text-left transition-colors",
-                          isActive
-                            ? "bg-background text-foreground shadow-sm"
-                            : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                          isDisabled && "cursor-not-allowed opacity-50 hover:bg-transparent",
+                          "sidebar-project-button",
+                          isActive && "active",
+                          isDisabled && "disabled",
                         )}
                       >
-                        <span className="max-w-full truncate text-sm font-semibold tracking-tight">
-                          {project.name}
-                        </span>
-                        <span
-                          className={cn(
-                            "max-w-full truncate font-mono text-[10.5px]",
-                            isActive ? "text-foreground/60" : "text-muted-foreground/80",
-                          )}
-                        >
-                          {shortenPath(project.rootPath)}
-                        </span>
+                        <span className="sidebar-project-name">{project.name}</span>
+                        <span className="sidebar-project-path">{shortenPath(project.rootPath)}</span>
                       </button>
                       <Button
                         type="button"
@@ -131,11 +100,11 @@ export function AppShell<T extends string>({
                         size="icon-xs"
                         disabled={busy}
                         onClick={() => onForgetProject(project.id)}
-                        className="text-muted-foreground hover:text-destructive"
+                        className="sidebar-project-delete"
                         title="프로젝트 목록에서 삭제"
                         aria-label={`${project.name} 프로젝트 목록에서 삭제`}
                       >
-                        <Trash2 className="size-3.5" aria-hidden="true" />
+                        <Trash2 size={14} aria-hidden="true" />
                       </Button>
                     </li>
                   );
@@ -144,23 +113,23 @@ export function AppShell<T extends string>({
             )}
           </div>
 
-          <div className="mt-auto border-t border-border/60 pt-2.5">
+          <div className="sidebar-footer">
             <Button
               type="button"
               variant="outline"
               size="sm"
               disabled={busy}
               onClick={onOpenProject}
-              className="w-full border-dashed font-medium"
+              className="sidebar-add-project"
             >
-              <Plus className="size-3.5" />
+              <Plus size={14} aria-hidden="true" />
               <span>{busy ? "처리 중" : "프로젝트 추가"}</span>
             </Button>
           </div>
         </aside>
         )}
 
-        <main className="main flex min-h-0 min-w-0 flex-col overflow-hidden">{children}</main>
+        <main className="main">{children}</main>
       </div>
     </div>
   );

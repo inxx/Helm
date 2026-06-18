@@ -3,17 +3,17 @@ mod git;
 mod models;
 
 use crate::models::{
-    AgentRunSummary, AiConnectionCheckResult, AiModelRefreshResult, AppSettings, ApprovalSummary,
-    CommandError, CommandResult, CoordinationExportSummary, CreateEpicInput,
-    CreatePlanningSessionInput, CreateTaskInput, DecidePlanDraftInput, EffectiveSettings,
-    EpicSummary, GitBranchSummary, GitCommitSummary, GitFileStatus, GitRepositoryState,
-    NodeRuntimeSummary, OrchestratorSettings, PlannerConversationInput, PlannerConversationResult,
-    PlanningMaterializationSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectContext,
-    ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, RunEventSummary, RunnerCheckResult,
-    RunnerTemplateSummary, SavePlanDraftRevisionInput, SaveTerminalScriptInput,
-    TaskCompletionGitSummary, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
-    TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
-    TerminalSavedScriptSummary,
+    AgentRunSummary, AgentSessionSummary, AiConnectionCheckResult, AiModelRefreshResult,
+    AppSettings, ApprovalSummary, CommandError, CommandResult, CoordinationExportSummary,
+    CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput, DecidePlanDraftInput,
+    EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary, GitFileStatus,
+    GitRepositoryState, NodeRuntimeSummary, OrchestratorSettings, PlannerConversationInput,
+    PlannerConversationResult, PlanningMaterializationSummary, PlanningSessionDetail,
+    PlanningSessionSummary, ProjectContext, ProjectSettingsPatch, ProjectSnapshot, ProjectSummary,
+    RunEventSummary, RunnerCheckResult, RunnerTemplateSummary, SavePlanDraftRevisionInput,
+    SaveTerminalScriptInput, TaskCompletionGitSummary, TaskGraphConflictSummary,
+    TaskGraphExportSummary, TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
+    TerminalCommandResult, TerminalDirectoryEntry, TerminalSavedScriptSummary,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,7 +30,7 @@ use std::sync::{
     mpsc, Arc, Mutex,
 };
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 const MAX_RECENT_PROJECTS: usize = 12;
 const AI_CLI_SMOKE_SENTINEL: &str = "HELM_CLI_OK";
@@ -1283,10 +1283,12 @@ fn start_terminal_pty(
 
 #[tauri::command]
 fn list_terminal_ptys(
-    project_id: String,
+    project_id: Option<String>,
     state: State<'_, AppState>,
 ) -> CommandResult<Vec<TerminalPtySummary>> {
-    let _ = project_context(&state, &project_id)?;
+    if let Some(project_id) = project_id.as_deref() {
+        let _ = project_context(&state, project_id)?;
+    }
     let sessions = state
         .terminal_sessions
         .lock()
@@ -1295,7 +1297,10 @@ fn list_terminal_ptys(
         .values()
         .filter_map(|session| {
             let state = session.state.lock().ok()?;
-            if state.project_id == project_id {
+            if project_id
+                .as_deref()
+                .is_none_or(|project_id| state.project_id == project_id)
+            {
                 Some(state.summary())
             } else {
                 None
@@ -1601,6 +1606,21 @@ fn queue_next_role_after_success(
 
     match db::prepare_next_role_context(conn, &context.root_path, project_id, &run.task_id) {
         Ok(next_run) => {
+            append_and_emit_system_run_event(
+                app,
+                conn,
+                project_id,
+                &run.task_id,
+                &run.id,
+                "Auto handoff queued",
+                json!({
+                    "source": "auto-continuation",
+                    "fromRunId": run.id,
+                    "fromRoleId": run.role_id,
+                    "nextRunId": next_run.id,
+                    "nextRoleId": next_run.role_id
+                }),
+            );
             let state = app.state::<AppState>();
             let _ = ensure_project_queue_worker(app, &state, project_id);
             let _ = app.emit(
@@ -2380,6 +2400,17 @@ fn list_project_runs(
     let context = project_context(&state, &project_id)?;
     let conn = db::open_existing_db(&context.db_path)?;
     db::list_project_runs(&conn, &project_id, limit.unwrap_or(120))
+}
+
+#[tauri::command]
+fn list_agent_sessions(
+    project_id: String,
+    limit: Option<i64>,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<AgentSessionSummary>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::list_agent_sessions(&conn, &project_id, limit.unwrap_or(120))
 }
 
 #[tauri::command]
@@ -5932,6 +5963,13 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::default())
         .setup(|app| {
+            ensure_main_window_visible(app);
+            focus_main_window(&app.handle());
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(500));
+                focus_main_window(&app_handle);
+            });
             let state = app.state::<AppState>();
             start_handoff_watcher(&state);
             Ok(())
@@ -6006,6 +6044,7 @@ fn main() {
             cancel_host_role,
             list_agent_runs,
             list_project_runs,
+            list_agent_sessions,
             list_task_timeline,
             list_run_events,
             get_agent_run,
@@ -6017,6 +6056,9 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("failed to build Helm desktop")
         .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                focus_main_window(app);
+            }
             if matches!(
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
@@ -6025,4 +6067,94 @@ fn main() {
                 stop_handoff_watcher(&state);
             }
         });
+}
+
+fn focus_main_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = window.show();
+    let _ = window.unminimize();
+    center_window_on_primary_monitor(&window);
+    let _ = window.set_focus();
+}
+
+fn center_window_on_primary_monitor(window: &tauri::WebviewWindow) {
+    let monitor = window
+        .available_monitors()
+        .ok()
+        .and_then(|monitors| {
+            monitors
+                .iter()
+                .find(|monitor| {
+                    let position = monitor.position();
+                    position.x >= 0 && position.y >= 0
+                })
+                .cloned()
+                .or_else(|| monitors.first().cloned())
+        })
+        .or_else(|| {
+            window
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .or_else(|| window.current_monitor().ok().flatten())
+        });
+    let Some(monitor) = monitor else {
+        let _ = window.center();
+        return;
+    };
+    let Ok(window_size) = window.outer_size() else {
+        let _ = window.center();
+        return;
+    };
+
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let x = i64::from(monitor_position.x)
+        + ((i64::from(monitor_size.width) - i64::from(window_size.width)) / 2).max(0);
+    let y = i64::from(monitor_position.y)
+        + ((i64::from(monitor_size.height) - i64::from(window_size.height)) / 2).max(0);
+
+    let _ = window.set_position(PhysicalPosition::new(x as i32, y as i32));
+}
+
+fn ensure_main_window_visible(app: &tauri::App) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let Ok(monitors) = window.available_monitors() else {
+        return;
+    };
+
+    let window_left = i64::from(position.x);
+    let window_top = i64::from(position.y);
+    let window_right = window_left + i64::from(size.width);
+    let window_bottom = window_top + i64::from(size.height);
+
+    let is_visible = monitors.iter().any(|monitor| {
+        let monitor_position = monitor.position();
+        let monitor_size = monitor.size();
+        let monitor_left = i64::from(monitor_position.x);
+        let monitor_top = i64::from(monitor_position.y);
+        let monitor_right = monitor_left + i64::from(monitor_size.width);
+        let monitor_bottom = monitor_top + i64::from(monitor_size.height);
+
+        let overlap_width =
+            (window_right.min(monitor_right) - window_left.max(monitor_left)).max(0);
+        let overlap_height =
+            (window_bottom.min(monitor_bottom) - window_top.max(monitor_top)).max(0);
+
+        overlap_width >= 120 && overlap_height >= 80
+    });
+
+    if !is_visible {
+        center_window_on_primary_monitor(&window);
+    }
 }

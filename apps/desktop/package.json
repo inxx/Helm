@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "dev": "npm run build && node scripts/serve-dist.mjs",
+    "build": "tsc --noEmit && node scripts/vite-build.mjs",
     "test": "node --test --experimental-strip-types src/lib/*.test.ts",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
