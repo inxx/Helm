@@ -608,6 +608,7 @@ fn apply_runner_template(
             worktree_setup: None,
             jira_config: None,
             obsidian_vault_path: None,
+            obsidian_artifact_path: None,
             token_budget: None,
             artifact_retention_days: None,
         },

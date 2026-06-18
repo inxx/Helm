@@ -729,6 +729,13 @@ pub fn effective_settings(conn: &Connection, project_id: &str) -> CommandResult<
                     .map(str::to_string)
             })
             .or_else(default_obsidian_vault_path),
+        obsidian_artifact_path: settings.remove("obsidianArtifactPath").and_then(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        }),
         token_budget: settings
             .remove("tokenBudget")
             .and_then(|value| value.as_i64()),
@@ -792,6 +799,9 @@ pub fn update_settings(
     }
     if let Some(value) = patch.obsidian_vault_path {
         values.push(("obsidianVaultPath", option_string(value)));
+    }
+    if let Some(value) = patch.obsidian_artifact_path {
+        values.push(("obsidianArtifactPath", option_string(value)));
     }
     if let Some(value) = patch.token_budget {
         values.push(("tokenBudget", option_i64(value)));
@@ -1728,6 +1738,11 @@ pub fn run_stub_role(
         .map_err(|err| CommandError::io("실행 산출물을 저장하지 못했습니다.", err))?;
     fs::write(artifact_abs_dir.join("diff.patch"), "")
         .map_err(|err| CommandError::io("실행 산출물을 저장하지 못했습니다.", err))?;
+    write_role_dossier(
+        &artifact_abs_dir,
+        role_id,
+        &stub_role_dossier(role_id, task_id),
+    )?;
 
     let result_status = validate_structured_result(&result)
         .then_some("pass".to_string())
@@ -1966,6 +1981,11 @@ pub fn prepare_role_context(
         "# Host Run Queued\n\nContext Pack이 준비되었고 실제 host runner 실행 전입니다.\n",
     )
     .map_err(|err| CommandError::io("실행 요약을 저장하지 못했습니다.", err))?;
+    write_role_dossier(
+        &artifact_path,
+        role_id,
+        &queued_role_dossier(role_id, "Host Run Queued"),
+    )?;
     fs::write(
         artifact_path.join("structured-result.json"),
         serde_json::to_string_pretty(&placeholder_result)
@@ -2048,7 +2068,8 @@ pub fn prepare_role_context(
         json!({
             "summaryPath": format!("{artifact_dir}/summary.md"),
             "resultPath": format!("{artifact_dir}/structured-result.json"),
-            "schemaPath": format!("{artifact_dir}/structured-result.schema.json")
+            "schemaPath": format!("{artifact_dir}/structured-result.schema.json"),
+            "dossierPath": format!("{artifact_dir}/{}", role_dossier_artifact_name(role_id))
         }),
     )?;
     insert_audit(
@@ -2374,6 +2395,13 @@ pub fn run_host_role(
                         .to_string(),
                 )
                 .env(
+                    "HELM_ROLE_DOSSIER_PATH",
+                    artifact_path
+                        .join(role_dossier_artifact_name(&run.role_id))
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                .env(
                     "HELM_SCHEMA_PATH",
                     artifact_path
                         .join("structured-result.schema.json")
@@ -2483,6 +2511,7 @@ pub fn run_host_role(
         json!({
             "stdoutPath": format!("{}/stdout.log", run.artifact_dir),
             "stderrPath": format!("{}/stderr.log", run.artifact_dir),
+            "dossierPath": format!("{}/{}", run.artifact_dir, role_dossier_artifact_name(&run.role_id)),
             "changedFilesPath": format!("{}/changed-files.json", run.artifact_dir),
             "diffPath": format!("{}/diff.patch", run.artifact_dir),
             "changedFileCount": changed_files.len(),
@@ -2503,6 +2532,7 @@ pub fn run_host_role(
     let schema_ok = result_value
         .as_ref()
         .is_some_and(validate_structured_result);
+    let dossier_ok = role_dossier_is_present(&artifact_path, &run.role_id);
     let has_blocking_gate = result_value
         .as_ref()
         .is_some_and(structured_result_has_blocking_gate);
@@ -2510,13 +2540,24 @@ pub fn run_host_role(
         diff_consistency_check(&run.role_id, result_value.as_ref(), &changed_files);
     let exit_code = command_output.exit_code;
     let final_status = if command_output.canceled {
-        write_fallback_result(&artifact_path, exit_code)?;
+        write_fallback_result(&artifact_path, &run.role_id, exit_code)?;
         "Canceled"
     } else if command_output.timed_out {
-        write_fallback_result(&artifact_path, exit_code)?;
+        write_fallback_result(&artifact_path, &run.role_id, exit_code)?;
         "TimedOut"
     } else if !schema_ok {
-        write_fallback_result(&artifact_path, exit_code)?;
+        write_fallback_result(&artifact_path, &run.role_id, exit_code)?;
+        "NeedsInspection"
+    } else if !dossier_ok {
+        write_role_dossier(
+            &artifact_path,
+            &run.role_id,
+            &format!(
+                "{}\n\n## 계약 위반\n\n- `{}` 파일이 비어 있거나 생성되지 않았습니다.\n- Helm은 역할별 md 산출물을 handoff source of truth로 요구합니다.\n",
+                role_dossier_heading(&run.role_id),
+                role_dossier_artifact_name(&run.role_id)
+            ),
+        )?;
         "NeedsInspection"
     } else if exit_code != 0 {
         "Failed"
@@ -2702,6 +2743,9 @@ pub fn run_host_role(
     }
 
     let summary_text = fs::read_to_string(artifact_path.join("summary.md")).unwrap_or_default();
+    let role_dossier_text =
+        fs::read_to_string(artifact_path.join(role_dossier_artifact_name(&run.role_id)))
+            .unwrap_or_default();
     match write_obsidian_run_artifact(
         conn,
         project_id,
@@ -2712,6 +2756,7 @@ pub fn run_host_role(
         changed_files.len(),
         &finished_at,
         &summary_text,
+        Some(&role_dossier_text),
     ) {
         Ok(Some(path)) => {
             append_and_emit_run_event(
@@ -2785,7 +2830,7 @@ pub fn mark_host_run_launch_error(
     };
     fs::write(&stderr_path, next_stderr)
         .map_err(|err| CommandError::io("stderr 로그를 저장하지 못했습니다.", err))?;
-    write_fallback_result(&artifact_path, -1)?;
+    write_fallback_result(&artifact_path, &run.role_id, -1)?;
 
     let finished_at = now();
     conn.execute(
@@ -2993,6 +3038,11 @@ pub fn prepare_repair_context(
         "# Targeted Repair Queued\n\nRepair Context Pack이 준비되었고 실제 host runner 실행 전입니다.\n",
     )
     .map_err(|err| CommandError::io("repair 실행 요약을 저장하지 못했습니다.", err))?;
+    write_role_dossier(
+        &artifact_path,
+        role_id,
+        &queued_role_dossier(role_id, "Targeted Repair Queued"),
+    )?;
     fs::write(
         artifact_path.join("structured-result.json"),
         serde_json::to_string_pretty(&placeholder_result)
@@ -3074,7 +3124,8 @@ pub fn prepare_repair_context(
         json!({
             "summaryPath": format!("{artifact_dir}/summary.md"),
             "resultPath": format!("{artifact_dir}/structured-result.json"),
-            "schemaPath": format!("{artifact_dir}/structured-result.schema.json")
+            "schemaPath": format!("{artifact_dir}/structured-result.schema.json"),
+            "dossierPath": format!("{artifact_dir}/{}", role_dossier_artifact_name(role_id))
         }),
     )?;
     tx.execute(
@@ -4681,11 +4732,18 @@ pub fn read_run_artifact(
         artifact_name,
         "summary.md"
             | "structured-result.json"
+            | "plan.md"
+            | "pr-dossier.md"
+            | "plan-verification.md"
+            | "review-report.md"
+            | "test-report.md"
+            | "role-dossier.md"
             | "stdout.log"
             | "stderr.log"
             | "context-pack.md"
             | "context-pack.json"
             | "context-manifest.json"
+            | "runner-request.json"
             | "git-before.txt"
             | "git-after.txt"
             | "structured-result.schema.json"
@@ -6002,6 +6060,33 @@ fn planning_draft_artifact_path(session_id: &str, revision: i64) -> String {
     format!(".helm/planning/{session_id}/draft-v{revision}.md")
 }
 
+fn configured_obsidian_artifact_base_path(
+    vault_path: &str,
+    configured_path: Option<&str>,
+) -> Option<PathBuf> {
+    let configured = configured_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    match configured {
+        Some(path) => {
+            let candidate = PathBuf::from(path);
+            if candidate.is_absolute() {
+                Some(candidate)
+            } else {
+                Some(Path::new(vault_path).join(candidate))
+            }
+        }
+        None => None,
+    }
+}
+
+fn path_relative_to_base(path: &Path, base: &Path) -> String {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
+}
+
 fn write_obsidian_plan_artifact(
     conn: &Connection,
     project_id: &str,
@@ -6036,8 +6121,20 @@ fn write_obsidian_plan_artifact(
         .join(slug_for_path(&project.name))
         .join("desktop")
         .join("plans")
-        .join(file_name);
-    let path = Path::new(vault_path).join(&relative_path);
+        .join(&file_name);
+    let configured_base = configured_obsidian_artifact_base_path(
+        vault_path,
+        settings.obsidian_artifact_path.as_deref(),
+    );
+    let path = configured_base
+        .as_ref()
+        .map(|base| {
+            base.join(slug_for_path(&project.name))
+                .join("desktop")
+                .join("plans")
+                .join(&file_name)
+        })
+        .unwrap_or_else(|| Path::new(vault_path).join(&relative_path));
     let parent = path.parent().ok_or_else(|| {
         CommandError::validation("Obsidian Plan Document 경로가 올바르지 않습니다.")
     })?;
@@ -6064,7 +6161,12 @@ fn write_obsidian_plan_artifact(
         .map_err(|err| CommandError::io("Obsidian Plan Document를 저장하지 못했습니다.", err))?;
     fs::rename(&tmp_path, &path)
         .map_err(|err| CommandError::io("Obsidian Plan Document를 교체하지 못했습니다.", err))?;
-    Ok(Some(relative_path.to_string_lossy().to_string()))
+    Ok(Some(
+        configured_base
+            .as_ref()
+            .map(|base| path_relative_to_base(&path, base))
+            .unwrap_or_else(|| relative_path.to_string_lossy().to_string()),
+    ))
 }
 
 fn write_obsidian_run_artifact(
@@ -6077,6 +6179,7 @@ fn write_obsidian_run_artifact(
     changed_file_count: usize,
     finished_at: &str,
     summary: &str,
+    role_dossier: Option<&str>,
 ) -> CommandResult<Option<String>> {
     let settings = effective_settings(conn, project_id)?;
     let Some(vault_path) = settings
@@ -6101,8 +6204,20 @@ fn write_obsidian_run_artifact(
         .join(slug_for_path(&project.name))
         .join("desktop")
         .join("sessions")
-        .join(file_name);
-    let path = Path::new(vault_path).join(&relative_path);
+        .join(&file_name);
+    let configured_base = configured_obsidian_artifact_base_path(
+        vault_path,
+        settings.obsidian_artifact_path.as_deref(),
+    );
+    let path = configured_base
+        .as_ref()
+        .map(|base| {
+            base.join(slug_for_path(&project.name))
+                .join("desktop")
+                .join("sessions")
+                .join(&file_name)
+        })
+        .unwrap_or_else(|| Path::new(vault_path).join(&relative_path));
     let parent = path
         .parent()
         .ok_or_else(|| CommandError::validation("Obsidian 실행 문서 경로가 올바르지 않습니다."))?;
@@ -6113,6 +6228,10 @@ fn write_obsidian_run_artifact(
     } else {
         summary.trim()
     };
+    let role_dossier = role_dossier
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .unwrap_or("_역할별 md 산출물 없음_");
     let content = format!(
         "---\n\
          date: {finished_at}\n\
@@ -6129,7 +6248,9 @@ fn write_obsidian_run_artifact(
          ---\n\n\
          # {}\n\n\
          ## 실행 요약\n\n\
-         {summary}\n",
+         {summary}\n\n\
+         ## 역할별 산출물\n\n\
+         {role_dossier}\n",
         project.name,
         task.title.replace('\n', " "),
         result_status.unwrap_or("-"),
@@ -6144,7 +6265,12 @@ fn write_obsidian_run_artifact(
         .map_err(|err| CommandError::io("Obsidian 실행 문서를 저장하지 못했습니다.", err))?;
     fs::rename(&tmp_path, &path)
         .map_err(|err| CommandError::io("Obsidian 실행 문서를 교체하지 못했습니다.", err))?;
-    Ok(Some(relative_path.to_string_lossy().to_string()))
+    Ok(Some(
+        configured_base
+            .as_ref()
+            .map(|base| path_relative_to_base(&path, base))
+            .unwrap_or_else(|| relative_path.to_string_lossy().to_string()),
+    ))
 }
 
 fn slug_for_path(value: &str) -> String {
@@ -7579,13 +7705,15 @@ fn codex_turn_start_params(
 }
 
 fn codex_app_server_role_prompt(artifact_path: &Path, run: &AgentRunSummary) -> String {
+    let dossier_name = role_dossier_artifact_name(&run.role_id);
     format!(
-        "Read {context_pack}, follow the role contract and any Role Policy section for {role_id}, then write {summary_path} and {result_path} following {schema_path}.\n\nRules:\n- Work only inside the task worktree and approved task scope.\n- If {setup_path} exists, inspect it before changing files and run only relevant setup steps under the active approval policy.\n- Do not skip the structured-result.json file; Helm gates depend on it.\n- Keep the final chat answer brief because Helm reads the artifact files as source of truth.",
+        "Read {context_pack}, follow the role contract and any Role Policy section for {role_id}, then write {summary_path}, {result_path}, and {dossier_path} following {schema_path}.\n\nRules:\n- Work only inside the task worktree and approved task scope.\n- If {setup_path} exists, inspect it before changing files and run only relevant setup steps under the active approval policy.\n- Do not skip the structured-result.json file; Helm gates depend on it.\n- Do not skip the role dossier md file; Helm uses it as the productized handoff record for this role.\n- Keep the final chat answer brief because Helm reads the artifact files as source of truth.",
         context_pack = artifact_path.join("context-pack.md").to_string_lossy(),
         role_id = run.role_id,
         setup_path = artifact_path.join("worktree-setup.json").to_string_lossy(),
         summary_path = artifact_path.join("summary.md").to_string_lossy(),
         result_path = artifact_path.join("structured-result.json").to_string_lossy(),
+        dossier_path = artifact_path.join(dossier_name).to_string_lossy(),
         schema_path = artifact_path
             .join("structured-result.schema.json")
             .to_string_lossy()
@@ -8325,7 +8453,7 @@ where
     }
 }
 
-fn write_fallback_result(artifact_path: &Path, exit_code: i32) -> CommandResult<()> {
+fn write_fallback_result(artifact_path: &Path, role_id: &str, exit_code: i32) -> CommandResult<()> {
     let fallback = json!({
         "schemaVersion": 1,
         "status": "needs_changes",
@@ -8348,6 +8476,14 @@ fn write_fallback_result(artifact_path: &Path, exit_code: i32) -> CommandResult<
             .map_err(|err| CommandError::io("fallback result를 만들지 못했습니다.", err))?,
     )
     .map_err(|err| CommandError::io("fallback result를 저장하지 못했습니다.", err))?;
+    write_role_dossier(
+        artifact_path,
+        role_id,
+        &format!(
+            "{}\n\n## 종료 상태\n\n- exit code: {exit_code}\n- 판정: NeedsInspection\n\n## 확인 필요\n\n- structured-result.json이 없거나 schema 검증에 실패했습니다.\n- stdout.log와 stderr.log를 확인해야 합니다.\n",
+            role_dossier_heading(role_id)
+        ),
+    )?;
     Ok(())
 }
 
@@ -8579,6 +8715,97 @@ fn markdown_list(items: &[&str]) -> String {
         .map(|item| format!("- {item}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn role_dossier_artifact_name(role_id: &str) -> &'static str {
+    match role_id {
+        "planner" => "plan.md",
+        "coder" => "pr-dossier.md",
+        "plan_verifier" => "plan-verification.md",
+        "code_reviewer" => "review-report.md",
+        "tester" => "test-report.md",
+        _ => "role-dossier.md",
+    }
+}
+
+fn role_dossier_title(role_id: &str) -> &'static str {
+    match role_id {
+        "planner" => "계획서",
+        "coder" => "PR 작업 문서",
+        "plan_verifier" => "계획 준수 검토 기록",
+        "code_reviewer" => "코드 리뷰 기록",
+        "tester" => "테스트 기록",
+        _ => "역할 실행 기록",
+    }
+}
+
+fn role_dossier_heading(role_id: &str) -> String {
+    format!("# {}", role_dossier_title(role_id))
+}
+
+fn role_dossier_contract_markdown(role_id: &str) -> String {
+    match role_id {
+        "planner" => vec![
+            "- 파일명: `plan.md`",
+            "- 포함: 목표, 범위, 제외 범위, 실행 단계, acceptance criteria, 검증 계획, 위험, open questions",
+            "- 금지: 승인 전 구현 지시를 확정 상태처럼 기록하지 않는다.",
+        ],
+        "coder" => vec![
+            "- 파일명: `pr-dossier.md`",
+            "- 포함: 작업 기록, 변경 파일과 이유, 의사결정, 참고문서, 실행한 명령, 검증 결과, 남은 위험, PR 본문 초안",
+            "- 금지: 실제 diff와 맞지 않는 변경 요약을 쓰지 않는다.",
+        ],
+        "plan_verifier" => vec![
+            "- 파일명: `plan-verification.md`",
+            "- 포함: 승인 계획 대비 구현 일치 여부, 누락된 acceptance criteria, 범위 밖 변경, 차단/비차단 판정",
+            "- 금지: 확인하지 않은 항목을 pass로 기록하지 않는다.",
+        ],
+        "code_reviewer" => vec![
+            "- 파일명: `review-report.md`",
+            "- 포함: 리뷰 finding, 파일/조건 근거, 수정 요청, 수정 확인 여부, 남은 위험",
+            "- 금지: 취향성 스타일 의견을 blocking 수정 요청으로 기록하지 않는다.",
+        ],
+        "tester" => vec![
+            "- 파일명: `test-report.md`",
+            "- 포함: 실행한 테스트/빌드/타입체크 명령, 결과, 실패 로그 요약, 생략 사유, 재시도 방법, 최종 판정",
+            "- 금지: 실패하거나 실행하지 못한 검증을 통과로 기록하지 않는다.",
+        ],
+        _ => vec![
+            "- 파일명: `role-dossier.md`",
+            "- 포함: 역할 목표, 수행한 작업, 근거, 결과, 다음 행동",
+            "- 금지: structured-result.json과 충돌하는 결론을 기록하지 않는다.",
+        ],
+    }
+    .join("\n")
+}
+
+fn queued_role_dossier(role_id: &str, status: &str) -> String {
+    format!(
+        "{}\n\n## 상태\n\n- {status}\n\n## 작성 계약\n\n{}\n\n## 작성 대기\n\n이 문서는 host runner가 실행되면 역할 수행 기록으로 갱신되어야 합니다.\n",
+        role_dossier_heading(role_id),
+        role_dossier_contract_markdown(role_id)
+    )
+}
+
+fn stub_role_dossier(role_id: &str, task_id: &str) -> String {
+    format!(
+        "{}\n\n## 상태\n\n- Phase 2 stub 실행 완료\n- task: `{task_id}`\n- role: `{role_id}`\n\n## 작성 계약\n\n{}\n\n## 결과\n\nstub runner가 pass 결과를 생성했습니다. 실제 agent 실행에서는 이 문서가 역할별 handoff 기록으로 채워져야 합니다.\n",
+        role_dossier_heading(role_id),
+        role_dossier_contract_markdown(role_id)
+    )
+}
+
+fn write_role_dossier(artifact_path: &Path, role_id: &str, content: &str) -> CommandResult<()> {
+    fs::write(
+        artifact_path.join(role_dossier_artifact_name(role_id)),
+        content,
+    )
+    .map_err(|err| CommandError::io("역할별 md 산출물을 저장하지 못했습니다.", err))
+}
+
+fn role_dossier_is_present(artifact_path: &Path, role_id: &str) -> bool {
+    fs::read_to_string(artifact_path.join(role_dossier_artifact_name(role_id)))
+        .is_ok_and(|content| !content.trim().is_empty() && !content.contains("## 작성 대기"))
 }
 
 fn repair_context_markdown(
@@ -9027,6 +9254,7 @@ fn build_context_pack_markdown(
          ### Pass Conditions\n\n{}\n\n\
          ### Blocking Conditions\n\n{}\n\n\
          ### Forbidden\n\n{}\n\n\
+         ## Role Dossier Contract\n\n{}\n\n\
          ## Role Policy\n\n{}\n\n\
          ## Team Instructions\n\n{}\n\n\
          ## Worktree Setup\n\n{}\n\n\
@@ -9034,7 +9262,7 @@ fn build_context_pack_markdown(
          ## Changed Files\n\n{}\n\n\
          ## Recent Commits\n\n{}\n\n\
          ## Expected Output\n\n\
-         Agent는 `summary.md`와 schema v1을 만족하는 `structured-result.json`을 남겨야 한다.\n\
+         Agent는 `summary.md`, `{}`, schema v1을 만족하는 `structured-result.json`을 남겨야 한다.\n\
          `status=pass`는 pass conditions를 만족할 때만 사용한다.\n\
          차단 이슈가 있으면 `gateResult.status=fail`, `blocking=true`, `blockers`, `affectedFiles`, `suggestedNext`를 채운다.\n",
         task.id,
@@ -9055,6 +9283,7 @@ fn build_context_pack_markdown(
         markdown_list(contract.pass_conditions.as_ref()),
         markdown_list(contract.blocking_conditions.as_ref()),
         markdown_list(contract.forbidden.as_ref()),
+        role_dossier_contract_markdown(role_id),
         role_policy_markdown(role_policy),
         team_instruction_markdown(&team_docs),
         worktree_setup_markdown(worktree_setup),
@@ -9072,7 +9301,8 @@ fn build_context_pack_markdown(
             "- 커밋 없음"
         } else {
             commits.as_str()
-        }
+        },
+        role_dossier_artifact_name(role_id)
     ))
 }
 
@@ -9115,6 +9345,7 @@ fn build_context_manifest(
         "expectedArtifacts": [
             "summary.md",
             "structured-result.json",
+            role_dossier_artifact_name(role_id),
             "stdout.log",
             "stderr.log"
         ]
@@ -9819,6 +10050,7 @@ mod tests {
                 worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: Some(Some(vault.to_string_lossy().to_string())),
+                obsidian_artifact_path: None,
                 token_budget: None,
                 artifact_retention_days: None,
             },
@@ -10443,6 +10675,23 @@ mod tests {
     }
 
     #[test]
+    fn role_dossier_contracts_are_role_specific() {
+        assert_eq!(role_dossier_artifact_name("planner"), "plan.md");
+        assert_eq!(role_dossier_artifact_name("coder"), "pr-dossier.md");
+        assert_eq!(
+            role_dossier_artifact_name("plan_verifier"),
+            "plan-verification.md"
+        );
+        assert_eq!(
+            role_dossier_artifact_name("code_reviewer"),
+            "review-report.md"
+        );
+        assert_eq!(role_dossier_artifact_name("tester"), "test-report.md");
+        assert!(role_dossier_contract_markdown("coder").contains("PR 본문 초안"));
+        assert!(role_dossier_contract_markdown("tester").contains("실행한 테스트"));
+    }
+
+    #[test]
     fn planner_stub_creates_plan_approval_and_approval_moves_task_ready() {
         let repo = test_repo();
         let (mut conn, project) = open_test_project(&repo);
@@ -10717,10 +10966,13 @@ mod tests {
         assert!(artifact_dir.join("context-pack.md").exists());
         assert!(artifact_dir.join("context-pack.json").exists());
         assert!(artifact_dir.join("structured-result.schema.json").exists());
+        assert!(artifact_dir.join("pr-dossier.md").exists());
 
         let context_pack =
             fs::read_to_string(artifact_dir.join("context-pack.md")).expect("context pack");
         assert!(context_pack.contains("## Role Contract"));
+        assert!(context_pack.contains("## Role Dossier Contract"));
+        assert!(context_pack.contains("pr-dossier.md"));
         assert!(
             context_pack.contains("승인된 계획과 task scope 안에서 최소 변경으로 구현을 완료한다.")
         );
@@ -10742,6 +10994,10 @@ mod tests {
                 .and_then(|value| value.get("gate")),
             Some(&Value::Null)
         );
+        assert!(manifest["expectedArtifacts"]
+            .as_array()
+            .expect("expected artifacts")
+            .contains(&json!("pr-dossier.md")));
     }
 
     #[test]
@@ -10817,6 +11073,7 @@ mod tests {
                 worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: None,
+                obsidian_artifact_path: None,
                 token_budget: None,
                 artifact_retention_days: None,
             },
@@ -10917,6 +11174,7 @@ mod tests {
                 worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: Some(Some(vault.to_string_lossy().to_string())),
+                obsidian_artifact_path: None,
                 token_budget: None,
                 artifact_retention_days: None,
             },
@@ -10936,6 +11194,7 @@ mod tests {
             2,
             "2026-06-18T04:00:00Z",
             "검증 완료",
+            Some("# 계획서\n\n검증 dossier"),
         )
         .expect("write obsidian")
         .expect("obsidian path");
@@ -10944,6 +11203,58 @@ mod tests {
         assert!(content.contains("resultStatus: pass"));
         assert!(content.contains("changedFileCount: 2"));
         assert!(content.contains("검증 완료"));
+        assert!(content.contains("## 역할별 산출물"));
+        assert!(content.contains("검증 dossier"));
+    }
+
+    #[test]
+    fn write_obsidian_run_artifact_uses_configured_artifact_path() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let vault = repo.root.join("obsidian-vault");
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: None,
+                ai_connections: None,
+                role_assignments: None,
+                role_policies: None,
+                conductor_config: None,
+                worktree_root: None,
+                worktree_setup: None,
+                jira_config: None,
+                obsidian_vault_path: Some(Some(vault.to_string_lossy().to_string())),
+                obsidian_artifact_path: Some(Some("custom-artifacts".to_string())),
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("enable obsidian artifact path");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "planner")
+            .expect("context");
+
+        let relative_path = write_obsidian_run_artifact(
+            &conn,
+            &project.id,
+            &task,
+            &run,
+            "Succeeded",
+            Some("pass"),
+            1,
+            "2026-06-18T04:00:00Z",
+            "구현 완료",
+            Some("# 계획서\n\n구현 dossier"),
+        )
+        .expect("write obsidian")
+        .expect("obsidian path");
+
+        assert!(relative_path.contains("desktop/sessions"));
+        let content = fs::read_to_string(vault.join("custom-artifacts").join(relative_path))
+            .expect("custom obsidian content");
+        assert!(content.contains("구현 dossier"));
     }
 
     #[test]
@@ -11081,6 +11392,7 @@ mod tests {
                 worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: Some(Some(vault.to_string_lossy().to_string())),
+                obsidian_artifact_path: None,
                 token_budget: None,
                 artifact_retention_days: None,
             },
@@ -11211,6 +11523,7 @@ mod tests {
                 worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: None,
+                obsidian_artifact_path: None,
                 token_budget: None,
                 artifact_retention_days: None,
             },
@@ -11304,6 +11617,7 @@ mod tests {
                 worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: None,
+                obsidian_artifact_path: None,
                 token_budget: None,
                 artifact_retention_days: None,
             },
@@ -11406,6 +11720,7 @@ mod tests {
                 worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: None,
+                obsidian_artifact_path: None,
                 token_budget: None,
                 artifact_retention_days: None,
             },
@@ -11515,6 +11830,7 @@ mod tests {
                 worktree_setup: None,
                 jira_config: None,
                 obsidian_vault_path: None,
+                obsidian_artifact_path: None,
                 token_budget: None,
                 artifact_retention_days: None,
             },
@@ -11661,6 +11977,7 @@ mod tests {
             worktree_setup: None,
             jira_config: None,
             obsidian_vault_path: None,
+            obsidian_artifact_path: None,
             token_budget: None,
             artifact_retention_days: Some(30),
         };
@@ -11726,6 +12043,7 @@ mod tests {
             worktree_setup: None,
             jira_config: None,
             obsidian_vault_path: None,
+            obsidian_artifact_path: None,
             token_budget: None,
             artifact_retention_days: Some(30),
         };
@@ -11784,6 +12102,7 @@ mod tests {
             worktree_setup: None,
             jira_config: None,
             obsidian_vault_path: None,
+            obsidian_artifact_path: None,
             token_budget: None,
             artifact_retention_days: Some(30),
         };

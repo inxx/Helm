@@ -108,6 +108,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const [conductorConfig, setConductorConfig] = useState<ConductorConfig>(emptyConductorConfig());
   const [jiraConfig, setJiraConfig] = useState<JiraConfig>(emptyJiraConfig());
   const [obsidianVaultPath, setObsidianVaultPath] = useState("");
+  const [obsidianArtifactPath, setObsidianArtifactPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [updaterBusy, setUpdaterBusy] = useState(false);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -153,6 +154,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     setConductorConfig(normalizeConductorConfig(snapshot.settings.conductorConfig));
     setJiraConfig(normalizeJiraConfig(snapshot.settings.jiraConfig));
     setObsidianVaultPath(snapshot.settings.obsidianVaultPath ?? "");
+    setObsidianArtifactPath(snapshot.settings.obsidianArtifactPath ?? "");
     setWorktreeRoot(snapshot.settings.worktreeRoot ?? "");
     setWorktreeSetup(snapshot.settings.worktreeSetup ? JSON.stringify(snapshot.settings.worktreeSetup, null, 2) : "");
     void api.listRunnerTemplates(snapshot.project.id).then(setTemplates);
@@ -235,6 +237,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         worktreeSetup: parsedWorktreeSetup,
         jiraConfig: normalizeJiraConfig(jiraConfig),
         obsidianVaultPath: obsidianVaultPath.trim() ? obsidianVaultPath.trim() : null,
+        obsidianArtifactPath: obsidianArtifactPath.trim() ? obsidianArtifactPath.trim() : null,
       });
       await onRefresh();
       showToast({
@@ -1563,6 +1566,17 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                   />
                   <small className="muted">
                     작업 보고서와 계획 문서가 연결될 Vault입니다. 비워두면 프로젝트별 Obsidian 연동을 끕니다.
+                  </small>
+                </label>
+                <label className="settings-field">
+                  <span>산출물 경로</span>
+                  <input
+                    placeholder="예: projects/helm-artifacts 또는 /Users/me/Documents/Helm Artifacts"
+                    value={obsidianArtifactPath}
+                    onChange={(event) => setObsidianArtifactPath(event.target.value)}
+                  />
+                  <small className="muted">
+                    Obsidian 실행/계획 문서를 저장할 위치입니다. 상대 경로는 Vault 하위 경로로 해석하고, 비워두면 기존 <code>projects/&lt;project&gt;/desktop</code> 경로를 사용합니다.
                   </small>
                 </label>
               </section>

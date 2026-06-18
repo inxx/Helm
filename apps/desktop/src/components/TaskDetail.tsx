@@ -4,7 +4,13 @@ import { useEffect, useState } from "react";
 import { useToast } from "./ToastProvider";
 import { api } from "../lib/api";
 import { deriveRunLiveState, selectVisibleRun } from "../lib/runLiveState";
-import { runnerReadinessFor, roleLabel, type RoleId } from "../lib/runnerReadiness";
+import {
+  roleDossierArtifactName,
+  roleDossierLabel,
+  runnerReadinessFor,
+  roleLabel,
+  type RoleId,
+} from "../lib/runnerReadiness";
 import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
 import type {
   AgentRunSummary,
@@ -58,6 +64,7 @@ interface EvidenceCard {
   summary: string;
   details: string[];
   runId: string;
+  roleId: string;
 }
 
 interface RepairRequestView {
@@ -784,6 +791,12 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
               onOpen={() => showArtifact(visibleRun.id, "summary.md")}
             />
             <RunDocumentCard
+              description="역할별 handoff source of truth"
+              label="필수"
+              name={roleDossierArtifactName(visibleRun.roleId)}
+              onOpen={() => showArtifact(visibleRun.id, roleDossierArtifactName(visibleRun.roleId))}
+            />
+            <RunDocumentCard
               description="gate/상태 판정 JSON"
               label="생성"
               name="structured-result.json"
@@ -1116,6 +1129,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
                     ) : null}
                     <div className="artifact-actions">
                       <button onClick={() => showArtifact(card.runId, "summary.md")} type="button">summary</button>
+                      <button onClick={() => showArtifact(card.runId, roleDossierArtifactName(card.roleId))} type="button">{roleDossierLabel(card.roleId)}</button>
                       <button onClick={() => showArtifact(card.runId, "structured-result.json")} type="button">result</button>
                       <button onClick={() => showRunEvents(card.runId)} type="button">events</button>
                     </div>
@@ -1140,6 +1154,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
                   </div>
                   <div className="artifact-actions">
                     <button onClick={() => showArtifact(run.id, "summary.md")} type="button">summary</button>
+                    <button onClick={() => showArtifact(run.id, roleDossierArtifactName(run.roleId))} type="button">{roleDossierLabel(run.roleId)}</button>
                     <button onClick={() => showArtifact(run.id, "structured-result.json")} type="button">result</button>
                     <button onClick={() => showRunEvents(run.id)} type="button">events</button>
                     <button onClick={() => showArtifact(run.id, "stdout.log")} type="button">stdout</button>
@@ -2195,6 +2210,7 @@ async function evidenceCardsForRun(projectId: string, run: AgentRunSummary): Pro
       run.attempt > 1 ? `attempt ${run.attempt}` : "",
     ].filter(Boolean),
     runId: run.id,
+    roleId: run.roleId,
   });
 
   if (run.failureKind || run.failureReason) {
@@ -2206,6 +2222,7 @@ async function evidenceCardsForRun(projectId: string, run: AgentRunSummary): Pro
       summary: run.failureReason ?? "상세 근거를 확인한 뒤 retry 또는 수정을 진행합니다.",
       details: [run.resultStatus ? `result ${run.resultStatus}` : "", run.lifecyclePhase ? `phase ${run.lifecyclePhase}` : ""].filter(Boolean),
       runId: run.id,
+      roleId: run.roleId,
     });
   }
 
@@ -2225,6 +2242,7 @@ async function evidenceCardsForRun(projectId: string, run: AgentRunSummary): Pro
         return stringValue(item.summary) ?? stringValue(item.id) ?? "blocking item";
       }),
       runId: run.id,
+      roleId: run.roleId,
     });
   }
 
@@ -2237,6 +2255,7 @@ async function evidenceCardsForRun(projectId: string, run: AgentRunSummary): Pro
       summary: changedFiles.slice(0, 3).map((file) => file.path).join(", "),
       details: changedFiles.slice(0, 5).map((file) => `${file.status} ${file.path}`),
       runId: run.id,
+      roleId: run.roleId,
     });
   }
 

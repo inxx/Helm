@@ -44,12 +44,14 @@ const roleId = process.env.HELM_ROLE_ID ?? "unknown";
 const taskId = process.env.HELM_TASK_ID ?? "unknown-task";
 const resultPath = process.env.HELM_RESULT_PATH ?? path.join(artifactDir, "structured-result.json");
 const summaryPath = process.env.HELM_SUMMARY_PATH ?? path.join(artifactDir, "summary.md");
+const dossierPath = process.env.HELM_ROLE_DOSSIER_PATH ?? path.join(artifactDir, roleDossierArtifactName(roleId));
 const worktreePath = process.env.HELM_WORKTREE_PATH ?? process.cwd();
 
 fs.mkdirSync(artifactDir, { recursive: true });
 
 if (mode === "schema_invalid") {
   fs.writeFileSync(summaryPath, `# Fixture ${roleId}\n\nInvalid schema fixture.\n`);
+  fs.writeFileSync(dossierPath, fixtureDossier(roleId, "schema_invalid", taskId, []));
   fs.writeFileSync(resultPath, JSON.stringify({ schemaVersion: 1, status: "pass" }, null, 2));
   process.exit(0);
 }
@@ -93,6 +95,7 @@ fs.writeFileSync(
   summaryPath,
   `# Fixture ${roleId}\n\n- status: ${status}\n- task: ${taskId}\n`,
 );
+fs.writeFileSync(dossierPath, fixtureDossier(roleId, status, taskId, reportedChangedFiles));
 fs.writeFileSync(
   resultPath,
   JSON.stringify(
@@ -127,4 +130,31 @@ function nextActionsFor(roleId, status) {
   if (roleId === "planner") return ["Approve PlanApproval."];
   if (roleId === "tester") return ["Review merge readiness."];
   return ["Run the next Helm role."];
+}
+
+function roleDossierArtifactName(roleId) {
+  if (roleId === "planner") return "plan.md";
+  if (roleId === "coder") return "pr-dossier.md";
+  if (roleId === "plan_verifier") return "plan-verification.md";
+  if (roleId === "code_reviewer") return "review-report.md";
+  if (roleId === "tester") return "test-report.md";
+  return "role-dossier.md";
+}
+
+function fixtureDossier(roleId, status, taskId, changedFiles) {
+  return [
+    `# Fixture ${roleId} dossier`,
+    "",
+    "## 상태",
+    "",
+    `- status: ${status}`,
+    `- task: ${taskId}`,
+    `- role: ${roleId}`,
+    "",
+    "## 기록",
+    "",
+    "- fixture runner가 역할별 md 산출물 계약을 충족했습니다.",
+    changedFiles.length > 0 ? `- changed files: ${changedFiles.join(", ")}` : "- changed files: 없음",
+    "",
+  ].join("\n");
 }

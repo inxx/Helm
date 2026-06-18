@@ -73,6 +73,7 @@ pub struct EffectiveSettings {
     pub worktree_setup: Option<Value>,
     pub jira_config: Option<Value>,
     pub obsidian_vault_path: Option<String>,
+    pub obsidian_artifact_path: Option<String>,
     pub token_budget: Option<i64>,
     pub artifact_retention_days: Option<i64>,
 }
@@ -552,6 +553,7 @@ pub struct ProjectSettingsPatch {
     pub worktree_setup: Option<Option<Value>>,
     pub jira_config: Option<Option<Value>>,
     pub obsidian_vault_path: Option<Option<String>>,
+    pub obsidian_artifact_path: Option<Option<String>>,
     pub token_budget: Option<Option<i64>>,
     pub artifact_retention_days: Option<Option<i64>>,
 }

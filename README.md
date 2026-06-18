@@ -50,6 +50,7 @@ Helm의 목표 UX는 한국어 우선 로컬 데스크톱 앱이다. 최상위 �
 - [Claude Desktop to Helm Handoff](docs/claude-desktop-handoff.md): Claude Desktop 계획 파일을 Helm 실행/보고로 자동 이관하는 로컬 inbox/outbox 계약
 - [Planner Conversation Approval Feature](docs/ai-plan-conversation-approval-feature.md): planner와 계획 문서를 고정하고 승인 후 Task로 변환하는 기능 계약
 - [Executable Planning Contract](docs/executable-planning-contract.md): 큰 작업을 task graph, task card, ownership map, barrier, verification gate로 쪼개는 기본 계획 계약
+- [Role Artifact Contract](docs/role-artifact-contract.md): planner/coder/verifier/reviewer/tester 역할별 md dossier와 공통 실행 산출물 계약
 - [Reference Adoption Application Plan](docs/reference-adoption-application-plan.md): 외부 레퍼런스 차용 포인트별 Helm 적용 계획
 - [Reference-Driven Work Plan](docs/reference-driven-work-plan.md): 레퍼런스 기반 blocker 해소와 제품화 작업 전체 계획
 - [Reference Product Quality Upgrade Plan](docs/reference-product-quality-upgrade-plan.md): 레퍼런스에서 가져올 제품/운영 패턴과 기술 blocker 제거 계획

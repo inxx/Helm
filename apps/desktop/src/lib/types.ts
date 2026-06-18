@@ -69,6 +69,7 @@ export interface EffectiveSettings {
   worktreeSetup: unknown | null;
   jiraConfig: JiraConfig | null;
   obsidianVaultPath: string | null;
+  obsidianArtifactPath: string | null;
   tokenBudget: number | null;
   artifactRetentionDays: number | null;
 }
@@ -524,6 +525,7 @@ export interface ProjectSettingsPatch {
   worktreeSetup?: unknown | null;
   jiraConfig?: JiraConfig | null;
   obsidianVaultPath?: string | null;
+  obsidianArtifactPath?: string | null;
   tokenBudget?: number | null;
   artifactRetentionDays?: number | null;
 }

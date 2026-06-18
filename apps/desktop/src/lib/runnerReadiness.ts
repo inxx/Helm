@@ -22,6 +22,40 @@ export function roleLabel(roleId: string): string {
   return ROLE_LABELS[roleId as RoleId] ?? roleId;
 }
 
+export function roleDossierArtifactName(roleId: string): string {
+  switch (roleId) {
+    case "planner":
+      return "plan.md";
+    case "coder":
+      return "pr-dossier.md";
+    case "plan_verifier":
+      return "plan-verification.md";
+    case "code_reviewer":
+      return "review-report.md";
+    case "tester":
+      return "test-report.md";
+    default:
+      return "role-dossier.md";
+  }
+}
+
+export function roleDossierLabel(roleId: string): string {
+  switch (roleId) {
+    case "planner":
+      return "계획서";
+    case "coder":
+      return "PR 문서";
+    case "plan_verifier":
+      return "계획 검토";
+    case "code_reviewer":
+      return "리뷰 기록";
+    case "tester":
+      return "테스트 기록";
+    default:
+      return "역할 기록";
+  }
+}
+
 export function runnerReadinessFor(settings: EffectiveSettings, roleId: RoleId): RunnerReadiness {
   const assignment = settings.roleAssignments.find((item) => item.roleId === roleId);
   const selection = firstSelection(assignment);
