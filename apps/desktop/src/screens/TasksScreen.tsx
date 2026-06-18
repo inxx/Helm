@@ -129,8 +129,8 @@ export function TasksScreen({
       <section className="task-workspace">
         <div className="section-header">
           <div>
-            <h2>작업자 현황</h2>
-            <p>세션별 태스크와 실행 상태만 관찰합니다.</p>
+            <h2>전체 진행상황</h2>
+            <p>Task 기준으로 현재 단계, 실행 상태, 승인 대기 항목을 한눈에 확인합니다.</p>
           </div>
         </div>
 

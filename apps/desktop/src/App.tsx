@@ -1,23 +1,21 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { ClipboardList, GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal } from "lucide-react";
+import { GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
-import { PlanningScreen } from "./screens/PlanningScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { SessionsScreen } from "./screens/SessionsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
 
-type Screen = "planning" | "sessions" | "tasks" | "git" | "terminal" | "settings";
+type Screen = "sessions" | "tasks" | "git" | "terminal" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItems = [
-  { id: "planning" as const, label: "계획", icon: ClipboardList },
   { id: "sessions" as const, label: "채팅", icon: MessageSquare },
   { id: "tasks" as const, label: "태스크", icon: ListChecks },
   { id: "git" as const, label: "깃", icon: GitBranch },
@@ -34,7 +32,6 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
   const [terminalMounted, setTerminalMounted] = useState(false);
-  const [pendingPlanningGoal, setPendingPlanningGoal] = useState<string | null>(null);
 
   const selectedTask = useMemo<TaskSummary | null>(() => {
     if (!snapshot || !selectedTaskId) return null;
@@ -230,7 +227,7 @@ export function App() {
       onSwitchProject={switchProject}
       onForgetProject={forgetProject}
       busy={busy}
-      hideSidebar={screen === "terminal"}
+      hideSidebar={screen === "sessions" || screen === "terminal"}
     >
       {error ? <div className="error-banner">{error}</div> : null}
       {bootStatus === "restoring" ? (
@@ -248,24 +245,7 @@ export function App() {
               onOpenProject={openProject}
               onGoTerminal={() => setScreen("terminal")}
               onGoSettings={() => setScreen("settings")}
-              onGoPlanning={(goalText) => {
-                if (goalText) setPendingPlanningGoal(goalText);
-                setScreen("planning");
-              }}
               onRefresh={refresh}
-            />
-          ) : null}
-          {screen === "planning" ? (
-            <PlanningScreen
-              snapshot={snapshot}
-              initialGoalText={pendingPlanningGoal}
-              onInitialGoalConsumed={() => setPendingPlanningGoal(null)}
-              onOpenProject={openProject}
-              onRefresh={refresh}
-              onOpenTask={(taskId) => {
-                setSelectedTaskId(taskId);
-                setScreen("sessions");
-              }}
             />
           ) : null}
           {screen === "tasks" ? (
@@ -275,7 +255,6 @@ export function App() {
               selectedTaskId={selectedTaskId}
               onSelectTask={(taskId) => {
                 setSelectedTaskId(taskId);
-                if (taskId) setScreen("sessions");
               }}
               onOpenProject={openProject}
               onRefresh={refresh}

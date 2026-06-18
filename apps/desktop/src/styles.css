@@ -594,10 +594,27 @@ h3 {
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   border-right: 1px solid var(--line);
   background: var(--surface-2);
   padding: 14px;
+}
+
+.sessions-project-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  padding: 8px 0 12px;
+}
+
+.sessions-project-header h2 {
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sessions-rail-header,
@@ -628,9 +645,15 @@ h3 {
 .session-list {
   display: flex;
   min-height: 0;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 4px;
   overflow-y: auto;
+}
+
+.sessions-add-project {
+  width: 100%;
+  margin-top: auto;
 }
 
 .session-list-empty {
@@ -766,7 +789,9 @@ h3 {
 }
 
 .session-orchestrator-composer.empty {
-  width: min(680px, 92vw);
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 680px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow-1);
@@ -942,10 +967,12 @@ h3 {
 .session-chat-empty {
   display: grid;
   flex: 1;
+  min-width: 0;
   place-content: center;
   justify-items: center;
   gap: 8px;
   color: var(--text-muted);
+  padding: 22px 18px;
   text-align: center;
 }
 
@@ -1050,8 +1077,53 @@ h3 {
   grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
 }
 
-.session-role-assignment-row {
+.session-terminal-row {
+  grid-template-columns: minmax(0, 1fr) 26px;
+  gap: 6px;
+}
+
+.session-terminal-open {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.session-terminal-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.session-terminal-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+  color: var(--text-muted);
+}
+
+.session-terminal-stop:hover:not(:disabled) {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 35%, var(--line-soft));
+}
+
+.session-context-list-row.static.session-role-assignment-row {
   grid-template-columns: minmax(0, 1fr);
+}
+
+.session-context-list-row.static.session-role-assignment-row.editing {
+  grid-template-columns: minmax(72px, 1fr) minmax(96px, 1fr) minmax(84px, 0.8fr);
 }
 
 .session-role-assignment-row > div {
@@ -8779,6 +8851,10 @@ textarea {
   .usage-summary-grid,
   .usage-kpi-grid,
   .usage-analysis-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .session-context-list-row.static.session-role-assignment-row.editing {
     grid-template-columns: 1fr;
   }
 

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Bot, Check, FileText, GitBranch, Loader2, MessageSquare, Pencil, RefreshCw, Send, SquareTerminal, User } from "lucide-react";
+import { Bot, Check, FileText, Folder, GitBranch, Loader2, MessageSquare, Pencil, Plus, RefreshCw, Send, Square, SquareTerminal, User } from "lucide-react";
 import { ApprovalInbox } from "../components/ApprovalInbox";
 import { api } from "../lib/api";
 import { roleLabel } from "../lib/runnerReadiness";
@@ -24,7 +24,6 @@ interface SessionsScreenProps {
   onOpenProject: () => void;
   onGoTerminal: () => void;
   onGoSettings: () => void;
-  onGoPlanning: (goalText?: string) => void;
   onRefresh: () => Promise<void>;
 }
 
@@ -34,7 +33,6 @@ export function SessionsScreen({
   onSelectTask,
   onOpenProject,
   onGoTerminal,
-  onGoPlanning,
   onRefresh,
 }: SessionsScreenProps) {
   const [sessions, setSessions] = useState<AgentSessionSummary[]>([]);
@@ -45,11 +43,13 @@ export function SessionsScreen({
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [events, setEvents] = useState<RunEventSummary[]>([]);
   const [summaryText, setSummaryText] = useState<string | null>(null);
+  const [orchestratorMessages, setOrchestratorMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string }>>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [savingRoleId, setSavingRoleId] = useState<RoleAssignment["roleId"] | null>(null);
   const [editingStageAi, setEditingStageAi] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [stoppingTerminalId, setStoppingTerminalId] = useState<string | null>(null);
   const taskById = useMemo(
     () => new Map(snapshot?.tasks.map((task) => [task.id, task]) ?? []),
     [snapshot?.tasks],
@@ -88,7 +88,7 @@ export function SessionsScreen({
     setLoadError(null);
     void Promise.all([
       api.listAgentSessions(snapshot.project.id, 200),
-      api.listTerminalPtys(null).catch(() => []),
+      api.listTerminalPtys(snapshot.project.id).catch(() => []),
       api.getChangedFiles(snapshot.project.id).catch(() => []),
     ])
       .then(([items, ptys, files]) => {
@@ -149,14 +149,28 @@ export function SessionsScreen({
 
   async function submitOrchestratorInstruction() {
     const goalText = orchestratorInput.trim();
-    if (!goalText || orchestratorBusy) return;
+    if (!snapshot || !goalText || orchestratorBusy) return;
+    const projectId = snapshot.project.id;
     setOrchestratorBusy(true);
     setLoadError(null);
     try {
       setOrchestratorInput("");
-      onGoPlanning(goalText);
+      setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "user", content: goalText }]);
+      const created = await api.createPlanningSession(projectId, {
+        goalText,
+        title: titleFromGoal(goalText),
+      });
+      setOrchestratorMessages((items) => [
+        ...items,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: `요청을 오케스트레이터 세션으로 받았습니다. "${created.session.title}" 기준으로 Task 후보와 실행 상태는 태스크 탭에서 확인합니다.`,
+        },
+      ]);
+      await onRefresh();
     } catch (error) {
-      setLoadError(messageFromError(error, "오케스트레이터 지시를 계획 세션으로 넘기지 못했습니다."));
+      setLoadError(messageFromError(error, "오케스트레이터 지시를 저장하지 못했습니다."));
     } finally {
       setOrchestratorBusy(false);
     }
@@ -213,14 +227,25 @@ export function SessionsScreen({
     }
   }
 
+  async function stopTerminal(terminalId: string) {
+    setStoppingTerminalId(terminalId);
+    setLoadError(null);
+    try {
+      await api.stopTerminalPty(terminalId);
+      setTerminalPtys((items) => items.filter((item) => item.terminalId !== terminalId));
+    } catch (error) {
+      setLoadError(messageFromError(error, "터미널 종료에 실패했습니다."));
+    } finally {
+      setStoppingTerminalId((current) => (current === terminalId ? null : current));
+    }
+  }
+
   return (
     <div className="sessions-layout">
       <aside className="sessions-rail" aria-label="세션 목록">
-        <div className="sessions-rail-header">
-          <div>
-            <h2>세션</h2>
-            <p>{snapshot.project.name}</p>
-          </div>
+        <div className="sessions-project-header">
+          <Folder size={18} aria-hidden />
+          <h2>{snapshot.project.name}</h2>
           <button
             className="sessions-icon-button"
             disabled={loading}
@@ -260,6 +285,10 @@ export function SessionsScreen({
             );
           })}
         </div>
+        <button className="sidebar-add-project sessions-add-project" disabled={loading} onClick={onOpenProject} type="button">
+          <Plus size={14} aria-hidden />
+          <span>프로젝트 추가</span>
+        </button>
       </aside>
 
       <section className="session-chat" aria-label="세션 채팅 상세">
@@ -289,9 +318,20 @@ export function SessionsScreen({
             <div className="session-chat-scroll">
               <SessionMessage role="assistant" icon="bot" title="오케스트레이터" timestamp={activeSession?.lastSignalAt ?? null}>
                 <p>
-                  작업 지시는 아래 입력으로 정리해 계획자에게 넘깁니다. 승인된 계획만 Task로 만들고 단계별 AI 설정에 따라 실행합니다.
+                  작업 지시는 아래 입력으로 이어서 받습니다. 상세 이벤트와 산출물은 이 채팅에 누적되고, 전체 진행상황은 태스크 탭에서 봅니다.
                 </p>
               </SessionMessage>
+              {orchestratorMessages.map((message) => (
+                <SessionMessage
+                  icon={message.role === "user" ? "user" : "bot"}
+                  key={message.id}
+                  role={message.role}
+                  timestamp={null}
+                  title={message.role === "user" ? "요청" : "오케스트레이터"}
+                >
+                  <p>{message.content}</p>
+                </SessionMessage>
+              ))}
               <SessionMessage role="user" icon="user" title="요청" timestamp={activeTask?.createdAt ?? activeSession?.createdAt ?? null}>
                 <strong>{activeTask?.title ?? activeSession?.title}</strong>
                 {activeTask?.description ? <p>{activeTask.description}</p> : null}
@@ -355,15 +395,26 @@ export function SessionsScreen({
               />
               <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
                 {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
-                <span>{orchestratorBusy ? "넘기는 중" : "계획자에게 넘기기"}</span>
+                <span>{orchestratorBusy ? "전송 중" : "보내기"}</span>
               </button>
             </form>
           </>
         ) : (
           <div className="session-chat-empty">
             <MessageSquare size={20} />
-            <h2>열 세션을 선택하세요</h2>
-            <p>칸반에서 카드를 클릭하면 이 화면에서 상세 진행사항을 확인합니다.</p>
+            <h2>오케스트레이터와 대화하세요</h2>
+            <p>새 작업 지시를 보내거나, 세션을 선택해 상세 진행사항을 확인합니다.</p>
+            {orchestratorMessages.map((message) => (
+              <SessionMessage
+                icon={message.role === "user" ? "user" : "bot"}
+                key={message.id}
+                role={message.role}
+                timestamp={null}
+                title={message.role === "user" ? "요청" : "오케스트레이터"}
+              >
+                <p>{message.content}</p>
+              </SessionMessage>
+            ))}
             <form
               className="session-orchestrator-composer empty"
               onSubmit={(event) => {
@@ -380,7 +431,7 @@ export function SessionsScreen({
               />
               <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
                 {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
-                <span>{orchestratorBusy ? "넘기는 중" : "계획자에게 넘기기"}</span>
+                <span>{orchestratorBusy ? "전송 중" : "보내기"}</span>
               </button>
             </form>
           </div>
@@ -433,11 +484,37 @@ export function SessionsScreen({
           {terminalPtys.length > 0 ? (
             <div className="session-context-list">
               {terminalPtys.slice(0, 4).map((pty) => (
-                <button className="session-context-list-row" key={pty.terminalId} onClick={onGoTerminal} type="button">
-                  <span className={pty.running ? "session-run-dot running" : "session-run-dot"} />
-                  <strong>{shortPath(pty.cwd)}</strong>
-                  <small>{pty.running ? "running" : pty.exitCode === null ? "starting" : `exit ${pty.exitCode}`}</small>
-                </button>
+                <div className="session-context-list-row session-terminal-row" key={pty.terminalId}>
+                  <button
+                    className="session-terminal-open"
+                    onClick={onGoTerminal}
+                    title={`${pty.cwd}\n${pty.terminalId}`}
+                    type="button"
+                  >
+                    <span className={pty.running ? "session-run-dot running" : "session-run-dot"} />
+                    <span className="session-terminal-copy">
+                      <strong>{shortPath(pty.cwd)}</strong>
+                      <small>
+                        {pty.running ? "running" : pty.exitCode === null ? "starting" : `exit ${pty.exitCode}`} ·{" "}
+                        {shortTerminalId(pty.terminalId)} · {formatRelative(pty.updatedAt)}
+                      </small>
+                    </span>
+                  </button>
+                  <button
+                    aria-label={`${shortPath(pty.cwd)} 터미널 종료`}
+                    className="session-terminal-stop"
+                    disabled={stoppingTerminalId === pty.terminalId}
+                    onClick={() => void stopTerminal(pty.terminalId)}
+                    title="터미널 종료"
+                    type="button"
+                  >
+                    {stoppingTerminalId === pty.terminalId ? (
+                      <Loader2 size={12} aria-hidden="true" className="loading-icon" />
+                    ) : (
+                      <Square size={11} aria-hidden="true" />
+                    )}
+                  </button>
+                </div>
               ))}
             </div>
           ) : (
@@ -500,10 +577,16 @@ function RoleAssignmentRow({
   const selectedModel = assignment.selections[0]?.model ?? selectedConnection?.defaultModel ?? "";
   const modelOptions = modelChoices(selectedConnection, selectedModel);
   return (
-    <div className="session-context-list-row static session-role-assignment-row">
+    <div
+      className={
+        editing
+          ? "session-context-list-row static session-role-assignment-row editing"
+          : "session-context-list-row static session-role-assignment-row"
+      }
+    >
       <div>
         <strong>{roleLabel(assignment.roleId)}</strong>
-        <small>{labels.length > 0 ? labels.join(", ") : "미설정"}</small>
+        {!editing ? <small>{labels.length > 0 ? labels.join(", ") : "미설정"}</small> : null}
       </div>
       {editing ? (
         <select
@@ -597,10 +680,19 @@ function changedFileCountLabel(files: GitFileStatus[], session: AgentSessionSumm
   return session?.changedFileCount?.toString() ?? "-";
 }
 
+function titleFromGoal(goalText: string): string {
+  const firstLine = goalText.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "새 작업";
+  return firstLine.length > 48 ? `${firstLine.slice(0, 48)}...` : firstLine;
+}
+
 function shortPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
   if (parts.length <= 2) return path || "/";
   return `.../${parts.slice(-2).join("/")}`;
+}
+
+function shortTerminalId(value: string): string {
+  return value.length > 8 ? value.slice(0, 8) : value;
 }
 
 function formatRelative(value: string | null | undefined): string {
