@@ -1967,9 +1967,10 @@ function normalizeAiConnections(value: unknown): AiConnection[] {
           typeof item.planningTimeoutSeconds === "number" ? item.planningTimeoutSeconds : undefined,
         enabled: typeof item.enabled === "boolean" ? item.enabled : true,
         defaultModel: typeof item.defaultModel === "string" ? normalizeModelName(provider, item.defaultModel) : null,
-        availableModels: Array.isArray(item.availableModels)
-          ? normalizeModelList(provider, item.availableModels.filter(isString))
-          : [],
+        availableModels: normalizeModelList(provider, [
+          ...(provider === "claude" ? CLAUDE_MODELS : []),
+          ...(Array.isArray(item.availableModels) ? item.availableModels.filter(isString) : []),
+        ]),
         defaultEffort: typeof item.defaultEffort === "string" ? item.defaultEffort : null,
         approvalPolicy: typeof item.approvalPolicy === "string" ? item.approvalPolicy : null,
         sandbox: typeof item.sandbox === "string" ? item.sandbox : null,
@@ -2313,6 +2314,15 @@ function normalizeCliArgs(provider: string, args: string[]): string[] {
   return normalized;
 }
 
+const CLAUDE_MODELS = [
+  "opus",
+  "sonnet",
+  "haiku",
+  "claude-opus-4-8",
+  "claude-sonnet-4-6",
+  "claude-haiku-4-5-20251001",
+] as const;
+
 function claudeConnection(cliPath = "claude"): AiConnection {
   return {
     id: "claude-local",
@@ -2332,7 +2342,7 @@ function claudeConnection(cliPath = "claude"): AiConnection {
     planningTimeoutSeconds: 600,
     enabled: true,
     defaultModel: "sonnet",
-    availableModels: ["sonnet", "opus"],
+    availableModels: [...CLAUDE_MODELS],
   };
 }
 
