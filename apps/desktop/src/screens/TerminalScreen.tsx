@@ -1019,22 +1019,6 @@ export function TerminalScreen({
             <SquareTerminal size={15} aria-hidden="true" />
             <span>Sessions</span>
           </div>
-          {recents.length > 0 ? (
-            <label className="terminal-project-switcher">
-              <span>Project</span>
-              <select
-                disabled={Boolean(switchingProjectId)}
-                onChange={(event) => void switchTerminalProject(event.target.value)}
-                value={activeProjectId ?? ""}
-              >
-                {recents.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name} · {shortenPath(project.rootPath)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
           <nav className="terminal-tab-strip" aria-label="열린 터미널">
             {panes.map((pane, index) => (
               <div

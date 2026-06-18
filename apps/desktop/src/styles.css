@@ -6968,19 +6968,19 @@ textarea {
 
 .terminal-workbench {
   display: grid;
-  grid-template-columns: 188px minmax(0, 1fr);
+  grid-template-columns: 232px minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
 
 .terminal-workspaces {
   display: grid;
-  grid-template-rows: auto auto minmax(120px, 1fr) auto auto;
+  grid-template-rows: auto minmax(120px, 1fr) auto;
   gap: 10px;
   min-height: 0;
   border-right: 1px solid var(--term-line);
   background: color-mix(in oklch, var(--term-bg) 82%, black);
-  padding: 12px 10px;
+  padding: 12px 10px 8px;
 }
 
 .terminal-workspaces-title {
@@ -7666,7 +7666,7 @@ textarea {
   min-height: 320px;
   overflow: hidden;
   border: 1px solid var(--term-line);
-  border-radius: 8px;
+  border-radius: 4px;
   background: var(--term-bg);
   box-shadow: 0 1px 0 rgb(0 0 0 / 20%);
   transition: border-color 120ms ease, box-shadow 120ms ease;
