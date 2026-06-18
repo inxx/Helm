@@ -230,6 +230,7 @@ export function App() {
       onSwitchProject={switchProject}
       onForgetProject={forgetProject}
       busy={busy}
+      hideSidebar={screen === "terminal"}
     >
       {error ? <div className="error-banner">{error}</div> : null}
       {bootStatus === "restoring" ? (

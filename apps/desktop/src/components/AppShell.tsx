@@ -21,6 +21,7 @@ interface AppShellProps<T extends string> {
   onSwitchProject: (projectId: string) => void;
   onForgetProject: (projectId: string) => void;
   busy: boolean;
+  hideSidebar?: boolean;
   children: ReactNode;
 }
 
@@ -34,6 +35,7 @@ export function AppShell<T extends string>({
   onSwitchProject,
   onForgetProject,
   busy,
+  hideSidebar = false,
   children,
 }: AppShellProps<T>) {
   return (
@@ -75,7 +77,13 @@ export function AppShell<T extends string>({
         </div>
       </header>
 
-      <div className="grid min-h-0 grid-cols-[232px_minmax(0,1fr)] overflow-hidden">
+      <div
+        className={cn(
+          "grid min-h-0 overflow-hidden",
+          hideSidebar ? "grid-cols-[minmax(0,1fr)]" : "grid-cols-[232px_minmax(0,1fr)]",
+        )}
+      >
+        {!hideSidebar && (
         <aside className="flex flex-col gap-3 border-r border-border bg-sidebar p-3.5">
           <div className="flex min-h-0 flex-col gap-1.5">
             <h3 className="px-1 text-[10.5px] font-semibold tracking-wider text-muted-foreground uppercase">
@@ -150,6 +158,7 @@ export function AppShell<T extends string>({
             </Button>
           </div>
         </aside>
+        )}
 
         <main className="main flex min-h-0 min-w-0 flex-col overflow-hidden">{children}</main>
       </div>

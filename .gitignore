@@ -3,6 +3,7 @@ coverage/
 dist/
 .DS_Store
 .helm/
+.codegraph/
 *.log
 .env
 .env.*

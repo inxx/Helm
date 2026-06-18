@@ -6687,6 +6687,8 @@ textarea {
 .terminal-pane-path select {
   direction: rtl;
   text-align: left;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .terminal-pane-path select option {
