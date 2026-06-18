@@ -803,8 +803,17 @@ h3 {
 }
 
 .session-message.user {
+  grid-template-columns: minmax(0, 1fr);
   align-self: flex-end;
   width: min(760px, 88%);
+}
+
+.session-message.user .session-message-avatar {
+  display: none;
+}
+
+.session-message.user .session-message-body header {
+  flex-direction: row-reverse;
 }
 
 .session-message-avatar {
@@ -845,6 +854,7 @@ h3 {
   padding: 11px 12px;
   color: var(--text);
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .session-message.user .session-message-content {
@@ -864,9 +874,68 @@ h3 {
 
 .session-message-content pre {
   margin: 0;
-  overflow-x: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   font-family: var(--mono);
+  font-size: 12px;
+}
+
+.session-markdown > :first-child {
+  margin-top: 0;
+}
+
+.session-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.session-markdown h1,
+.session-markdown h2,
+.session-markdown h3 {
+  margin: 12px 0 6px;
+  font-size: 14px;
+}
+
+.session-markdown p,
+.session-markdown ul,
+.session-markdown ol {
+  margin: 6px 0;
+}
+
+.session-markdown ul,
+.session-markdown ol {
+  padding-left: 18px;
+}
+
+.session-markdown code {
+  border-radius: 4px;
+  background: var(--surface-2);
+  padding: 1px 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.session-markdown pre {
+  margin: 8px 0;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 10px;
+  overflow-x: auto;
+}
+
+.session-markdown pre code {
+  background: none;
+  padding: 0;
+}
+
+.session-markdown table {
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+.session-markdown th,
+.session-markdown td {
+  border: 1px solid var(--line);
+  padding: 4px 8px;
   font-size: 12px;
 }
 

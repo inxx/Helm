@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Bot, FileText, GitBranch, Loader2, MessageSquare, RefreshCw, Send, Settings, SquareTerminal, User } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Bot, Check, FileText, GitBranch, Loader2, MessageSquare, Pencil, RefreshCw, Send, SquareTerminal, User } from "lucide-react";
 import { ApprovalInbox } from "../components/ApprovalInbox";
 import { api } from "../lib/api";
 import { roleLabel } from "../lib/runnerReadiness";
@@ -32,7 +34,6 @@ export function SessionsScreen({
   onSelectTask,
   onOpenProject,
   onGoTerminal,
-  onGoSettings,
   onGoPlanning,
   onRefresh,
 }: SessionsScreenProps) {
@@ -47,6 +48,7 @@ export function SessionsScreen({
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [savingRoleId, setSavingRoleId] = useState<RoleAssignment["roleId"] | null>(null);
+  const [editingStageAi, setEditingStageAi] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const taskById = useMemo(
     () => new Map(snapshot?.tasks.map((task) => [task.id, task]) ?? []),
@@ -326,7 +328,9 @@ export function SessionsScreen({
               ))}
               {summaryText && activeSession ? (
                 <SessionMessage icon="file" role="assistant" timestamp={activeSession.updatedAt} title="요약">
-                  <pre>{summaryText.trim()}</pre>
+                  <div className="session-markdown">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryText.trim()}</ReactMarkdown>
+                  </div>
                 </SessionMessage>
               ) : null}
             </div>
@@ -443,9 +447,9 @@ export function SessionsScreen({
         <div className="session-context-section">
           <div className="session-context-section-title">
             <span>Stage AI</span>
-            <button className="session-context-link" onClick={onGoSettings} type="button">
-              <Settings size={12} />
-              설정
+            <button className="session-context-link" onClick={() => setEditingStageAi((value) => !value)} type="button">
+              {editingStageAi ? <Check size={12} /> : <Pencil size={12} />}
+              {editingStageAi ? "저장" : "편집"}
             </button>
           </div>
           <div className="session-context-list">
@@ -453,6 +457,7 @@ export function SessionsScreen({
               <RoleAssignmentRow
                 assignment={assignment}
                 connections={snapshot.settings.aiConnections.filter((connection) => connection.enabled)}
+                editing={editingStageAi}
                 key={assignment.roleId}
                 onChange={(connectionId) => void updateRoleConnection(assignment.roleId, connectionId)}
                 onModelChange={(model) => void updateRoleModel(assignment.roleId, model)}
@@ -461,9 +466,6 @@ export function SessionsScreen({
               />
             ))}
           </div>
-          <p className="session-context-empty">
-            역할 정책 {snapshot.settings.rolePolicies.filter((policy) => policy.enabled).length}개가 Context Pack에 포함됩니다.
-          </p>
         </div>
       </aside>
     </div>
@@ -473,6 +475,7 @@ export function SessionsScreen({
 function RoleAssignmentRow({
   assignment,
   connections,
+  editing,
   onChange,
   onModelChange,
   saving,
@@ -480,6 +483,7 @@ function RoleAssignmentRow({
 }: {
   assignment: RoleAssignment;
   connections: AiConnection[];
+  editing: boolean;
   onChange: (connectionId: string) => void;
   onModelChange: (model: string) => void;
   saving: boolean;
@@ -501,20 +505,22 @@ function RoleAssignmentRow({
         <strong>{roleLabel(assignment.roleId)}</strong>
         <small>{labels.length > 0 ? labels.join(", ") : "미설정"}</small>
       </div>
-      <select
-        aria-label={`${roleLabel(assignment.roleId)} AI 변경`}
-        disabled={saving || connections.length === 0}
-        onChange={(event) => onChange(event.target.value)}
-        value={selectedConnectionId}
-      >
-        <option value="">미설정</option>
-        {connections.map((connection) => (
-          <option key={connection.id} value={connection.id}>
-            {connection.label}
-          </option>
-        ))}
-      </select>
-      {selectedConnection ? (
+      {editing ? (
+        <select
+          aria-label={`${roleLabel(assignment.roleId)} AI 변경`}
+          disabled={saving || connections.length === 0}
+          onChange={(event) => onChange(event.target.value)}
+          value={selectedConnectionId}
+        >
+          <option value="">미설정</option>
+          {connections.map((connection) => (
+            <option key={connection.id} value={connection.id}>
+              {connection.label}
+            </option>
+          ))}
+        </select>
+      ) : null}
+      {editing && selectedConnection ? (
         <select
           aria-label={`${roleLabel(assignment.roleId)} 모델 변경`}
           disabled={saving}
