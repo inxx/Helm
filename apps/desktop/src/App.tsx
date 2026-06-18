@@ -19,7 +19,7 @@ const navItems = [
   { id: "sessions" as const, label: "채팅", icon: MessageSquare },
   { id: "tasks" as const, label: "태스크", icon: ListChecks },
   { id: "git" as const, label: "깃", icon: GitBranch },
-  { id: "terminal" as const, label: "통합 터미널", icon: SquareTerminal },
+  { id: "terminal" as const, label: "터미널", icon: SquareTerminal },
   { id: "settings" as const, label: "설정", icon: Settings },
 ];
 
