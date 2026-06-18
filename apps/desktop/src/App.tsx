@@ -1,13 +1,11 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { Activity, ClipboardList, GitBranch, LayoutDashboard, MessageSquare, Settings, SquareTerminal } from "lucide-react";
+import { ClipboardList, GitBranch, MessageSquare, Settings, SquareTerminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
-import { ControlTowerScreen } from "./screens/ControlTowerScreen";
-import { GlobalControlTowerScreen } from "./screens/GlobalControlTowerScreen";
 import { GitScreen } from "./screens/GitScreen";
 import { PlanningScreen } from "./screens/PlanningScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
@@ -15,12 +13,10 @@ import { SessionsScreen } from "./screens/SessionsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
 
-type Screen = "dashboard" | "controlTower" | "planning" | "sessions" | "tasks" | "git" | "terminal" | "settings";
+type Screen = "planning" | "sessions" | "tasks" | "git" | "terminal" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItems = [
-  { id: "dashboard" as const, label: "전체", icon: LayoutDashboard },
-  { id: "controlTower" as const, label: "관제탑", icon: Activity },
   { id: "planning" as const, label: "계획", icon: ClipboardList },
   { id: "sessions" as const, label: "채팅", icon: MessageSquare },
   { id: "git" as const, label: "깃", icon: GitBranch },
@@ -29,7 +25,7 @@ const navItems = [
 ];
 
 export function App() {
-  const [screen, setScreen] = useState<Screen>("dashboard");
+  const [screen, setScreen] = useState<Screen>("sessions");
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [recents, setRecents] = useState<RecentProject[]>(() => loadRecents());
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -57,7 +53,7 @@ export function App() {
         saveRecents(launch.recentProjects);
 
         if (launch.snapshot) {
-          hydrateSnapshot(launch.snapshot, "dashboard");
+          hydrateSnapshot(launch.snapshot, "sessions");
         } else if (launch.restoreError) {
           setError(launch.restoreError.message);
         }
@@ -127,7 +123,7 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [snapshot?.project.id, busy]);
 
-  function hydrateSnapshot(next: ProjectSnapshot, nextScreen: Screen = "controlTower") {
+  function hydrateSnapshot(next: ProjectSnapshot, nextScreen: Screen = "sessions") {
     setSnapshot(next);
     setSelectedTaskId(null);
     setScreen(nextScreen);
@@ -176,17 +172,6 @@ export function App() {
     }
   }
 
-  async function focusProject(projectId: string) {
-    await switchProject(projectId);
-    setScreen("controlTower");
-  }
-
-  async function focusTask(projectId: string, taskId: string) {
-    await switchProject(projectId);
-    setSelectedTaskId(taskId);
-    setScreen("sessions");
-  }
-
   async function forgetProject(projectId: string) {
     const recent = recents.find((project) => project.id === projectId);
     if (!recent) return;
@@ -204,7 +189,7 @@ export function App() {
       if (snapshot?.project.id === projectId) {
         setSnapshot(null);
         setSelectedTaskId(null);
-        setScreen("controlTower");
+        setScreen("sessions");
       }
     } catch (err) {
       setError(errorMessage(err));
@@ -253,27 +238,6 @@ export function App() {
         </section>
       ) : (
         <>
-          {screen === "dashboard" ? (
-            <GlobalControlTowerScreen
-              onFocusProject={focusProject}
-              onFocusTask={focusTask}
-              onOpenProject={openProject}
-            />
-          ) : null}
-          {screen === "controlTower" ? (
-            <ControlTowerScreen
-              snapshot={snapshot}
-              selectedTask={selectedTask}
-              onSelectTask={(taskId) => {
-                setSelectedTaskId(taskId);
-                if (taskId) setScreen("sessions");
-              }}
-              onOpenProject={openProject}
-              onRefresh={refresh}
-              onGoGit={() => setScreen("git")}
-              onGoSettings={() => setScreen("settings")}
-            />
-          ) : null}
           {screen === "sessions" ? (
             <SessionsScreen
               snapshot={snapshot}
