@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { Activity, GitBranch, LayoutDashboard, ListChecks, Settings, SquareTerminal } from "lucide-react";
+import { Activity, ClipboardList, GitBranch, LayoutDashboard, MessageSquare, Settings, SquareTerminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
@@ -9,19 +9,22 @@ import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
 import { ControlTowerScreen } from "./screens/ControlTowerScreen";
 import { GlobalControlTowerScreen } from "./screens/GlobalControlTowerScreen";
 import { GitScreen } from "./screens/GitScreen";
+import { PlanningScreen } from "./screens/PlanningScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
+import { SessionsScreen } from "./screens/SessionsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
 
-type Screen = "dashboard" | "controlTower" | "tasks" | "git" | "terminal" | "settings";
+type Screen = "dashboard" | "controlTower" | "planning" | "sessions" | "tasks" | "git" | "terminal" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItems = [
   { id: "dashboard" as const, label: "전체", icon: LayoutDashboard },
   { id: "controlTower" as const, label: "관제탑", icon: Activity },
-  { id: "tasks" as const, label: "태스크", icon: ListChecks },
+  { id: "planning" as const, label: "계획", icon: ClipboardList },
+  { id: "sessions" as const, label: "채팅", icon: MessageSquare },
   { id: "git" as const, label: "깃", icon: GitBranch },
-  { id: "terminal" as const, label: "터미널", icon: SquareTerminal },
+  { id: "terminal" as const, label: "통합 터미널", icon: SquareTerminal },
   { id: "settings" as const, label: "설정", icon: Settings },
 ];
 
@@ -34,6 +37,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
   const [terminalMounted, setTerminalMounted] = useState(false);
+  const [pendingPlanningGoal, setPendingPlanningGoal] = useState<string | null>(null);
 
   const selectedTask = useMemo<TaskSummary | null>(() => {
     if (!snapshot || !selectedTaskId) return null;
@@ -180,7 +184,7 @@ export function App() {
   async function focusTask(projectId: string, taskId: string) {
     await switchProject(projectId);
     setSelectedTaskId(taskId);
-    setScreen("tasks");
+    setScreen("sessions");
   }
 
   async function forgetProject(projectId: string) {
@@ -229,11 +233,6 @@ export function App() {
     }
   }
 
-  function openTask(taskId: string) {
-    setSelectedTaskId(taskId);
-    setScreen("tasks");
-  }
-
   return (
     <AppShell
       navItems={navItems}
@@ -265,11 +264,42 @@ export function App() {
             <ControlTowerScreen
               snapshot={snapshot}
               selectedTask={selectedTask}
-              onSelectTask={setSelectedTaskId}
+              onSelectTask={(taskId) => {
+                setSelectedTaskId(taskId);
+                if (taskId) setScreen("sessions");
+              }}
               onOpenProject={openProject}
               onRefresh={refresh}
               onGoGit={() => setScreen("git")}
               onGoSettings={() => setScreen("settings")}
+            />
+          ) : null}
+          {screen === "sessions" ? (
+            <SessionsScreen
+              snapshot={snapshot}
+              selectedTaskId={selectedTaskId}
+              onSelectTask={setSelectedTaskId}
+              onOpenProject={openProject}
+              onGoTerminal={() => setScreen("terminal")}
+              onGoSettings={() => setScreen("settings")}
+              onGoPlanning={(goalText) => {
+                if (goalText) setPendingPlanningGoal(goalText);
+                setScreen("planning");
+              }}
+              onRefresh={refresh}
+            />
+          ) : null}
+          {screen === "planning" ? (
+            <PlanningScreen
+              snapshot={snapshot}
+              initialGoalText={pendingPlanningGoal}
+              onInitialGoalConsumed={() => setPendingPlanningGoal(null)}
+              onOpenProject={openProject}
+              onRefresh={refresh}
+              onOpenTask={(taskId) => {
+                setSelectedTaskId(taskId);
+                setScreen("sessions");
+              }}
             />
           ) : null}
           {screen === "tasks" ? (
@@ -277,7 +307,10 @@ export function App() {
               snapshot={snapshot}
               selectedTask={selectedTask}
               selectedTaskId={selectedTaskId}
-              onSelectTask={setSelectedTaskId}
+              onSelectTask={(taskId) => {
+                setSelectedTaskId(taskId);
+                if (taskId) setScreen("sessions");
+              }}
               onOpenProject={openProject}
               onRefresh={refresh}
               onGoGit={() => setScreen("git")}
@@ -296,6 +329,9 @@ export function App() {
                 snapshot={snapshot}
                 isActive={screen === "terminal"}
                 onOpenProject={openProject}
+                recents={recents}
+                activeProjectId={snapshot?.project.id ?? null}
+                onSwitchProject={switchProject}
                 onSnapshotUpdated={applySnapshotUpdate}
               />
             </div>

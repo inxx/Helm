@@ -21,11 +21,12 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
+import { shortenPath, type RecentProject } from "../lib/recents";
+import { createTerminalPane, terminalPanesForProject, type TerminalPaneState } from "../lib/terminalPanes";
 import type {
   NodeRuntimeSummary,
   ProjectSnapshot,
   TerminalPtySnapshot,
-  TerminalPtySummary,
   TerminalSavedScriptSummary,
 } from "../lib/types";
 
@@ -33,16 +34,10 @@ interface TerminalScreenProps {
   snapshot: ProjectSnapshot | null;
   isActive: boolean;
   onOpenProject: () => void;
+  recents: RecentProject[];
+  activeProjectId: string | null;
+  onSwitchProject: (projectId: string) => Promise<void>;
   onSnapshotUpdated: (snapshot: ProjectSnapshot) => void;
-}
-
-interface TerminalPaneState {
-  id: string;
-  cwd: string;
-  nodeBinPath: string | null;
-  running: boolean;
-  error: string | null;
-  exitCode: number | null;
 }
 
 interface TerminalPtyOutput {
@@ -79,35 +74,16 @@ const MAX_TERMINAL_COMMAND_HISTORY = 200;
 const MAX_TERMINAL_COMMAND_LENGTH = 500;
 const MAX_SAVED_TERMINAL_SCRIPT_LENGTH = 4000;
 
-function createPane(cwd: string, nodeBinPath: string | null): TerminalPaneState {
-  return {
-    id: crypto.randomUUID(),
-    cwd,
-    nodeBinPath,
-    running: false,
-    error: null,
-    exitCode: null,
-  };
-}
-
-function paneFromSession(session: TerminalPtySummary): TerminalPaneState {
-  return {
-    id: session.terminalId,
-    cwd: session.cwd,
-    nodeBinPath: session.nodeBinPath,
-    running: session.running,
-    error: null,
-    exitCode: session.exitCode,
-  };
-}
-
 export function TerminalScreen({
   snapshot,
   isActive,
   onOpenProject,
+  recents,
+  activeProjectId,
+  onSwitchProject,
 }: TerminalScreenProps) {
   const [panes, setPanes] = useState<TerminalPaneState[]>(() =>
-    snapshot ? [createPane(snapshot.project.rootPath, null)] : [],
+    snapshot ? [createTerminalPane(snapshot.project.id, snapshot.project.rootPath, null)] : [],
   );
   const [activePaneId, setActivePaneId] = useState<string | null>(panes[0]?.id ?? null);
   const [nodeRuntimes, setNodeRuntimes] = useState<NodeRuntimeSummary[]>([]);
@@ -134,6 +110,7 @@ export function TerminalScreen({
   const [savedScriptsBusy, setSavedScriptsBusy] = useState(false);
   const [savedScriptMenuOpen, setSavedScriptMenuOpen] = useState(false);
   const [savedScriptEditor, setSavedScriptEditor] = useState<SavedScriptEditorState | null>(null);
+  const [switchingProjectId, setSwitchingProjectId] = useState<string | null>(null);
 
   const selectedPaneId = activePaneId ?? panes[0]?.id ?? null;
   const activePane = panes.find((pane) => pane.id === selectedPaneId) ?? panes[0] ?? null;
@@ -169,7 +146,7 @@ export function TerminalScreen({
 
   useEffect(() => {
     if (!snapshot) {
-      disposeAllPanes();
+      disposeAllPanes({ stopPty: false });
       setPanes([]);
       setActivePaneId(null);
       return;
@@ -192,22 +169,19 @@ export function TerminalScreen({
     inputStateRefs.current.clear();
     autocompleteRefs.current.clear();
     setAutocompleteByPane({});
-    disposeAllPanes();
+    disposeAllPanes({ stopPty: false });
     void api
-      .listTerminalPtys(snapshot.project.id)
+      .listTerminalPtys(null)
       .then((sessions) => {
         if (cancelled) return;
-        const nextPanes =
-          sessions.length > 0
-            ? sessions.map(paneFromSession)
-            : [createPane(snapshot.project.rootPath, null)];
+        const nextPanes = terminalPanesForProject(snapshot.project.id, snapshot.project.rootPath, sessions);
         setPanes(nextPanes);
         setActivePaneId(nextPanes[0]?.id ?? null);
       })
       .catch((err) => {
         if (cancelled) return;
         setControlError(errorMessage(err));
-        const firstPane = createPane(snapshot.project.rootPath, null);
+        const firstPane = createTerminalPane(snapshot.project.id, snapshot.project.rootPath, null);
         setPanes([firstPane]);
         setActivePaneId(firstPane.id);
       });
@@ -302,7 +276,7 @@ export function TerminalScreen({
   }, [selectedPaneId, panes.length, isActive]);
 
   useEffect(() => {
-    return () => disposeAllPanes();
+    return () => disposeAllPanes({ stopPty: false });
   }, []);
 
   function setPaneRef(id: string, node: HTMLElement | null) {
@@ -315,11 +289,39 @@ export function TerminalScreen({
     else terminalRefs.current.delete(id);
   }
 
+  async function switchTerminalProject(projectId: string) {
+    if (!projectId || projectId === activeProjectId || switchingProjectId) return;
+    setSwitchingProjectId(projectId);
+    setControlError(null);
+    try {
+      await onSwitchProject(projectId);
+    } catch (err) {
+      setControlError(errorMessage(err));
+    } finally {
+      setSwitchingProjectId(null);
+    }
+  }
+
   if (!snapshot) {
     return (
       <section className="empty-state">
         <h2>터미널</h2>
-        <p>프로젝트를 먼저 열어주세요.</p>
+        <p>최근 프로젝트를 선택하거나 새 프로젝트를 열어 통합 터미널을 시작하세요.</p>
+        {recents.length > 0 ? (
+          <div className="terminal-empty-recents">
+            {recents.slice(0, 5).map((project) => (
+              <button
+                disabled={switchingProjectId === project.id}
+                key={project.id}
+                onClick={() => void switchTerminalProject(project.id)}
+                type="button"
+              >
+                <strong>{project.name}</strong>
+                <span>{shortenPath(project.rootPath)}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
         <button className="primary-button" onClick={onOpenProject} type="button">
           프로젝트 열기
         </button>
@@ -333,7 +335,8 @@ export function TerminalScreen({
   }
 
   function addPane() {
-    const nextPane = createPane(
+    const nextPane = createTerminalPane(
+      snapshot?.project.id ?? null,
       activePane?.cwd ?? snapshot?.project.rootPath ?? "",
       activePane?.nodeBinPath ?? null,
     );
@@ -593,7 +596,7 @@ export function TerminalScreen({
       }
 
       const resolvedCwd = await api.startTerminalPty(
-        snapshot.project.id,
+        pane.projectId ?? snapshot.project.id,
         pane.id,
         pane.cwd,
         size,
@@ -681,9 +684,9 @@ export function TerminalScreen({
     }
   }
 
-  function disposeAllPanes() {
+  function disposeAllPanes(options: { stopPty: boolean }) {
     for (const id of xtermRefs.current.keys()) {
-      disposePane(id, { stopPty: true });
+      disposePane(id, options);
     }
   }
 
@@ -974,6 +977,22 @@ export function TerminalScreen({
             <SquareTerminal size={15} aria-hidden="true" />
             <span>Sessions</span>
           </div>
+          {recents.length > 0 ? (
+            <label className="terminal-project-switcher">
+              <span>Project</span>
+              <select
+                disabled={Boolean(switchingProjectId)}
+                onChange={(event) => void switchTerminalProject(event.target.value)}
+                value={activeProjectId ?? ""}
+              >
+                {recents.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name} · {shortenPath(project.rootPath)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <nav className="terminal-tab-strip" aria-label="열린 터미널">
             {panes.map((pane, index) => (
               <div
