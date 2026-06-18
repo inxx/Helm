@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Bot, Check, FileText, Folder, GitBranch, Loader2, MessageSquare, Pencil, Plus, RefreshCw, Send, Square, SquareTerminal, User } from "lucide-react";
+import { Bot, Check, FileText, Folder, GitBranch, Loader2, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, Send, Square, SquareTerminal, Trash2, User } from "lucide-react";
 import { ApprovalInbox } from "../components/ApprovalInbox";
 import { api } from "../lib/api";
+import { shortenPath, type RecentProject } from "../lib/recents";
 import { roleLabel } from "../lib/runnerReadiness";
 import type {
   AgentSessionSummary,
@@ -22,6 +23,11 @@ interface SessionsScreenProps {
   selectedTaskId: string | null;
   onSelectTask: (taskId: string | null) => void;
   onOpenProject: () => void;
+  recents: RecentProject[];
+  activeProjectId: string | null;
+  onSwitchProject: (projectId: string) => void;
+  onForgetProject: (projectId: string) => void;
+  busy: boolean;
   onGoTerminal: () => void;
   onGoSettings: () => void;
   onRefresh: () => Promise<void>;
@@ -32,6 +38,11 @@ export function SessionsScreen({
   selectedTaskId,
   onSelectTask,
   onOpenProject,
+  recents,
+  activeProjectId,
+  onSwitchProject,
+  onForgetProject,
+  busy,
   onGoTerminal,
   onRefresh,
 }: SessionsScreenProps) {
@@ -50,11 +61,15 @@ export function SessionsScreen({
   const [editingStageAi, setEditingStageAi] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [stoppingTerminalId, setStoppingTerminalId] = useState<string | null>(null);
+  const [composingNewSession, setComposingNewSession] = useState(false);
+  const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const taskById = useMemo(
     () => new Map(snapshot?.tasks.map((task) => [task.id, task]) ?? []),
     [snapshot?.tasks],
   );
   const activeSession = useMemo(() => {
+    if (composingNewSession) return null;
     if (sessions.length === 0) return null;
     if (activeSessionId) {
       const exact = sessions.find((session) => session.id === activeSessionId);
@@ -65,7 +80,7 @@ export function SessionsScreen({
       if (taskSession) return taskSession;
     }
     return sessions[0];
-  }, [activeSessionId, selectedTaskId, sessions]);
+  }, [activeSessionId, composingNewSession, selectedTaskId, sessions]);
   const selectedTask = selectedTaskId ? taskById.get(selectedTaskId) ?? null : null;
   const activeTask = activeSession?.taskId ? taskById.get(activeSession.taskId) ?? selectedTask : selectedTask;
   const activeApprovalEntityIds = [activeTask?.id, activeSession?.sourceRunId].filter(Boolean) as string[];
@@ -96,6 +111,7 @@ export function SessionsScreen({
         setSessions(items);
         setTerminalPtys(ptys);
         setChangedFiles(files);
+        if (composingNewSession) return;
         if (selectedTaskId) {
           setActiveSessionId(items.find((session) => session.taskId === selectedTaskId)?.id ?? items[0]?.id ?? null);
         } else {
@@ -111,7 +127,7 @@ export function SessionsScreen({
     return () => {
       disposed = true;
     };
-  }, [snapshot?.project.id, selectedTaskId, refreshKey]);
+  }, [snapshot?.project.id, composingNewSession, selectedTaskId, refreshKey]);
 
   useEffect(() => {
     if (!snapshot || !activeSession?.sourceRunId || !activeSession.taskId) {
@@ -169,6 +185,7 @@ export function SessionsScreen({
         },
       ]);
       await onRefresh();
+      setRefreshKey((value) => value + 1);
     } catch (error) {
       setLoadError(messageFromError(error, "오케스트레이터 지시를 저장하지 못했습니다."));
     } finally {
@@ -240,12 +257,19 @@ export function SessionsScreen({
     }
   }
 
+  function startNewSession() {
+    setComposingNewSession(true);
+    setActiveSessionId(null);
+    onSelectTask(null);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+
   return (
     <div className="sessions-layout">
       <aside className="sessions-rail" aria-label="세션 목록">
         <div className="sessions-project-header">
           <Folder size={18} aria-hidden />
-          <h2>{snapshot.project.name}</h2>
+          <h2>프로젝트</h2>
           <button
             className="sessions-icon-button"
             disabled={loading}
@@ -258,30 +282,98 @@ export function SessionsScreen({
         </div>
         {loadError ? <div className="error-banner compact">{loadError}</div> : null}
         <div className="session-list">
-          {sessions.length === 0 ? (
-            <div className="session-list-empty">
-              <MessageSquare size={16} />
-              <span>아직 세션이 없습니다.</span>
-            </div>
-          ) : null}
-          {sessions.map((session) => {
-            const active = session.id === activeSession?.id;
+          {recents.map((project) => {
+            const activeProject = project.id === activeProjectId;
+            const disabled = busy && !activeProject;
             return (
-              <button
-                className={active ? "session-row active" : "session-row"}
-                key={session.id}
-                onClick={() => {
-                  setActiveSessionId(session.id);
-                  onSelectTask(session.taskId);
-                }}
-                type="button"
-              >
-                <span className={`session-status-dot ${session.nextAction}`} />
-                <span className="session-row-main">
-                  <strong>{session.title}</strong>
-                  <small>{session.provider ?? "provider 미정"} · {formatRelative(session.lastSignalAt)}</small>
-                </span>
-              </button>
+              <div className="session-project-group" key={project.id}>
+                <div className={activeProject ? "session-project-row active" : "session-project-row"}>
+                  <button
+                    className="session-project-main"
+                    disabled={disabled}
+                    onClick={() => {
+                      if (!activeProject) {
+                        setComposingNewSession(false);
+                        void onSwitchProject(project.id);
+                      }
+                    }}
+                    title={project.rootPath}
+                    type="button"
+                  >
+                    <span className="session-row-main">
+                      <strong>{project.name}</strong>
+                      <small>{shortenPath(project.rootPath)}</small>
+                    </span>
+                  </button>
+                  {activeProject ? (
+                    <button
+                      aria-label={`${project.name} 세션 추가`}
+                      className="session-project-action"
+                      onClick={startNewSession}
+                      title="세션 추가"
+                      type="button"
+                    >
+                      <Plus size={14} aria-hidden />
+                    </button>
+                  ) : null}
+                  <div className="session-project-menu-wrap">
+                    <button
+                      aria-label={`${project.name} 메뉴`}
+                      className="session-project-action"
+                      onClick={() => setOpenProjectMenuId((current) => (current === project.id ? null : project.id))}
+                      title="프로젝트 메뉴"
+                      type="button"
+                    >
+                      <MoreHorizontal size={15} aria-hidden />
+                    </button>
+                    {openProjectMenuId === project.id ? (
+                      <div className="session-project-menu">
+                        <button
+                          onClick={() => {
+                            setOpenProjectMenuId(null);
+                            onForgetProject(project.id);
+                          }}
+                          type="button"
+                        >
+                          <Trash2 size={13} aria-hidden />
+                          <span>프로젝트 삭제</span>
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                {activeProject ? (
+                  <div className="session-project-sessions">
+                    {sessions.length === 0 ? (
+                      <div className="session-list-empty">
+                        <MessageSquare size={16} />
+                        <span>아직 세션이 없습니다.</span>
+                      </div>
+                    ) : null}
+                    {sessions.map((session) => {
+                      const active = session.id === activeSession?.id;
+                      return (
+                        <button
+                          className={active ? "session-row active" : "session-row"}
+                          key={session.id}
+                          onClick={() => {
+                            setComposingNewSession(false);
+                            setActiveSessionId(session.id);
+                            onSelectTask(session.taskId);
+                          }}
+                          type="button"
+                        >
+                          <span className={`session-status-dot ${session.nextAction}`} />
+                          <span className="session-row-main">
+                            <strong>{session.title}</strong>
+                            <small>{session.provider ?? "provider 미정"} · {formatRelative(session.lastSignalAt)}</small>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
             );
           })}
         </div>
@@ -382,6 +474,7 @@ export function SessionsScreen({
               }}
             >
               <textarea
+                ref={composerRef}
                 disabled={orchestratorBusy}
                 onChange={(event) => setOrchestratorInput(event.target.value)}
                 onKeyDown={(event) => {
@@ -423,6 +516,7 @@ export function SessionsScreen({
               }}
             >
               <textarea
+                ref={composerRef}
                 disabled={orchestratorBusy}
                 onChange={(event) => setOrchestratorInput(event.target.value)}
                 placeholder="오케스트레이터에게 새 작업 지시..."

@@ -243,6 +243,11 @@ export function App() {
               selectedTaskId={selectedTaskId}
               onSelectTask={setSelectedTaskId}
               onOpenProject={openProject}
+              recents={recents}
+              activeProjectId={snapshot?.project.id ?? null}
+              onSwitchProject={switchProject}
+              onForgetProject={forgetProject}
+              busy={busy}
               onGoTerminal={() => setScreen("terminal")}
               onGoSettings={() => setScreen("settings")}
               onRefresh={refresh}

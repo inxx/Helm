@@ -652,8 +652,26 @@ h3 {
 }
 
 .sessions-add-project {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 34px;
   width: 100%;
   margin-top: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: var(--shadow-1);
+}
+
+.sessions-add-project:hover:not(:disabled) {
+  border-color: var(--brand);
+  background: var(--brand-weak);
+  color: var(--brand);
 }
 
 .session-list-empty {
@@ -665,6 +683,103 @@ h3 {
   color: var(--text-muted);
   padding: 12px;
   font-size: 12px;
+}
+
+.session-project-group {
+  display: grid;
+  gap: 4px;
+}
+
+.session-project-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  padding: 4px;
+}
+
+.session-project-row:hover,
+.session-project-row.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-1);
+}
+
+.session-project-main {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 4px 6px;
+  text-align: left;
+}
+
+.session-project-main:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.session-project-action {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--soft);
+}
+
+.session-project-action:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.session-project-menu-wrap {
+  position: relative;
+}
+
+.session-project-menu {
+  position: absolute;
+  z-index: 10;
+  top: 30px;
+  right: 0;
+  min-width: 132px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  padding: 4px;
+}
+
+.session-project-menu button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--destructive);
+  padding: 7px 8px;
+  font-size: 12px;
+  text-align: left;
+}
+
+.session-project-menu button:hover {
+  background: color-mix(in oklch, var(--destructive) 10%, transparent);
+}
+
+.session-project-sessions {
+  display: grid;
+  gap: 3px;
+  padding-left: 10px;
 }
 
 .session-row {
@@ -790,15 +905,14 @@ h3 {
 
 .session-orchestrator-composer.empty {
   box-sizing: border-box;
-  width: 100%;
-  max-width: 680px;
+  width: min(100%, 760px);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow-1);
 }
 
 .session-orchestrator-composer textarea {
-  min-height: 48px;
+  min-height: 72px;
   resize: vertical;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -967,6 +1081,7 @@ h3 {
 .session-chat-empty {
   display: grid;
   flex: 1;
+  width: 100%;
   min-width: 0;
   place-content: center;
   justify-items: center;
