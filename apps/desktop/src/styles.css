@@ -583,7 +583,7 @@ h3 {
 
 .sessions-layout {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 260px;
+  grid-template-columns: 232px minmax(0, 1fr) 260px;
   height: 100%;
   min-height: 0;
   overflow: hidden;
