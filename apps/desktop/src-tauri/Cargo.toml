@@ -1,9 +1,13 @@
 [package]
-name = "helm-desktop"
+name = "helm"
 version = "0.1.0"
 description = "Helm desktop orchestrator"
 authors = ["inxx"]
 edition = "2021"
+
+[[bin]]
+name = "Helm"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
