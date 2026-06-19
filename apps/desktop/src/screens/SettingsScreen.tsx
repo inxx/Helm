@@ -2345,7 +2345,7 @@ function canRefreshModels(provider: string): boolean {
 
 function defaultModelPlaceholder(provider: string, language: AppLanguage): string {
   if (provider === "codex") return language === "ko" ? "예: gpt-5.2" : "Ex: gpt-5.2";
-  if (provider === "claude") return language === "ko" ? "예: sonnet" : "Ex: sonnet";
+  if (provider === "claude") return language === "ko" ? "예: claude-sonnet-4-6" : "Ex: claude-sonnet-4-6";
   if (provider === "gemini") return language === "ko" ? "예: gemini-2.5-pro" : "Ex: gemini-2.5-pro";
   return language === "ko" ? "선택 사항" : "Optional";
 }
@@ -2532,11 +2532,8 @@ function normalizeCliArgs(provider: string, args: string[]): string[] {
 }
 
 const CLAUDE_MODELS = [
-  "opus",
-  "sonnet",
-  "haiku",
-  "claude-opus-4-8",
   "claude-sonnet-4-6",
+  "claude-opus-4-8",
   "claude-haiku-4-5-20251001",
 ] as const;
 
@@ -2558,7 +2555,7 @@ function claudeConnection(cliPath = "claude"): AiConnection {
     timeoutSeconds: 1800,
     planningTimeoutSeconds: 600,
     enabled: true,
-    defaultModel: "sonnet",
+    defaultModel: "claude-sonnet-4-6",
     availableModels: [...CLAUDE_MODELS],
   };
 }

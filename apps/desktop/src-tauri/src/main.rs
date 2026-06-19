@@ -3066,8 +3066,8 @@ fn claude_ai_connections() -> Value {
             "planningTimeoutSeconds": 600,
             "planningModel": null,
             "enabled": true,
-            "defaultModel": "sonnet",
-            "availableModels": ["sonnet", "opus"],
+            "defaultModel": "claude-sonnet-4-6",
+            "availableModels": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
             "defaultEffort": null
         }
     ])
@@ -3928,9 +3928,10 @@ fn refresh_available_models(connection: &Value, cwd: &Path) -> ModelRefreshResul
         };
     };
 
+    let env_overrides = connection_env(connection);
     let api_refresh = match provider {
-        "codex" => refresh_openai_models(),
-        "claude" => refresh_anthropic_models(),
+        "codex" => refresh_openai_models(&env_overrides),
+        "claude" => refresh_anthropic_models(&env_overrides),
         "gemini" => ModelRefreshResult {
             models: Some(gemini_cli_model_aliases()),
             message: Some("Gemini CLI 기본 모델 alias를 사용합니다.".to_string()),
@@ -3943,13 +3944,9 @@ fn refresh_available_models(connection: &Value, cwd: &Path) -> ModelRefreshResul
 
     if provider == "claude" {
         if let Some(models) = api_refresh.models.as_ref() {
-            let mut models = models.clone();
-            models.extend(claude_cli_model_aliases());
-            models.sort();
-            models.dedup();
             return ModelRefreshResult {
                 message: api_refresh.message,
-                models: Some(models),
+                models: Some(models.clone()),
             };
         }
     }
@@ -3992,10 +3989,10 @@ fn refresh_available_models(connection: &Value, cwd: &Path) -> ModelRefreshResul
     }
 }
 
-fn refresh_openai_models() -> ModelRefreshResult {
-    let Some(api_key) = env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|value| !value.is_empty())
+fn refresh_openai_models(env_overrides: &[(String, String)]) -> ModelRefreshResult {
+    let Some(api_key) = connection_env_value(env_overrides, "OPENAI_API_KEY")
+        .or_else(|| env::var("OPENAI_API_KEY").ok())
+        .filter(|value| !value.trim().is_empty())
     else {
         return ModelRefreshResult {
             models: None,
@@ -4032,10 +4029,10 @@ fn refresh_openai_models() -> ModelRefreshResult {
     }
 }
 
-fn refresh_anthropic_models() -> ModelRefreshResult {
-    let Some(api_key) = env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|value| !value.is_empty())
+fn refresh_anthropic_models(env_overrides: &[(String, String)]) -> ModelRefreshResult {
+    let Some(api_key) = connection_env_value(env_overrides, "ANTHROPIC_API_KEY")
+        .or_else(|| env::var("ANTHROPIC_API_KEY").ok())
+        .filter(|value| !value.trim().is_empty())
     else {
         return ModelRefreshResult {
             models: None,
@@ -4104,17 +4101,6 @@ fn refresh_cli_models(connection: &Value, provider: &str, cwd: &Path) -> ModelRe
         return debug_refresh;
     }
 
-    if provider == "claude" {
-        let embedded_refresh = refresh_claude_embedded_models(connection);
-        if embedded_refresh
-            .models
-            .as_ref()
-            .is_some_and(|models| !models.is_empty())
-        {
-            return embedded_refresh;
-        }
-    }
-
     let Some(command) = cli_model_command(connection, provider, cwd) else {
         return ModelRefreshResult {
             models: None,
@@ -4131,13 +4117,11 @@ fn refresh_cli_models(connection: &Value, provider: &str, cwd: &Path) -> ModelRe
     ) {
         Ok(output) => {
             let text = strip_terminal_controls(&format!("{}\n{}", output.stdout, output.stderr));
-            let mut models = extract_cli_model_ids(provider, &text);
-            if provider == "claude" {
-                models.extend(claude_cli_model_aliases());
-                models.sort();
-                models.dedup();
-            }
+            let models = extract_cli_model_ids(provider, &text);
             if models.is_empty() {
+                if provider == "claude" {
+                    return refresh_claude_embedded_models(connection);
+                }
                 ModelRefreshResult {
                     models: None,
                     message: Some(format!(
@@ -4156,9 +4140,9 @@ fn refresh_cli_models(connection: &Value, provider: &str, cwd: &Path) -> ModelRe
             }
         }
         Err(err) if provider == "claude" => ModelRefreshResult {
-            models: Some(claude_cli_model_aliases()),
+            models: Some(claude_recommended_models()),
             message: Some(format!(
-                "Claude CLI /model 실행은 실패했지만 기본 alias를 사용합니다. {}",
+                "Claude CLI /model 실행은 실패했지만 권장 모델 기본값을 사용합니다. {}",
                 err.message
             )),
         },
@@ -4181,7 +4165,6 @@ fn refresh_claude_embedded_models(connection: &Value) -> ModelRefreshResult {
     match fs::read(&path) {
         Ok(bytes) => {
             let mut models = extract_model_ids_from_bytes("claude", &bytes);
-            models.extend(claude_cli_model_aliases());
             models.sort();
             models.dedup();
             if models.is_empty() {
@@ -4668,19 +4651,22 @@ fn is_anthropic_agent_model(id: &str) -> bool {
 }
 
 fn is_anthropic_cli_model(id: &str) -> bool {
-    matches!(id, "sonnet" | "opus")
-        || (id.starts_with("claude-")
-            && id
-                .split(['-', '.', '_'])
-                .any(|part| matches!(part, "sonnet" | "opus" | "haiku")))
+    id.starts_with("claude-")
+        && id
+            .split(['-', '.', '_'])
+            .any(|part| matches!(part, "sonnet" | "opus" | "haiku"))
 }
 
 fn is_gemini_cli_model(id: &str) -> bool {
     id.starts_with("gemini-") || id.starts_with("gemma-")
 }
 
-fn claude_cli_model_aliases() -> Vec<String> {
-    vec!["sonnet".to_string(), "opus".to_string()]
+fn claude_recommended_models() -> Vec<String> {
+    vec![
+        "claude-sonnet-4-6".to_string(),
+        "claude-opus-4-8".to_string(),
+        "claude-haiku-4-5-20251001".to_string(),
+    ]
 }
 
 fn gemini_cli_model_aliases() -> Vec<String> {
@@ -5124,6 +5110,12 @@ fn connection_env(connection: &Value) -> Vec<(String, String)> {
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     entries
+}
+
+fn connection_env_value(env_overrides: &[(String, String)], key: &str) -> Option<String> {
+    env_overrides
+        .iter()
+        .find_map(|(entry_key, value)| (entry_key == key).then(|| value.clone()))
 }
 
 fn create_terminal_startup_dir(
@@ -6096,6 +6088,28 @@ mod tests {
         let result = codex_debug_models_from_output(&output);
 
         assert_eq!(result.models, Some(vec!["gpt-5.5".to_string()]));
+    }
+
+    #[test]
+    fn connection_env_value_reads_connection_override() {
+        let env_overrides = vec![
+            ("ANTHROPIC_API_KEY".to_string(), "sk-ant-test".to_string()),
+            ("OPENAI_API_KEY".to_string(), "sk-openai-test".to_string()),
+        ];
+
+        assert_eq!(
+            connection_env_value(&env_overrides, "ANTHROPIC_API_KEY").as_deref(),
+            Some("sk-ant-test")
+        );
+        assert_eq!(connection_env_value(&env_overrides, "MISSING_KEY"), None);
+    }
+
+    #[test]
+    fn anthropic_cli_model_filter_excludes_short_aliases() {
+        assert!(is_anthropic_cli_model("claude-sonnet-4-6"));
+        assert!(is_anthropic_cli_model("claude-opus-4-8"));
+        assert!(!is_anthropic_cli_model("sonnet"));
+        assert!(!is_anthropic_cli_model("opus"));
     }
 
     #[test]
