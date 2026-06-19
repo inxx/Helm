@@ -1,11 +1,11 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
-import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
+import type { CommandError, ProjectSnapshot } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { SessionsScreen } from "./screens/SessionsScreen";
@@ -32,11 +32,6 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
   const [terminalMounted, setTerminalMounted] = useState(false);
-
-  const selectedTask = useMemo<TaskSummary | null>(() => {
-    if (!snapshot || !selectedTaskId) return null;
-    return snapshot.tasks.find((task) => task.id === selectedTaskId) ?? null;
-  }, [selectedTaskId, snapshot]);
 
   useEffect(() => {
     let cancelled = false;
@@ -211,9 +206,6 @@ export function App() {
 
   function applySnapshotUpdate(next: ProjectSnapshot) {
     setSnapshot(next);
-    if (selectedTaskId && !next.tasks.some((task) => task.id === selectedTaskId)) {
-      setSelectedTaskId(null);
-    }
   }
 
   return (
@@ -227,7 +219,7 @@ export function App() {
       onSwitchProject={switchProject}
       onForgetProject={forgetProject}
       busy={busy}
-      hideSidebar={screen === "sessions" || screen === "terminal"}
+      hideSidebar={screen === "sessions" || screen === "tasks" || screen === "terminal"}
     >
       {error ? <div className="error-banner">{error}</div> : null}
       {bootStatus === "restoring" ? (
@@ -256,13 +248,13 @@ export function App() {
           {screen === "tasks" ? (
             <TasksScreen
               snapshot={snapshot}
-              selectedTask={selectedTask}
               selectedTaskId={selectedTaskId}
               onSelectTask={(taskId) => {
                 setSelectedTaskId(taskId);
               }}
               onOpenProject={openProject}
               onRefresh={refresh}
+              recents={recents}
               onGoGit={() => setScreen("git")}
               onGoSettings={() => setScreen("settings")}
             />

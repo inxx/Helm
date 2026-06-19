@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Bot, FileText, GitMerge, GitPullRequest, MessageSquareWarning, Trash2, X } from "lucide-react";
 import type {
@@ -9,6 +9,7 @@ import type {
   TaskSummary,
   TaskTimelineEntry,
 } from "../lib/types";
+import type { RecentProject } from "../lib/recents";
 import { TaskBoard } from "../components/TaskBoard";
 import { api } from "../lib/api";
 import { deriveRunLiveState, isRunActiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
@@ -17,55 +18,70 @@ import { TASK_STATUS_LABEL } from "../lib/status";
 
 interface TasksScreenProps {
   snapshot: ProjectSnapshot | null;
-  selectedTask: TaskSummary | null;
   selectedTaskId: string | null;
   onSelectTask: (taskId: string | null) => void;
   onOpenProject: () => void;
   onRefresh: () => Promise<void>;
+  recents: RecentProject[];
   onGoGit: () => void;
   onGoSettings: () => void;
 }
 
 export function TasksScreen({
   snapshot,
-  selectedTask,
   selectedTaskId,
   onSelectTask,
   onOpenProject,
   onRefresh,
+  recents,
   onGoGit: _onGoGit,
   onGoSettings: _onGoSettings,
 }: TasksScreenProps) {
   const [taskRuns, setTaskRuns] = useState<Record<string, AgentRunSummary[]>>({});
-  const [selectedSessionId, setSelectedSessionId] = useState<string>("all");
+  const [projectSnapshots, setProjectSnapshots] = useState<Record<string, ProjectSnapshot>>({});
+  const [selectedProjectId, setSelectedProjectId] = useState<string>("all");
   const [runRefreshKey, setRunRefreshKey] = useState(0);
+  const [boardRefreshKey, setBoardRefreshKey] = useState(0);
+  const [boardLoadError, setBoardLoadError] = useState<string | null>(null);
+  const [isBoardLoading, setIsBoardLoading] = useState(false);
+  const recentKey = useMemo(() => recents.map((project) => project.id).join(":"), [recents]);
+  const boardSnapshots = useMemo(
+    () => buildBoardSnapshots(snapshot, projectSnapshots, recents),
+    [snapshot, projectSnapshots, recents],
+  );
+  const projectOptions = useMemo(() => buildProjectOptions(boardSnapshots, recents), [boardSnapshots, recents]);
+  const visibleSnapshots = useMemo(
+    () =>
+      selectedProjectId === "all"
+        ? boardSnapshots
+        : boardSnapshots.filter((projectSnapshot) => projectSnapshot.project.id === selectedProjectId),
+    [boardSnapshots, selectedProjectId],
+  );
+  const boardTasks = useMemo(() => visibleSnapshots.flatMap((projectSnapshot) => projectSnapshot.tasks), [visibleSnapshots]);
   const taskRunKey = useMemo(
-    () => snapshot?.tasks.map((task) => task.id).join(":") ?? "",
-    [snapshot?.tasks],
+    () => boardTasks.map((task) => task.id).join(":"),
+    [boardTasks],
   );
-  const sessions = useMemo(
-    () => buildTaskSessions(snapshot?.tasks ?? [], taskRuns),
-    [snapshot?.tasks, taskRuns],
-  );
-  const activeSession = sessions.find((session) => session.id === selectedSessionId) ?? sessions[0];
-  const visibleTasks = activeSession
-    ? snapshot?.tasks.filter((task) => activeSession.taskIds.has(task.id)) ?? []
-    : snapshot?.tasks ?? [];
   const visibleTaskRuns = useMemo(() => {
-    const visibleIds = new Set(visibleTasks.map((task) => task.id));
+    const visibleIds = new Set(boardTasks.map((task) => task.id));
     return Object.fromEntries(
       Object.entries(taskRuns).filter(([taskId]) => visibleIds.has(taskId)),
     ) as Record<string, AgentRunSummary[]>;
-  }, [taskRuns, visibleTasks]);
+  }, [taskRuns, boardTasks]);
+  const selectedTaskContext = useMemo(
+    () => findSelectedTaskContext(boardSnapshots, selectedTaskId),
+    [boardSnapshots, selectedTaskId],
+  );
+  const selectedTask = selectedTaskContext?.task ?? null;
 
   useEffect(() => {
-    if (!snapshot) return;
     let disposed = false;
     let cleanup: (() => void) | null = null;
 
     void listen<{ projectId?: string }>("agent-run://updated", (event) => {
-      if (!disposed && event.payload.projectId === snapshot.project.id) {
+      if (!disposed && (!event.payload.projectId || boardSnapshots.some((item) => item.project.id === event.payload.projectId))) {
         setRunRefreshKey((value) => value + 1);
+        setBoardRefreshKey((value) => value + 1);
       }
     }).then((unlisten) => {
       if (disposed) {
@@ -79,20 +95,60 @@ export function TasksScreen({
       disposed = true;
       cleanup?.();
     };
-  }, [snapshot?.project.id]);
+  }, [boardSnapshots]);
 
   useEffect(() => {
     let disposed = false;
-    if (!snapshot || snapshot.tasks.length === 0) {
+    const projectIds = new Set(recents.map((project) => project.id));
+    if (snapshot) projectIds.add(snapshot.project.id);
+    if (projectIds.size === 0) {
+      setProjectSnapshots({});
+      setBoardLoadError(null);
+      setIsBoardLoading(false);
+      return;
+    }
+
+    setIsBoardLoading(true);
+    setBoardLoadError(null);
+    void (async () => {
+      const entries = await Promise.all(
+        [...projectIds].map(async (projectId) => {
+          try {
+            return [projectId, await api.getProjectSnapshot(projectId), null] as const;
+          } catch (error) {
+            return [projectId, null, error] as const;
+          }
+        }),
+      );
+      if (disposed) return;
+      const nextSnapshots = Object.fromEntries(
+        entries
+          .filter((entry): entry is readonly [string, ProjectSnapshot, null] => entry[1] !== null)
+          .map(([projectId, projectSnapshot]) => [projectId, projectSnapshot]),
+      );
+      const failed = entries.filter((entry) => entry[2] !== null).length;
+      setProjectSnapshots(nextSnapshots);
+      setBoardLoadError(failed > 0 ? `${failed}개 프로젝트 상태를 불러오지 못했습니다.` : null);
+      setIsBoardLoading(false);
+    })();
+
+    return () => {
+      disposed = true;
+    };
+  }, [snapshot?.project.id, recentKey, boardRefreshKey]);
+
+  useEffect(() => {
+    let disposed = false;
+    if (boardTasks.length === 0) {
       setTaskRuns({});
       return;
     }
 
     void (async () => {
       const entries = await Promise.all(
-        snapshot.tasks.map(async (task) => {
+        boardTasks.map(async (task) => {
           try {
-            return [task.id, await api.listAgentRuns(snapshot.project.id, task.id)] as const;
+            return [task.id, await api.listAgentRuns(task.projectId, task.id)] as const;
           } catch {
             return [task.id, []] as const;
           }
@@ -104,13 +160,16 @@ export function TasksScreen({
     return () => {
       disposed = true;
     };
-  }, [snapshot?.project.id, taskRunKey, runRefreshKey]);
+  }, [taskRunKey, runRefreshKey]);
 
   useEffect(() => {
-    setSelectedSessionId("all");
-  }, [snapshot?.project.id]);
+    if (selectedProjectId !== "all" && !projectOptions.some((option) => option.id === selectedProjectId)) {
+      setSelectedProjectId("all");
+      onSelectTask(null);
+    }
+  }, [onSelectTask, projectOptions, selectedProjectId]);
 
-  if (!snapshot) {
+  if (boardSnapshots.length === 0) {
     return (
       <section className="empty-state">
         <h2>프로젝트를 열어주세요</h2>
@@ -122,61 +181,173 @@ export function TasksScreen({
     );
   }
 
-  const observerSummary = buildWorkspaceObserverSummary(snapshot, visibleTaskRuns, activeSession?.title ?? "전체 세션");
+  const observerSummary = buildWorkspaceObserverSummary(
+    visibleSnapshots,
+    visibleTaskRuns,
+    selectedProjectId === "all"
+      ? "전체 프로젝트"
+      : projectOptions.find((option) => option.id === selectedProjectId)?.label ?? "프로젝트",
+  );
 
   return (
     <div className={selectedTask ? "tasks-layout with-detail" : "tasks-layout"}>
       <section className="task-workspace">
         <div className="section-header">
           <div>
-            <h2>전체 진행상황</h2>
-            <p>Task 기준으로 현재 단계, 실행 상태, 승인 대기 항목을 한눈에 확인합니다.</p>
+            <h2>전체 칸반보드</h2>
+            <p>진행 중인 프로젝트의 Task를 단계별로 모아 봅니다.</p>
           </div>
+          <ProjectBoardFilter
+            busy={isBoardLoading}
+            options={projectOptions}
+            selectedProjectId={selectedProjectId}
+            onSelectProject={(projectId) => {
+              setSelectedProjectId(projectId);
+              onSelectTask(null);
+            }}
+          />
+        </div>
+
+        <div className="task-board-alert-slot">
+          {boardLoadError ? <div className="error-banner compact">{boardLoadError}</div> : null}
         </div>
 
         <WorkspaceObserverStrip summary={observerSummary} />
 
-        <div className="task-observer-workspace">
-          <TaskSessionRail
-            sessions={sessions}
-            selectedSessionId={activeSession?.id ?? "all"}
-            onSelectSession={(sessionId) => {
-              setSelectedSessionId(sessionId);
-              onSelectTask(null);
-            }}
+        <div className="task-board-workspace">
+          <div className="task-board-empty-note">
+            {boardTasks.length === 0 ? (
+              <>
+                <strong>표시할 태스크가 없습니다.</strong>
+                <span>프로젝트에서 Task가 생성되면 아래 칸반 컬럼에 바로 나타납니다.</span>
+              </>
+            ) : null}
+          </div>
+          <TaskBoard
+            tasks={boardTasks}
+            taskRuns={visibleTaskRuns}
+            selectedTaskId={selectedTaskId}
+            onSelectTask={onSelectTask}
+            projectLabels={projectLabelsForSnapshots(boardSnapshots)}
           />
-          {visibleTasks.length > 0 ? (
-            <TaskBoard
-              tasks={visibleTasks}
-              taskRuns={visibleTaskRuns}
-              selectedTaskId={selectedTaskId}
-              onSelectTask={onSelectTask}
-            />
-          ) : (
-            <TaskObserverEmptyState
-              project={snapshot.project.name}
-              branch={snapshot.repository.currentBranch}
-              dirtyCount={snapshot.repository.dirtyCount}
-              sessionTitle={activeSession?.title ?? "전체 세션"}
-            />
-          )}
         </div>
       </section>
-      {selectedTask ? (
+      {selectedTask && selectedTaskContext ? (
         <TaskFocusDetail
-          snapshot={snapshot}
+          snapshot={selectedTaskContext.snapshot}
           task={selectedTask}
           runs={taskRuns[selectedTask.id] ?? []}
           onClose={() => onSelectTask(null)}
-          onRefresh={onRefresh}
+          onRefresh={async () => {
+            await refreshBoardSnapshot(selectedTask.projectId, setProjectSnapshots);
+            if (snapshot?.project.id === selectedTask.projectId) {
+              await onRefresh();
+            }
+          }}
           onDeleted={async () => {
             onSelectTask(null);
-            await onRefresh();
+            await refreshBoardSnapshot(selectedTask.projectId, setProjectSnapshots);
+            if (snapshot?.project.id === selectedTask.projectId) {
+              await onRefresh();
+            }
           }}
         />
       ) : null}
     </div>
   );
+}
+
+function ProjectBoardFilter({
+  busy,
+  onSelectProject,
+  options,
+  selectedProjectId,
+}: {
+  busy: boolean;
+  onSelectProject: (projectId: string) => void;
+  options: Array<{ id: string; label: string; taskCount: number }>;
+  selectedProjectId: string;
+}) {
+  return (
+    <div className="task-project-filter" aria-label="프로젝트 필터" role="group">
+      <button
+        type="button"
+        className={selectedProjectId === "all" ? "active" : ""}
+        onClick={() => onSelectProject("all")}
+      >
+        <span className="task-project-filter-label">전체</span>
+        <span className="task-project-filter-count">{options.reduce((total, option) => total + option.taskCount, 0)}</span>
+      </button>
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          className={option.id === selectedProjectId ? "active" : ""}
+          onClick={() => onSelectProject(option.id)}
+        >
+          <span className="task-project-filter-label">{option.label}</span>
+          <span className="task-project-filter-count">{option.taskCount}</span>
+        </button>
+      ))}
+      {busy ? <small>동기화 중</small> : null}
+    </div>
+  );
+}
+
+function buildBoardSnapshots(
+  activeSnapshot: ProjectSnapshot | null,
+  snapshots: Record<string, ProjectSnapshot>,
+  recents: RecentProject[],
+): ProjectSnapshot[] {
+  const orderedIds = [
+    ...(activeSnapshot ? [activeSnapshot.project.id] : []),
+    ...recents.map((project) => project.id),
+    ...Object.keys(snapshots),
+  ];
+  const seen = new Set<string>();
+  return orderedIds.flatMap((projectId) => {
+    if (seen.has(projectId)) return [];
+    const projectSnapshot = snapshots[projectId] ?? (activeSnapshot?.project.id === projectId ? activeSnapshot : null);
+    if (!projectSnapshot) return [];
+    seen.add(projectId);
+    return [projectSnapshot];
+  });
+}
+
+function buildProjectOptions(
+  snapshots: ProjectSnapshot[],
+  recents: RecentProject[],
+): Array<{ id: string; label: string; taskCount: number }> {
+  const recentNames = new Map(recents.map((project) => [project.id, project.name]));
+  return snapshots.map((projectSnapshot) => ({
+    id: projectSnapshot.project.id,
+    label: recentNames.get(projectSnapshot.project.id) ?? projectSnapshot.project.name,
+    taskCount: projectSnapshot.tasks.length,
+  }));
+}
+
+function findSelectedTaskContext(
+  snapshots: ProjectSnapshot[],
+  selectedTaskId: string | null,
+): { snapshot: ProjectSnapshot; task: TaskSummary } | null {
+  if (!selectedTaskId) return null;
+  for (const projectSnapshot of snapshots) {
+    const task = projectSnapshot.tasks.find((item) => item.id === selectedTaskId);
+    if (task) return { snapshot: projectSnapshot, task };
+  }
+  return null;
+}
+
+function projectLabelsForSnapshots(snapshots: ProjectSnapshot[]): Record<string, string> {
+  return Object.fromEntries(snapshots.map((projectSnapshot) => [projectSnapshot.project.id, projectSnapshot.project.name]));
+}
+
+async function refreshBoardSnapshot(
+  projectId: string,
+  setProjectSnapshots: Dispatch<SetStateAction<Record<string, ProjectSnapshot>>>,
+) {
+  const next = await api.getProjectSnapshot(projectId);
+  setProjectSnapshots((current) => ({ ...current, [projectId]: next }));
 }
 
 interface TaskFocusDetailProps {
@@ -720,15 +891,18 @@ function TaskObserverEmptyState({
 }
 
 function buildWorkspaceObserverSummary(
-  snapshot: ProjectSnapshot,
+  snapshots: ProjectSnapshot[],
   taskRuns: Record<string, AgentRunSummary[]>,
   sessionTitle: string,
 ): WorkspaceObserverSummary {
   const runs = Object.values(taskRuns).flat();
   const activeRuns = runs.filter((run) => ["Queued", "Running"].includes(run.status)).length;
   const attentionRuns = runs.filter(isRunAttentionState).length;
-  const pendingApprovals = snapshot.approvals.filter((approval) => approval.status === "Pending").length;
-  const dirtyFiles = snapshot.repository.dirtyCount;
+  const pendingApprovals = snapshots.reduce(
+    (total, snapshot) => total + snapshot.approvals.filter((approval) => approval.status === "Pending").length,
+    0,
+  );
+  const dirtyFiles = snapshots.reduce((total, snapshot) => total + snapshot.repository.dirtyCount, 0);
   const headline =
     activeRuns > 0
       ? `${activeRuns}개 실행 관찰 중`
