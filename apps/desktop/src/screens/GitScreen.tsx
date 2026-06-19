@@ -3,6 +3,7 @@ import { Files, GitBranch, GitCommitHorizontal, GitGraph } from "lucide-react";
 import type { CSSProperties } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
+import { useI18n, type AppLanguage } from "../lib/i18n";
 import { shortHash } from "../lib/status";
 import type {
   GitBranchSummary,
@@ -45,10 +46,10 @@ type GitGraphRow =
 
 type SelectableGitGraphRow = Exclude<GitGraphRow, { kind: "connector" }>;
 
-const gitViews: Array<{ id: GitView; label: string; icon: LucideIcon }> = [
-  { id: "genealogy", label: "계보", icon: GitGraph },
-  { id: "changes", label: "변경", icon: Files },
-  { id: "branches", label: "브랜치", icon: GitBranch },
+const gitViews: Array<{ id: GitView; label: Record<AppLanguage, string>; icon: LucideIcon }> = [
+  { id: "genealogy", label: { ko: "계보", en: "History" }, icon: GitGraph },
+  { id: "changes", label: { ko: "변경", en: "Changes" }, icon: Files },
+  { id: "branches", label: { ko: "브랜치", en: "Branches" }, icon: GitBranch },
 ];
 
 const graphLaneColors = [
@@ -67,6 +68,7 @@ const worktreeGraphColorIndex = 8;
 const graphCellWidth = 10;
 
 export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
+  const { language } = useI18n();
   const [activeView, setActiveView] = useState<GitView>("genealogy");
   const [branches, setBranches] = useState<GitBranchSummary[]>([]);
   const [commits, setCommits] = useState<GitCommitSummary[]>([]);
@@ -134,10 +136,10 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
   if (!snapshot) {
     return (
       <section className="empty-state">
-        <h2>Git 저장소 없음</h2>
-        <p>프로젝트를 열면 read-only Git 상태가 표시됩니다.</p>
+        <h2>{language === "ko" ? "Git 저장소 없음" : "No Git repository"}</h2>
+        <p>{language === "ko" ? "프로젝트를 열면 read-only Git 상태가 표시됩니다." : "Open a project to see read-only Git status."}</p>
         <button className="primary-button" onClick={onOpenProject} type="button">
-          프로젝트 열기
+          {language === "ko" ? "프로젝트 열기" : "Open project"}
         </button>
       </section>
     );
@@ -150,7 +152,7 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
           <h2>{snapshot.project.name}</h2>
           <p title={snapshot.project.rootPath}>{snapshot.project.rootPath}</p>
         </div>
-        <div className="git-head-summary" aria-label="저장소 상태">
+        <div className="git-head-summary" aria-label={language === "ko" ? "저장소 상태" : "Repository status"}>
           <GitMetric label="branch" value={snapshot.repository.currentBranch ?? "detached"} />
           <GitMetric label="head" value={shortHash(snapshot.repository.head)} />
           <GitMetric label="staged" value={snapshot.repository.stagedCount} />
@@ -161,7 +163,7 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
 
       {gitError ? <div className="git-inline-error">{gitError}</div> : null}
 
-      <nav className="git-subtabs" role="tablist" aria-label="Git 보기">
+      <nav className="git-subtabs" role="tablist" aria-label={language === "ko" ? "Git 보기" : "Git views"}>
         {gitViews.map((view) => {
           const Icon = view.icon;
           const isActive = activeView === view.id;
@@ -175,7 +177,7 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
               onClick={() => setActiveView(view.id)}
             >
               <Icon size={15} />
-              <span>{view.label}</span>
+              <span>{view.label[language]}</span>
             </button>
           );
         })}
@@ -190,12 +192,13 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
             onSelectRow={setSelectedRowId}
             files={files}
             snapshot={snapshot}
+            language={language}
           />
         ) : null}
         {activeView === "changes" ? (
-          <ChangesView files={files} snapshot={snapshot} />
+          <ChangesView files={files} snapshot={snapshot} language={language} />
         ) : null}
-        {activeView === "branches" ? <BranchesView branches={branches} /> : null}
+        {activeView === "branches" ? <BranchesView branches={branches} language={language} /> : null}
       </div>
     </div>
   );
@@ -217,6 +220,7 @@ interface GenealogyViewProps {
   onSelectRow: (id: string) => void;
   files: GitFileStatus[];
   snapshot: ProjectSnapshot;
+  language: AppLanguage;
 }
 
 function GenealogyView({
@@ -226,18 +230,19 @@ function GenealogyView({
   onSelectRow,
   files,
   snapshot,
+  language,
 }: GenealogyViewProps) {
   return (
     <div className="git-genealogy-view">
       <section className="git-panel git-graph-panel">
         <div className="git-panel-title">
-          <span>계보</span>
+          <span>{language === "ko" ? "계보" : "History"}</span>
           <strong>{rows.length}</strong>
         </div>
         {rows.length === 0 ? (
-          <div className="empty-inline">커밋 없음</div>
+          <div className="empty-inline">{language === "ko" ? "커밋 없음" : "No commits"}</div>
         ) : (
-          <div className="git-graph-list" role="listbox" aria-label="커밋 계보">
+          <div className="git-graph-list" role="listbox" aria-label={language === "ko" ? "커밋 계보" : "Commit history"}>
             {rows.map((row, index) => {
               if (row.kind === "connector") {
                 return (
@@ -304,7 +309,7 @@ function GenealogyView({
 
       <section className="git-panel git-selected-panel">
         <div className="git-panel-title">
-          <span>상세</span>
+          <span>{language === "ko" ? "상세" : "Details"}</span>
           <strong>
             {selectedRow?.kind === "commit"
               ? selectedRow.commit.shortHash
@@ -313,7 +318,7 @@ function GenealogyView({
                 : "none"}
           </strong>
         </div>
-        <SelectedGitDetail selectedRow={selectedRow} files={files} snapshot={snapshot} />
+        <SelectedGitDetail selectedRow={selectedRow} files={files} snapshot={snapshot} language={language} />
       </section>
     </div>
   );
@@ -480,13 +485,15 @@ function SelectedGitDetail({
   selectedRow,
   files,
   snapshot,
+  language,
 }: {
   selectedRow: SelectableGitGraphRow | null;
   files: GitFileStatus[];
   snapshot: ProjectSnapshot;
+  language: AppLanguage;
 }) {
   if (!selectedRow) {
-    return <div className="empty-inline">선택 항목 없음</div>;
+    return <div className="empty-inline">{language === "ko" ? "선택 항목 없음" : "Nothing selected"}</div>;
   }
 
   if (selectedRow.kind === "worktree") {
@@ -507,7 +514,7 @@ function SelectedGitDetail({
           </div>
         </div>
         <div className="git-detail-side">
-          <FilesList files={files} />
+          <FilesList files={files} language={language} />
         </div>
       </div>
     );
@@ -524,7 +531,7 @@ function SelectedGitDetail({
             <strong>{commit.subject}</strong>
             <span>
               {commit.authorName}
-              {commit.isMine ? " · 내 커밋" : ""}
+              {commit.isMine ? language === "ko" ? " · 내 커밋" : " · my commit" : ""}
             </span>
           </div>
         </div>
@@ -547,7 +554,7 @@ function SelectedGitDetail({
       </div>
       <div className="git-detail-side">
         {commit.refs.length === 0 ? (
-          <p className="muted">refs 없음</p>
+          <p className="muted">{language === "ko" ? "refs 없음" : "No refs"}</p>
         ) : (
           <div className="git-ref-stack">
             {commit.refs.map((ref) => (
@@ -562,7 +569,7 @@ function SelectedGitDetail({
   );
 }
 
-function ChangesView({ files, snapshot }: { files: GitFileStatus[]; snapshot: ProjectSnapshot }) {
+function ChangesView({ files, snapshot, language }: { files: GitFileStatus[]; snapshot: ProjectSnapshot; language: AppLanguage }) {
   const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
   const [diffMode, setDiffMode] = useState<GitDiffMode>("worktree");
   const [fileDiff, setFileDiff] = useState<GitFileDiff | null>(null);
@@ -624,7 +631,7 @@ function ChangesView({ files, snapshot }: { files: GitFileStatus[]; snapshot: Pr
       <div className="git-changes-sidebar">
         <section className="git-panel">
           <div className="git-panel-title">
-            <span>상태</span>
+            <span>{language === "ko" ? "상태" : "Status"}</span>
             <strong>{snapshot.repository.dirtyCount}</strong>
           </div>
           <div className="git-status-breakdown">
@@ -639,13 +646,14 @@ function ChangesView({ files, snapshot }: { files: GitFileStatus[]; snapshot: Pr
         </section>
         <section className="git-panel">
           <div className="git-panel-title">
-            <span>변경 파일</span>
+            <span>{language === "ko" ? "변경 파일" : "Changed files"}</span>
             <strong>{files.length}</strong>
           </div>
           <FilesList
             files={files}
             selectedFileKey={selectedFileKey}
             onSelectFile={setSelectedFileKey}
+            language={language}
           />
         </section>
       </div>
@@ -663,7 +671,7 @@ function ChangesView({ files, snapshot }: { files: GitFileStatus[]; snapshot: Pr
                 </span>
                 <strong title={selectedFile.path}>{selectedFile.path}</strong>
               </div>
-              <div className="git-diff-mode-toggle" role="group" aria-label="Diff 모드">
+              <div className="git-diff-mode-toggle" role="group" aria-label={language === "ko" ? "Diff 모드" : "Diff mode"}>
                 <button
                   className={diffMode === "worktree" ? "active" : ""}
                   onClick={() => setDiffMode("worktree")}
@@ -682,29 +690,29 @@ function ChangesView({ files, snapshot }: { files: GitFileStatus[]; snapshot: Pr
               </div>
             </div>
           ) : null}
-          <DiffContent diff={fileDiff?.diff ?? ""} error={diffError} loading={loadingDiff} />
+          <DiffContent diff={fileDiff?.diff ?? ""} error={diffError} loading={loadingDiff} language={language} />
         </div>
       </section>
     </div>
   );
 }
 
-function BranchesView({ branches }: { branches: GitBranchSummary[] }) {
+function BranchesView({ branches, language }: { branches: GitBranchSummary[]; language: AppLanguage }) {
   return (
     <section className="git-panel git-branches-view">
       <div className="git-panel-title">
-        <span>로컬 브랜치</span>
+        <span>{language === "ko" ? "로컬 브랜치" : "Local branches"}</span>
         <strong>{branches.length}</strong>
       </div>
       {branches.length === 0 ? (
-        <div className="empty-inline">로컬 브랜치 없음</div>
+        <div className="empty-inline">{language === "ko" ? "로컬 브랜치 없음" : "No local branches"}</div>
       ) : (
         <ul className="git-branch-list">
           {branches.map((branch) => (
             <li className={branch.isCurrent ? "current" : ""} key={branch.branchName}>
               <div>
                 <strong>{branch.branchName}</strong>
-                <span>{branch.upstream ?? "upstream 없음"}</span>
+                <span>{branch.upstream ?? (language === "ko" ? "upstream 없음" : "No upstream")}</span>
               </div>
               <div className="git-branch-meta">
                 <span>{shortHash(branch.headHash)}</span>
@@ -722,13 +730,15 @@ function FilesList({
   files,
   selectedFileKey,
   onSelectFile,
+  language,
 }: {
   files: GitFileStatus[];
   selectedFileKey?: string | null;
   onSelectFile?: (key: string) => void;
+  language: AppLanguage;
 }) {
   if (files.length === 0) {
-    return <p className="muted git-empty-copy">변경 파일 없음</p>;
+    return <p className="muted git-empty-copy">{language === "ko" ? "변경 파일 없음" : "No changed files"}</p>;
   }
 
   return (
@@ -754,23 +764,25 @@ function DiffContent({
   diff,
   error,
   loading,
+  language,
 }: {
   diff: string;
   error: string | null;
   loading: boolean;
+  language: AppLanguage;
 }) {
   if (loading) {
-    return <div className="empty-inline">diff 불러오는 중</div>;
+    return <div className="empty-inline">{language === "ko" ? "diff 불러오는 중" : "Loading diff"}</div>;
   }
   if (error) {
     return <div className="git-inline-error">{error}</div>;
   }
   if (!diff.trim()) {
-    return <div className="empty-inline">표시할 diff 없음</div>;
+    return <div className="empty-inline">{language === "ko" ? "표시할 diff 없음" : "No diff to display"}</div>;
   }
 
   return (
-    <pre className="git-diff-code" aria-label="파일 diff">
+    <pre className="git-diff-code" aria-label={language === "ko" ? "파일 diff" : "File diff"}>
       {diff.split("\n").map((line, index) => (
         <span className={diffLineClass(line)} key={`${index}:${line}`}>
           {line || " "}

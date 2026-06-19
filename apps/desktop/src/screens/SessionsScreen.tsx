@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 import { Bot, Check, FileText, Folder, GitBranch, Loader2, MessageSquare, MoreHorizontal, Pencil, Plus, Send, Square, SquareTerminal, Trash2, User, X } from "lucide-react";
 import { ApprovalInbox } from "../components/ApprovalInbox";
 import { api } from "../lib/api";
-import { useI18n } from "../lib/i18n";
+import { useI18n, type AppLanguage } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
 import { roleLabel } from "../lib/runnerReadiness";
 import type {
@@ -47,7 +47,7 @@ export function SessionsScreen({
   onGoTerminal,
   onRefresh,
 }: SessionsScreenProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [sessions, setSessions] = useState<AgentSessionSummary[]>([]);
   const [terminalPtys, setTerminalPtys] = useState<TerminalPtySummary[]>([]);
   const [changedFiles, setChangedFiles] = useState<GitFileStatus[]>([]);
@@ -124,7 +124,7 @@ export function SessionsScreen({
         }
       })
       .catch((error) => {
-        if (!disposed) setLoadError(messageFromError(error, "세션 목록을 불러오지 못했습니다."));
+        if (!disposed) setLoadError(messageFromError(error, language === "ko" ? "세션 목록을 불러오지 못했습니다." : "Failed to load sessions."));
       })
       .finally(() => {
         if (!disposed) setLoading(false);
@@ -191,13 +191,16 @@ export function SessionsScreen({
         {
           id: crypto.randomUUID(),
           role: "assistant",
-          content: `요청을 오케스트레이터 세션으로 받았습니다. "${created.session.title}" 기준으로 Task 후보와 실행 상태는 태스크 탭에서 확인합니다.`,
+          content:
+            language === "ko"
+              ? `요청을 오케스트레이터 세션으로 받았습니다. "${created.session.title}" 기준으로 Task 후보와 실행 상태는 태스크 탭에서 확인합니다.`
+              : `Received this request as an orchestrator session. Check task candidates and run state in Tasks for "${created.session.title}".`,
         },
       ]);
       await onRefresh();
       setReloadKey((value) => value + 1);
     } catch (error) {
-      setLoadError(messageFromError(error, "오케스트레이터 지시를 저장하지 못했습니다."));
+      setLoadError(messageFromError(error, language === "ko" ? "오케스트레이터 지시를 저장하지 못했습니다." : "Failed to save the orchestrator instruction."));
     } finally {
       setOrchestratorBusy(false);
     }
@@ -227,7 +230,7 @@ export function SessionsScreen({
       setDraftRoleAssignments(null);
       setEditingStageAi(false);
     } catch (error) {
-      setLoadError(messageFromError(error, "단계별 AI 설정을 저장하지 못했습니다."));
+      setLoadError(messageFromError(error, language === "ko" ? "단계별 AI 설정을 저장하지 못했습니다." : "Failed to save stage AI settings."));
     } finally {
       setSavingStageAi(false);
     }
@@ -269,7 +272,7 @@ export function SessionsScreen({
       await api.stopTerminalPty(terminalId);
       setTerminalPtys((items) => items.filter((item) => item.terminalId !== terminalId));
     } catch (error) {
-      setLoadError(messageFromError(error, "터미널 종료에 실패했습니다."));
+      setLoadError(messageFromError(error, language === "ko" ? "터미널 종료에 실패했습니다." : "Failed to stop the terminal."));
     } finally {
       setStoppingTerminalId((current) => (current === terminalId ? null : current));
     }
@@ -375,7 +378,7 @@ export function SessionsScreen({
                           <span className={`session-status-dot ${session.nextAction}`} />
                           <span className="session-row-main">
                             <strong>{session.title}</strong>
-                            <small>{session.provider ?? t("sessions.providerUnknown")} · {formatRelative(session.lastSignalAt)}</small>
+                            <small>{session.provider ?? t("sessions.providerUnknown")} · {formatRelative(session.lastSignalAt, language)}</small>
                           </span>
                         </button>
                       );
@@ -417,7 +420,7 @@ export function SessionsScreen({
               </div>
             </header>
             <div className="session-chat-scroll">
-              <SessionMessage role="assistant" icon="bot" title={t("sessions.assistantTitle")} timestamp={activeSession?.lastSignalAt ?? null}>
+              <SessionMessage role="assistant" icon="bot" title={t("sessions.assistantTitle")} timestamp={activeSession?.lastSignalAt ?? null} language={language}>
                 <p>{t("sessions.introMessage")}</p>
               </SessionMessage>
               {orchestratorMessages.map((message) => (
@@ -427,25 +430,26 @@ export function SessionsScreen({
                   role={message.role}
                   timestamp={null}
                   title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
+                  language={language}
                 >
                   <p>{message.content}</p>
                 </SessionMessage>
               ))}
-              <SessionMessage role="user" icon="user" title={t("sessions.requestTitle")} timestamp={activeTask?.createdAt ?? activeSession?.createdAt ?? null}>
+              <SessionMessage role="user" icon="user" title={t("sessions.requestTitle")} timestamp={activeTask?.createdAt ?? activeSession?.createdAt ?? null} language={language}>
                 <strong>{activeTask?.title ?? activeSession?.title}</strong>
                 {activeTask?.description ? <p>{activeTask.description}</p> : null}
               </SessionMessage>
               {activeSession ? (
-                <SessionMessage role="assistant" icon="bot" title={t("sessions.progressTitle")} timestamp={activeSession.lastSignalAt ?? activeSession.updatedAt}>
-                  <p>{sessionStatusCopy(activeSession)}</p>
+                <SessionMessage role="assistant" icon="bot" title={t("sessions.progressTitle")} timestamp={activeSession.lastSignalAt ?? activeSession.updatedAt} language={language}>
+                  <p>{sessionStatusCopy(activeSession, language)}</p>
                 </SessionMessage>
               ) : (
-                <SessionMessage role="assistant" icon="bot" title={t("sessions.waitingTitle")} timestamp={activeTask?.updatedAt ?? null}>
+                <SessionMessage role="assistant" icon="bot" title={t("sessions.waitingTitle")} timestamp={activeTask?.updatedAt ?? null} language={language}>
                   <p>{t("sessions.noLinkedRun")}</p>
                 </SessionMessage>
               )}
               {activeApprovalCount > 0 ? (
-                <SessionMessage role="assistant" icon="bot" title={t("sessions.approvalTitle")} timestamp={activeSession?.lastSignalAt ?? activeTask?.updatedAt ?? null}>
+                <SessionMessage role="assistant" icon="bot" title={t("sessions.approvalTitle")} timestamp={activeSession?.lastSignalAt ?? activeTask?.updatedAt ?? null} language={language}>
                   <ApprovalInbox
                     compact
                     entityIds={activeApprovalEntityIds}
@@ -461,12 +465,13 @@ export function SessionsScreen({
                   role={event.kind === "stdout" || event.kind === "stderr" ? "tool" : "assistant"}
                   timestamp={event.createdAt}
                   title={event.kind}
+                  language={language}
                 >
                   <p>{event.message}</p>
                 </SessionMessage>
               ))}
               {summaryText && activeSession ? (
-                <SessionMessage icon="file" role="assistant" timestamp={activeSession.updatedAt} title={t("sessions.summaryTitle")}>
+                <SessionMessage icon="file" role="assistant" timestamp={activeSession.updatedAt} title={t("sessions.summaryTitle")} language={language}>
                   <div className="session-markdown">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryText.trim()}</ReactMarkdown>
                   </div>
@@ -512,6 +517,7 @@ export function SessionsScreen({
                   role={message.role}
                   timestamp={null}
                   title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
+                  language={language}
                 >
                   <p>{message.content}</p>
                 </SessionMessage>
@@ -546,7 +552,7 @@ export function SessionsScreen({
         )}
       </section>
 
-      <aside className="session-context-panel" aria-label="환경">
+      <aside className="session-context-panel" aria-label={language === "ko" ? "환경" : "Environment"}>
         <h3>Environment</h3>
         {pendingApprovalCount > 0 ? (
           <div className="session-context-approval">
@@ -561,7 +567,7 @@ export function SessionsScreen({
         <ContextRow
           className="path-value"
           label="Obsidian"
-          value={snapshot.settings.obsidianVaultPath ?? "미설정"}
+          value={snapshot.settings.obsidianVaultPath ?? (language === "ko" ? "미설정" : "Not set")}
           displayValue={compactHomePath(snapshot.settings.obsidianVaultPath)}
         />
         <div className="session-context-section">
@@ -578,17 +584,19 @@ export function SessionsScreen({
                 </div>
               ))}
               {changedFiles.length > 6 ? (
-                <p className="session-context-empty">외 {changedFiles.length - 6}개 파일</p>
+                <p className="session-context-empty">
+                  {language === "ko" ? `외 ${changedFiles.length - 6}개 파일` : `${changedFiles.length - 6} more files`}
+                </p>
               ) : null}
             </div>
           ) : (
-            <p className="session-context-empty">Git 변경 파일 없음</p>
+            <p className="session-context-empty">{language === "ko" ? "Git 변경 파일 없음" : "No Git changes"}</p>
           )}
         </div>
         <div className="session-context-section">
           <div className="session-context-section-title">
             <span>Current AI</span>
-            <strong>{activeSession ? currentAiLabel(activeSession) : "-"}</strong>
+            <strong>{activeSession ? currentAiLabel(activeSession, language) : "-"}</strong>
           </div>
           <div className="session-context-section-title">
             <span>Local servers</span>
@@ -609,16 +617,16 @@ export function SessionsScreen({
                       <strong>{shortPath(pty.cwd)}</strong>
                       <small>
                         {pty.running ? "running" : pty.exitCode === null ? "starting" : `exit ${pty.exitCode}`} ·{" "}
-                        {shortTerminalId(pty.terminalId)} · {formatRelative(pty.updatedAt)}
+                        {shortTerminalId(pty.terminalId)} · {formatRelative(pty.updatedAt, language)}
                       </small>
                     </span>
                   </button>
                   <button
-                    aria-label={`${shortPath(pty.cwd)} 터미널 종료`}
+                    aria-label={language === "ko" ? `${shortPath(pty.cwd)} 터미널 종료` : `Stop terminal ${shortPath(pty.cwd)}`}
                     className="session-terminal-stop"
                     disabled={stoppingTerminalId === pty.terminalId}
                     onClick={() => void stopTerminal(pty.terminalId)}
-                    title="터미널 종료"
+                    title={language === "ko" ? "터미널 종료" : "Stop terminal"}
                     type="button"
                   >
                     {stoppingTerminalId === pty.terminalId ? (
@@ -631,7 +639,7 @@ export function SessionsScreen({
               ))}
             </div>
           ) : (
-            <p className="session-context-empty">터미널 세션 없음</p>
+            <p className="session-context-empty">{language === "ko" ? "터미널 세션 없음" : "No terminal sessions"}</p>
           )}
         </div>
         <div className="session-context-section">
@@ -641,17 +649,17 @@ export function SessionsScreen({
               <span className="session-context-actions">
                 <button className="session-context-link" disabled={savingStageAi} onClick={() => void saveStageAiEdit()} type="button">
                   {savingStageAi ? <Loader2 size={12} className="loading-icon" /> : <Check size={12} />}
-                  저장
+                  {language === "ko" ? "저장" : "Save"}
                 </button>
                 <button className="session-context-link" disabled={savingStageAi} onClick={cancelStageAiEdit} type="button">
                   <X size={12} />
-                  취소
+                  {language === "ko" ? "취소" : "Cancel"}
                 </button>
               </span>
             ) : (
               <button className="session-context-link" onClick={beginStageAiEdit} type="button">
                 <Pencil size={12} />
-                편집
+                {language === "ko" ? "편집" : "Edit"}
               </button>
             )}
           </div>
@@ -666,6 +674,7 @@ export function SessionsScreen({
                 onModelChange={(model) => void updateRoleModel(assignment.roleId, model)}
                 saving={savingStageAi}
                 snapshot={snapshot}
+                language={language}
               />
             ))}
           </div>
@@ -679,6 +688,7 @@ function RoleAssignmentRow({
   assignment,
   connections,
   editing,
+  language,
   onChange,
   onModelChange,
   saving,
@@ -687,6 +697,7 @@ function RoleAssignmentRow({
   assignment: RoleAssignment;
   connections: AiConnection[];
   editing: boolean;
+  language: AppLanguage;
   onChange: (connectionId: string) => void;
   onModelChange: (model: string) => void;
   saving: boolean;
@@ -711,17 +722,17 @@ function RoleAssignmentRow({
       }
     >
       <div>
-        <strong>{roleLabel(assignment.roleId)}</strong>
-        {!editing ? <small>{labels.length > 0 ? labels.join(", ") : "미설정"}</small> : null}
+        <strong>{roleLabel(assignment.roleId, language)}</strong>
+        {!editing ? <small>{labels.length > 0 ? labels.join(", ") : language === "ko" ? "미설정" : "Not set"}</small> : null}
       </div>
       {editing ? (
         <select
-          aria-label={`${roleLabel(assignment.roleId)} AI 변경`}
+          aria-label={language === "ko" ? `${roleLabel(assignment.roleId, language)} AI 변경` : `Change ${roleLabel(assignment.roleId, language)} AI`}
           disabled={saving || connections.length === 0}
           onChange={(event) => onChange(event.target.value)}
           value={selectedConnectionId}
         >
-          <option value="">미설정</option>
+          <option value="">{language === "ko" ? "미설정" : "Not set"}</option>
           {connections.map((connection) => (
             <option key={connection.id} value={connection.id}>
               {connection.label}
@@ -731,12 +742,12 @@ function RoleAssignmentRow({
       ) : null}
       {editing && selectedConnection ? (
         <select
-          aria-label={`${roleLabel(assignment.roleId)} 모델 변경`}
+          aria-label={language === "ko" ? `${roleLabel(assignment.roleId, language)} 모델 변경` : `Change ${roleLabel(assignment.roleId, language)} model`}
           disabled={saving}
           onChange={(event) => onModelChange(event.target.value)}
           value={selectedModel}
         >
-          <option value="">CLI 기본 모델</option>
+          <option value="">{language === "ko" ? "CLI 기본 모델" : "CLI default model"}</option>
           {modelOptions.map((model) => (
             <option key={model} value={model}>
               {model}
@@ -766,6 +777,7 @@ function SessionMessage(props: {
   icon: "user" | "bot" | "file";
   title: string;
   timestamp: string | null;
+  language: AppLanguage;
   children: ReactNode;
 }) {
   const Icon = props.icon === "user" ? User : props.icon === "file" ? FileText : Bot;
@@ -777,7 +789,7 @@ function SessionMessage(props: {
       <div className="session-message-body">
         <header>
           <strong>{props.title}</strong>
-          <time>{formatRelative(props.timestamp)}</time>
+          <time>{formatRelative(props.timestamp, props.language)}</time>
         </header>
         <div className="session-message-content">{props.children}</div>
       </div>
@@ -806,7 +818,15 @@ function ContextRow({
   );
 }
 
-function sessionStatusCopy(session: AgentSessionSummary): string {
+function sessionStatusCopy(session: AgentSessionSummary, language: AppLanguage): string {
+  if (language === "en") {
+    if (session.nextAction === "approval") return "User approval is required. Helm will not continue before approval.";
+    if (session.nextAction === "watch") return "A worker is running. Events and artifacts will accumulate in the timeline below.";
+    if (session.nextAction === "review") return "The run has finished. Review changed files and verification results next.";
+    if (session.nextAction === "retry") return "The run failed or was canceled. Check the reason and decide whether to retry.";
+    if (session.nextAction === "start") return "Waiting to start. Details will appear once a worker claims the session.";
+    return "Inspect the session details.";
+  }
   if (session.nextAction === "approval") return "사용자 승인이 필요합니다. 승인 전에는 다음 단계로 진행하지 않습니다.";
   if (session.nextAction === "watch") return "작업자가 실행 중입니다. 이벤트와 산출물은 아래 타임라인에 누적됩니다.";
   if (session.nextAction === "review") return "실행이 끝났습니다. 변경 파일과 검증 결과를 확인할 차례입니다.";
@@ -815,9 +835,9 @@ function sessionStatusCopy(session: AgentSessionSummary): string {
   return "세션 상세를 확인합니다.";
 }
 
-function currentAiLabel(session: AgentSessionSummary): string {
-  const role = session.roleId ? roleLabel(session.roleId) : "역할 미정";
-  const runner = session.model ?? session.provider ?? session.connectionId ?? "AI 미정";
+function currentAiLabel(session: AgentSessionSummary, language: AppLanguage = "ko"): string {
+  const role = session.roleId ? roleLabel(session.roleId, language) : language === "ko" ? "역할 미정" : "No role";
+  const runner = session.model ?? session.provider ?? session.connectionId ?? (language === "ko" ? "AI 미정" : "No AI");
   return `${role} · ${runner}`;
 }
 
@@ -827,7 +847,7 @@ function changedFileCountLabel(files: GitFileStatus[], session: AgentSessionSumm
 }
 
 function titleFromGoal(goalText: string): string {
-  const firstLine = goalText.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "새 작업";
+  const firstLine = goalText.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "New task";
   return firstLine.length > 48 ? `${firstLine.slice(0, 48)}...` : firstLine;
 }
 
@@ -846,16 +866,17 @@ function shortTerminalId(value: string): string {
   return value.length > 8 ? value.slice(0, 8) : value;
 }
 
-function formatRelative(value: string | null | undefined): string {
+function formatRelative(value: string | null | undefined, language: AppLanguage = "ko"): string {
   const time = value ? Date.parse(value) : Number.NaN;
   if (!Number.isFinite(time)) return "-";
   const diffMs = Math.max(0, Date.now() - time);
-  if (diffMs < 60_000) return "방금 전";
+  if (diffMs < 60_000) return language === "ko" ? "방금 전" : "just now";
   const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 60) return `${minutes}분 전`;
+  if (minutes < 60) return language === "ko" ? `${minutes}분 전` : `${minutes} min ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}시간 전`;
-  return `${Math.floor(hours / 24)}일 전`;
+  if (hours < 24) return language === "ko" ? `${hours}시간 전` : `${hours} hr ago`;
+  const days = Math.floor(hours / 24);
+  return language === "ko" ? `${days}일 전` : `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 function messageFromError(error: unknown, fallback: string): string {

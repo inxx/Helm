@@ -14,8 +14,8 @@ import { TaskBoard } from "../components/TaskBoard";
 import { api } from "../lib/api";
 import { deriveRunLiveState, isRunActiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
 import { roleLabel } from "../lib/runnerReadiness";
-import { TASK_STATUS_LABEL } from "../lib/status";
-import { useI18n } from "../lib/i18n";
+import { taskStatusLabel } from "../lib/status";
+import { useI18n, type AppLanguage } from "../lib/i18n";
 
 interface TasksScreenProps {
   snapshot: ProjectSnapshot | null;
@@ -40,7 +40,7 @@ export function TasksScreen({
   onGoSettings: _onGoSettings,
   onFocusProjectTask,
 }: TasksScreenProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [taskRuns, setTaskRuns] = useState<Record<string, AgentRunSummary[]>>({});
   const [towerProjects, setTowerProjects] = useState<ControlTowerProjectSummary[]>([]);
   const [towerLoadError, setTowerLoadError] = useState<string | null>(null);
@@ -51,7 +51,7 @@ export function TasksScreen({
     [snapshot?.tasks],
   );
   const combined = useMemo(() => buildCombinedTasks(towerProjects, snapshot, taskRuns), [snapshot, taskRuns, towerProjects]);
-  const sessions = useMemo(() => buildTaskSessions(combined.tasks, combined.taskRuns), [combined]);
+  const sessions = useMemo(() => buildTaskSessions(combined.tasks, combined.taskRuns, language), [combined, language]);
   const activeSession = sessions.find((session) => session.id === selectedSessionId) ?? sessions[0];
   const visibleTasks = activeSession
     ? combined.tasks.filter((task) => activeSession.taskIds.has(task.id)) ?? []
@@ -126,7 +126,7 @@ export function TasksScreen({
       .catch((error) => {
         if (!disposed) {
           setTowerProjects([]);
-          setTowerLoadError(messageFromError(error, "통합 태스크 목록을 불러오지 못했습니다."));
+          setTowerLoadError(messageFromError(error, language === "ko" ? "통합 태스크 목록을 불러오지 못했습니다." : "Could not load the unified task list."));
         }
       });
     return () => {
@@ -194,7 +194,8 @@ export function TasksScreen({
               project={snapshot.project.name}
               branch={snapshot.repository.currentBranch}
               dirtyCount={snapshot.repository.dirtyCount}
-              sessionTitle={activeSession?.title ?? "전체 세션"}
+              sessionTitle={activeSession?.title ?? (language === "ko" ? "전체 세션" : "All sessions")}
+              language={language}
             />
           )}
         </div>
@@ -226,6 +227,7 @@ interface TaskFocusDetailProps {
 }
 
 function TaskFocusDetail({ snapshot, task, runs, onClose, onRefresh, onDeleted }: TaskFocusDetailProps) {
+  const { language } = useI18n();
   const [timeline, setTimeline] = useState<TaskTimelineEntry[]>([]);
   const [changedFiles, setChangedFiles] = useState<GitFileStatus[]>([]);
   const [contextManifest, setContextManifest] = useState<RunContextManifest | null>(null);
@@ -244,7 +246,7 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onRefresh, onDeleted }
       ((approval.entityType === "Task" && approval.entityId === task.id) ||
         (visibleRun && approval.entityType === "AgentRun" && approval.entityId === visibleRun.id)),
   );
-  const attentionItems = buildAttentionItems(task, visibleRun, pendingApprovals);
+  const attentionItems = buildAttentionItems(task, visibleRun, pendingApprovals, language);
   const markdownRefs = task.externalRefs.filter(
     (ref) => ref.refType === "MarkdownPlan" || ref.refTitle?.toLowerCase().includes("markdown") || ref.refValue.endsWith(".md"),
   );
@@ -292,6 +294,7 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onRefresh, onDeleted }
     task,
     timeline,
     visibleRun,
+    language,
   });
 
   async function deleteSelectedTask() {
@@ -341,7 +344,7 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onRefresh, onDeleted }
     <aside className="task-focus-detail" aria-label="작업 상세">
       <header className="task-focus-header">
         <div>
-          <span>{TASK_STATUS_LABEL[task.status]}</span>
+          <span>{taskStatusLabel(task.status, language)}</span>
           <h3>{task.title}</h3>
         </div>
         <div className="task-focus-actions">
@@ -400,7 +403,7 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onRefresh, onDeleted }
         </div>
         {visibleRun ? (
           <div className="focus-runner-card">
-            <span>{roleLabel(visibleRun.roleId)}</span>
+            <span>{roleLabel(visibleRun.roleId, language)}</span>
             <strong>{runnerDisplayName(visibleRun)}</strong>
             <small>{runnerDetail(visibleRun)}</small>
           </div>
@@ -416,15 +419,15 @@ function TaskFocusDetail({ snapshot, task, runs, onClose, onRefresh, onDeleted }
         </div>
         {visibleRun && live ? (
           <div className={`focus-run-card ${live.tone}`}>
-            <span>{roleLabel(visibleRun.roleId)} · {live.label}</span>
+            <span>{roleLabel(visibleRun.roleId, language)} · {live.label}</span>
             <strong>{live.summary}</strong>
-            <small>{visibleRun.latestEventMessage ?? visibleRun.resultStatus ?? `최근 신호 ${live.ageLabel}`}</small>
+            <small>{visibleRun.latestEventMessage ?? visibleRun.resultStatus ?? (language === "ko" ? `최근 신호 ${live.ageLabel}` : `Latest signal ${live.ageLabel}`)}</small>
           </div>
         ) : (
           <div className="focus-run-card queued">
-            <span>{TASK_STATUS_LABEL[task.status]}</span>
-            <strong>{task.statusReason ?? "실행 중인 작업자는 없습니다."}</strong>
-            <small>{task.description ? firstLine(task.description) : "대기 중인 작업입니다."}</small>
+            <span>{taskStatusLabel(task.status, language)}</span>
+            <strong>{task.statusReason ?? (language === "ko" ? "실행 중인 작업자는 없습니다." : "No runner is active.")}</strong>
+            <small>{task.description ? firstLine(task.description) : language === "ko" ? "대기 중인 작업입니다." : "Waiting for work to start."}</small>
           </div>
         )}
       </section>
@@ -598,18 +601,21 @@ function buildAttentionItems(
   task: TaskSummary,
   run: AgentRunSummary | null,
   approvals: ApprovalSummary[],
+  language: AppLanguage,
 ): Array<{ id: string; title: string; body: string }> {
   const items = approvals.map((approval) => ({
     id: approval.id,
-    title: approval.approvalType === "PlanApproval" ? "계획 승인 필요" : "실행 승인 필요",
+    title: approval.approvalType === "PlanApproval"
+      ? language === "ko" ? "계획 승인 필요" : "Plan approval required"
+      : language === "ko" ? "실행 승인 필요" : "Execution approval required",
     body: approval.requestedReason,
   }));
 
   if (task.status === "Blocked") {
     items.push({
       id: `task:${task.id}:blocked`,
-      title: "Task 막힘",
-      body: task.statusReason ?? "작업을 계속하려면 사용자 결정이 필요합니다.",
+      title: language === "ko" ? "Task 막힘" : "Task blocked",
+      body: task.statusReason ?? (language === "ko" ? "작업을 계속하려면 사용자 결정이 필요합니다." : "A user decision is required to continue."),
     });
   }
 
@@ -617,7 +623,7 @@ function buildAttentionItems(
     const live = deriveRunLiveState(run);
     items.push({
       id: `run:${run.id}:attention`,
-      title: `${roleLabel(run.roleId)} 확인 필요`,
+      title: language === "ko" ? `${roleLabel(run.roleId, language)} 확인 필요` : `${roleLabel(run.roleId, language)} needs attention`,
       body: live.summary,
     });
   }
@@ -723,20 +729,26 @@ function TaskSessionRail({
 function TaskObserverEmptyState({
   branch,
   dirtyCount,
+  language,
   project,
   sessionTitle,
 }: {
   branch: string | null;
   dirtyCount: number;
+  language: AppLanguage;
   project: string;
   sessionTitle: string;
 }) {
   return (
-    <section className="task-observer-empty" aria-label="태스크 없음">
+    <section className="task-observer-empty" aria-label={language === "ko" ? "태스크 없음" : "No tasks"}>
       <div className="task-observer-empty-hero">
         <span>Observer Console</span>
-        <h3>관찰할 태스크 세션이 없습니다.</h3>
-        <p>Codex Desktop 또는 Hermes가 실행을 시작하고 Task를 기록하면 이 화면에 세션별로 나타납니다.</p>
+        <h3>{language === "ko" ? "관찰할 태스크 세션이 없습니다." : "No task sessions to observe."}</h3>
+        <p>
+          {language === "ko"
+            ? "Codex Desktop 또는 Hermes가 실행을 시작하고 Task를 기록하면 이 화면에 세션별로 나타납니다."
+            : "Sessions will appear here when Codex Desktop or Hermes starts a run and records tasks."}
+        </p>
       </div>
       <dl className="task-observer-empty-grid">
         <div>
@@ -757,8 +769,12 @@ function TaskObserverEmptyState({
         </div>
       </dl>
       <div className="task-observer-empty-note">
-        <strong>다음에 표시될 정보</strong>
-        <span>agent 종류, run 상태, stdout/stderr 이벤트, 변경 파일, 승인 대기, 검증 결과</span>
+        <strong>{language === "ko" ? "다음에 표시될 정보" : "What will appear next"}</strong>
+        <span>
+          {language === "ko"
+            ? "agent 종류, run 상태, stdout/stderr 이벤트, 변경 파일, 승인 대기, 검증 결과"
+            : "agent type, run status, stdout/stderr events, changed files, approvals, verification results"}
+        </span>
       </div>
     </section>
   );
@@ -832,10 +848,11 @@ function buildCombinedTasks(
 function buildTaskSessions(
   tasks: TaskSummary[],
   taskRuns: Record<string, AgentRunSummary[]>,
+  language: AppLanguage,
 ): TaskSessionSummary[] {
   const groups = new Map<string, { title: string; subtitle: string; tasks: TaskSummary[] }>();
   for (const task of tasks) {
-    const session = sessionForTask(task);
+    const session = sessionForTask(task, language);
     const group = groups.get(session.id) ?? { title: session.title, subtitle: session.subtitle, tasks: [] };
     group.tasks.push(task);
     groups.set(session.id, group);
@@ -860,8 +877,8 @@ function buildTaskSessions(
   return [
     {
       id: "all",
-      title: "전체 세션",
-      subtitle: tasks.length > 0 ? "모든 태스크" : "태스크 없음",
+      title: language === "ko" ? "전체 세션" : "All sessions",
+      subtitle: tasks.length > 0 ? (language === "ko" ? "모든 태스크" : "All tasks") : language === "ko" ? "태스크 없음" : "No tasks",
       taskIds: new Set(tasks.map((task) => task.id)),
       taskCount: tasks.length,
       activeCount: Object.values(taskRuns).flat().filter((run) => ["Queued", "Running"].includes(run.status)).length,
@@ -871,11 +888,11 @@ function buildTaskSessions(
   ];
 }
 
-function sessionForTask(task: TaskSummary): { id: string; title: string; subtitle: string } {
+function sessionForTask(task: TaskSummary, language: AppLanguage): { id: string; title: string; subtitle: string } {
   const markdownRef = task.externalRefs.find((ref) => ref.refType === "MarkdownPlan" || ref.refValue.includes(".helm/planning/"));
   if (markdownRef) {
     const planningId = markdownRef.refValue.match(/\.helm\/planning\/([^/]+)/)?.[1];
-    const title = usefulRefTitle(markdownRef.refTitle) ?? titlePrefix(task.title) ?? "계획 세션";
+    const title = usefulRefTitle(markdownRef.refTitle) ?? titlePrefix(task.title) ?? (language === "ko" ? "계획 세션" : "Planning session");
     return {
       id: planningId ? `planning:${planningId}` : `markdown:${markdownRef.refValue}`,
       title,
@@ -885,14 +902,14 @@ function sessionForTask(task: TaskSummary): { id: string; title: string; subtitl
   if (task.epicId) {
     return {
       id: `epic:${task.epicId}`,
-      title: "Epic 태스크",
+      title: language === "ko" ? "Epic 태스크" : "Epic tasks",
       subtitle: task.epicId,
     };
   }
   return {
     id: "standalone",
-    title: "수동 태스크",
-    subtitle: "세션 연결 없음",
+    title: language === "ko" ? "수동 태스크" : "Manual tasks",
+    subtitle: language === "ko" ? "세션 연결 없음" : "No linked session",
   };
 }
 
@@ -931,6 +948,7 @@ function buildTaskObserverSnapshot({
   task,
   timeline,
   visibleRun,
+  language,
 }: {
   changedFiles: GitFileStatus[];
   live: ReturnType<typeof deriveRunLiveState> | null;
@@ -941,26 +959,27 @@ function buildTaskObserverSnapshot({
   task: TaskSummary;
   timeline: TaskTimelineEntry[];
   visibleRun: AgentRunSummary | null;
+  language: AppLanguage;
 }): TaskObserverSnapshot {
   const headline = visibleRun && live
-    ? `${roleLabel(visibleRun.roleId)} · ${live.label}`
-    : `${TASK_STATUS_LABEL[task.status]} · 실행자 없음`;
+    ? `${roleLabel(visibleRun.roleId, language)} · ${live.label}`
+    : `${taskStatusLabel(task.status, language)} · ${language === "ko" ? "실행자 없음" : "No runner"}`;
   const activeRunCount = runs.filter((run) => ["Queued", "Running"].includes(run.status)).length;
-  const latestTimeline = timeline[0]?.title ?? "기록 없음";
-  const runnerName = visibleRun ? runnerDisplayName(visibleRun) : "실행자 없음";
-  const runnerMeta = visibleRun ? runnerDetail(visibleRun) : "run 없음";
+  const latestTimeline = timeline[0]?.title ?? (language === "ko" ? "기록 없음" : "No history");
+  const runnerName = visibleRun ? runnerDisplayName(visibleRun) : language === "ko" ? "실행자 없음" : "No runner";
+  const runnerMeta = visibleRun ? runnerDetail(visibleRun) : language === "ko" ? "run 없음" : "No run";
 
   return {
     headline,
     tiles: [
       {
-        label: "단계",
-        value: TASK_STATUS_LABEL[task.status],
-        detail: live?.summary ?? task.statusReason ?? "현재 task 상태 기준",
+        label: language === "ko" ? "단계" : "Stage",
+        value: taskStatusLabel(task.status, language),
+        detail: live?.summary ?? task.statusReason ?? (language === "ko" ? "현재 task 상태 기준" : "Based on current task status"),
         tone: live?.attention ? "attention" : live?.tone === "running" ? "running" : undefined,
       },
       {
-        label: "환경",
+        label: language === "ko" ? "환경" : "Environment",
         value: snapshot.project.name,
         detail: visibleRun?.artifactDir ?? snapshot.project.rootPath,
       },
@@ -971,24 +990,24 @@ function buildTaskObserverSnapshot({
         tone: live?.tone === "running" ? "running" : undefined,
       },
       {
-        label: "문서",
+        label: language === "ko" ? "문서" : "Docs",
         value: `${markdownRefs.length} refs`,
-        detail: markdownRefs[0]?.refValue ?? "연결된 Markdown 없음",
+        detail: markdownRefs[0]?.refValue ?? (language === "ko" ? "연결된 Markdown 없음" : "No linked Markdown"),
       },
       {
-        label: "실행",
+        label: language === "ko" ? "실행" : "Runs",
         value: `${runs.length} runs`,
-        detail: activeRunCount > 0 ? `${activeRunCount}개 실행/대기 중` : latestTimeline,
+        detail: activeRunCount > 0 ? (language === "ko" ? `${activeRunCount}개 실행/대기 중` : `${activeRunCount} running/queued`) : latestTimeline,
       },
       {
-        label: "파일",
+        label: language === "ko" ? "파일" : "Files",
         value: `${changedFiles.length} files`,
-        detail: changedFiles[0]?.path ?? "Task worktree 변경 없음",
+        detail: changedFiles[0]?.path ?? (language === "ko" ? "Task worktree 변경 없음" : "No task worktree changes"),
       },
       {
-        label: "승인",
+        label: language === "ko" ? "승인" : "Approvals",
         value: `${pendingApprovals.length} pending`,
-        detail: pendingApprovals[0]?.requestedReason ?? "대기 승인 없음",
+        detail: pendingApprovals[0]?.requestedReason ?? (language === "ko" ? "대기 승인 없음" : "No pending approvals"),
         tone: pendingApprovals.length > 0 ? "attention" : undefined,
       },
     ],

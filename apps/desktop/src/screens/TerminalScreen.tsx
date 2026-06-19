@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
+import { useI18n } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
 import { createTerminalPane, terminalPanesForProject, type TerminalPaneState } from "../lib/terminalPanes";
 import type {
@@ -85,6 +86,7 @@ export function TerminalScreen({
   activeProjectId,
   onSwitchProject,
 }: TerminalScreenProps) {
+  const { language } = useI18n();
   const [panes, setPanes] = useState<TerminalPaneState[]>(() =>
     snapshot ? [createTerminalPane(snapshot.project.id, snapshot.project.rootPath, null)] : [],
   );
@@ -315,8 +317,8 @@ export function TerminalScreen({
   if (!snapshot) {
     return (
       <section className="empty-state">
-        <h2>터미널</h2>
-        <p>최근 프로젝트를 선택하거나 새 프로젝트를 열어 통합 터미널을 시작하세요.</p>
+        <h2>{language === "ko" ? "터미널" : "Terminal"}</h2>
+        <p>{language === "ko" ? "최근 프로젝트를 선택하거나 새 프로젝트를 열어 통합 터미널을 시작하세요." : "Select a recent project or open a new one to start an integrated terminal."}</p>
         {recents.length > 0 ? (
           <div className="terminal-empty-recents">
             {recents.slice(0, 5).map((project) => (
@@ -333,7 +335,7 @@ export function TerminalScreen({
           </div>
         ) : null}
         <button className="primary-button" onClick={onOpenProject} type="button">
-          프로젝트 열기
+          {language === "ko" ? "프로젝트 열기" : "Open project"}
         </button>
       </section>
     );
@@ -786,7 +788,7 @@ export function TerminalScreen({
             <button
               className="terminal-project-folder-button"
               onClick={onOpenProject}
-              title="프로젝트 폴더 선택"
+              title={language === "ko" ? "프로젝트 폴더 선택" : "Choose project folder"}
               type="button"
             >
               <FolderOpen size={12} aria-hidden="true" />
@@ -794,13 +796,13 @@ export function TerminalScreen({
             </button>
             <label className="terminal-pane-path" title={pane.cwd}>
               <Folder size={12} aria-hidden="true" />
-              <span>작업 폴더</span>
+              <span>{language === "ko" ? "작업 폴더" : "Working folder"}</span>
               <select
                 onChange={(event) => void choosePaneCwd(pane, event.target.value)}
                 onFocus={() => void loadPaneDirectories(pane)}
                 onMouseDown={() => void loadPaneDirectories(pane)}
                 value={pane.cwd}
-                aria-label={`pane ${index + 1} 작업 폴더`}
+                aria-label={language === "ko" ? `pane ${index + 1} 작업 폴더` : `pane ${index + 1} working folder`}
               >
                 {cwdOptions.map((directory) => (
                   <option key={directory.path} value={directory.path}>
@@ -814,18 +816,18 @@ export function TerminalScreen({
             <button
               className="terminal-close-pane"
               onClick={() => void restartPane(pane)}
-              title="터미널 재시작"
+              title={language === "ko" ? "터미널 재시작" : "Restart terminal"}
               type="button"
-              aria-label={`pane ${index + 1} 재시작`}
+              aria-label={language === "ko" ? `pane ${index + 1} 재시작` : `Restart pane ${index + 1}`}
             >
               <RotateCcw size={13} aria-hidden="true" />
             </button>
             <button
               className="terminal-close-pane"
               onClick={() => removePane(pane.id)}
-              title="터미널 닫기"
+              title={language === "ko" ? "터미널 닫기" : "Close terminal"}
               type="button"
-              aria-label={`pane ${index + 1} 닫기`}
+              aria-label={language === "ko" ? `pane ${index + 1} 닫기` : `Close pane ${index + 1}`}
             >
               <X size={14} aria-hidden="true" />
             </button>
@@ -843,7 +845,7 @@ export function TerminalScreen({
         <footer className="terminal-pane-status">
           {isSelected ? (
             <div className="terminal-pane-controls">
-              <section className="terminal-scripts" ref={savedScriptMenuRef} aria-label="빠른 명령">
+              <section className="terminal-scripts" ref={savedScriptMenuRef} aria-label={language === "ko" ? "빠른 명령" : "Quick commands"}>
                 <button
                   className="terminal-quick-command-trigger"
                   onClick={() => setSavedScriptMenuOpen((open) => !open)}
@@ -851,15 +853,15 @@ export function TerminalScreen({
                   aria-expanded={savedScriptMenuOpen}
                 >
                   <Play size={13} aria-hidden="true" />
-                  <span>{savedScripts[0]?.name ?? "빠른 명령"}</span>
+                  <span>{savedScripts[0]?.name ?? (language === "ko" ? "빠른 명령" : "Quick commands")}</span>
                   <ChevronDown size={13} aria-hidden="true" />
                 </button>
                 {savedScriptMenuOpen ? (
                   <div className="terminal-quick-command-popover">
                     {savedScriptsBusy && savedScripts.length === 0 ? (
-                      <p>저장된 명령을 불러오는 중입니다.</p>
+                      <p>{language === "ko" ? "저장된 명령을 불러오는 중입니다." : "Loading saved commands."}</p>
                     ) : savedScripts.length === 0 ? (
-                      <p>자주 쓰는 명령을 추가하세요.</p>
+                      <p>{language === "ko" ? "자주 쓰는 명령을 추가하세요." : "Add commands you use often."}</p>
                     ) : (
                       <ul>
                         {savedScripts.map((script) => {
@@ -885,17 +887,17 @@ export function TerminalScreen({
                               <div className="terminal-script-actions">
                                 <button
                                   onClick={() => openSavedScriptEditor(script)}
-                                  title="빠른 명령 편집"
+                                  title={language === "ko" ? "빠른 명령 편집" : "Edit quick command"}
                                   type="button"
-                                  aria-label={`${script.name} 편집`}
+                                  aria-label={language === "ko" ? `${script.name} 편집` : `Edit ${script.name}`}
                                 >
                                   <Pencil size={13} aria-hidden="true" />
                                 </button>
                                 <button
                                   onClick={() => void removeSavedScript(script.id)}
-                                  title="빠른 명령 삭제"
+                                  title={language === "ko" ? "빠른 명령 삭제" : "Delete quick command"}
                                   type="button"
-                                  aria-label={`${script.name} 삭제`}
+                                  aria-label={language === "ko" ? `${script.name} 삭제` : `Delete ${script.name}`}
                                 >
                                   <Trash2 size={13} aria-hidden="true" />
                                 </button>
@@ -911,7 +913,7 @@ export function TerminalScreen({
                       type="button"
                     >
                       <Plus size={15} aria-hidden="true" />
-                      <span>명령 추가</span>
+                      <span>{language === "ko" ? "명령 추가" : "Add command"}</span>
                     </button>
                   </div>
                 ) : null}
@@ -922,7 +924,7 @@ export function TerminalScreen({
                 <select
                   value={pane.nodeBinPath ?? ""}
                   onChange={(event) => void chooseNodeRuntime(event.target.value || null)}
-                  title="이 pane의 Node runtime"
+                  title={language === "ko" ? "이 pane의 Node runtime" : "Node runtime for this pane"}
                 >
                   <option value="">shell default</option>
                   {paneRuntimeMissing ? (
@@ -944,7 +946,7 @@ export function TerminalScreen({
             </span>
           )}
           {autocomplete ? (
-            <span className="terminal-autocomplete-chip" title="Tab으로 완성">
+            <span className="terminal-autocomplete-chip" title={language === "ko" ? "Tab으로 완성" : "Complete with Tab"}>
               <kbd>Tab</kbd>
               <strong>{autocomplete.command}</strong>
             </span>
@@ -1061,12 +1063,12 @@ export function TerminalScreen({
   return (
     <section className="terminal-screen">
       <div className="terminal-workbench">
-        <aside className="terminal-workspaces" aria-label="터미널 워크스페이스">
+        <aside className="terminal-workspaces" aria-label={language === "ko" ? "터미널 워크스페이스" : "Terminal workspaces"}>
           <div className="terminal-workspaces-title">
             <SquareTerminal size={15} aria-hidden="true" />
             <span>Sessions</span>
           </div>
-          <nav className="terminal-tab-strip" aria-label="열린 터미널">
+          <nav className="terminal-tab-strip" aria-label={language === "ko" ? "열린 터미널" : "Open terminals"}>
             {panes.map((pane, index) => (
               <div
                 className={selectedPaneId === pane.id ? "terminal-session-row active" : "terminal-session-row"}
@@ -1092,7 +1094,7 @@ export function TerminalScreen({
                         }
                       }}
                       value={paneNameDraft}
-                      aria-label={`pane ${index + 1} 이름`}
+                      aria-label={language === "ko" ? `pane ${index + 1} 이름` : `Pane ${index + 1} name`}
                     />
                     <small>{shortPath(pane.cwd)}</small>
                   </form>
@@ -1120,18 +1122,18 @@ export function TerminalScreen({
                 <button
                   className="terminal-session-rename"
                   onClick={() => beginRenamePane(pane, index)}
-                  title="pane 이름 변경"
+                  title={language === "ko" ? "pane 이름 변경" : "Rename pane"}
                   type="button"
-                  aria-label={`pane ${index + 1} 이름 변경`}
+                  aria-label={language === "ko" ? `pane ${index + 1} 이름 변경` : `Rename pane ${index + 1}`}
                 >
                   <Pencil size={12} aria-hidden="true" />
                 </button>
                 <button
                   className="terminal-session-remove"
                   onClick={() => removePane(pane.id)}
-                  title="pane 삭제"
+                  title={language === "ko" ? "pane 삭제" : "Remove pane"}
                   type="button"
-                  aria-label={`pane ${index + 1} 삭제`}
+                  aria-label={language === "ko" ? `pane ${index + 1} 삭제` : `Remove pane ${index + 1}`}
                 >
                   <X size={13} aria-hidden="true" />
                 </button>
@@ -1140,7 +1142,7 @@ export function TerminalScreen({
           </nav>
           <button className="terminal-sidebar-action" onClick={addPane} type="button">
             <Plus size={14} aria-hidden="true" />
-            <span>새 pane</span>
+            <span>{language === "ko" ? "새 pane" : "New pane"}</span>
           </button>
         </aside>
 
@@ -1159,10 +1161,10 @@ export function TerminalScreen({
           >
             {panes.length === 0 ? (
               <div className="terminal-empty">
-                <p>열린 터미널이 없습니다.</p>
+                <p>{language === "ko" ? "열린 터미널이 없습니다." : "No open terminals."}</p>
                 <button className="terminal-add-pane" onClick={addPane} type="button">
                   <Plus size={14} aria-hidden="true" />
-                  <span>터미널 추가</span>
+                  <span>{language === "ko" ? "터미널 추가" : "Add terminal"}</span>
                 </button>
               </div>
             ) : (
@@ -1191,12 +1193,12 @@ export function TerminalScreen({
             }}
           >
             <header>
-              <h2>빠른 명령 편집</h2>
-              <p>빠른 액세스를 위해 terminal 명령이나 agent 프롬프트를 저장하세요.</p>
+              <h2>{language === "ko" ? "빠른 명령 편집" : "Edit quick command"}</h2>
+              <p>{language === "ko" ? "빠른 액세스를 위해 terminal 명령이나 agent 프롬프트를 저장하세요." : "Save terminal commands or agent prompts for quick access."}</p>
             </header>
 
             <label className="terminal-command-field">
-              <span>상표</span>
+              <span>{language === "ko" ? "상표" : "Label"}</span>
               <input
                 autoFocus
                 value={savedScriptEditor.name}
@@ -1206,8 +1208,8 @@ export function TerminalScreen({
             </label>
 
             <div className="terminal-command-field">
-              <span>행동</span>
-              <div className="terminal-command-segmented" role="tablist" aria-label="빠른 명령 행동">
+              <span>{language === "ko" ? "행동" : "Action"}</span>
+              <div className="terminal-command-segmented" role="tablist" aria-label={language === "ko" ? "빠른 명령 행동" : "Quick command action"}>
                 <button
                   className={savedScriptEditor.action === "terminal" ? "active" : ""}
                   onClick={() => updateSavedScriptEditor({ action: "terminal" })}
@@ -1216,7 +1218,7 @@ export function TerminalScreen({
                   aria-selected={savedScriptEditor.action === "terminal"}
                 >
                   <FileTerminal size={15} aria-hidden="true" />
-                  Terminal 명령
+                  {language === "ko" ? "Terminal 명령" : "Terminal command"}
                 </button>
                 <button
                   className={savedScriptEditor.action === "agent" ? "active" : ""}
@@ -1226,27 +1228,27 @@ export function TerminalScreen({
                   aria-selected={savedScriptEditor.action === "agent"}
                 >
                   <Bot size={15} aria-hidden="true" />
-                  Agent 프롬프트
+                  {language === "ko" ? "Agent 프롬프트" : "Agent prompt"}
                 </button>
               </div>
             </div>
 
             <label className="terminal-command-field">
-              <span>{savedScriptEditor.action === "terminal" ? "명령 텍스트" : "즉각적인"}</span>
+              <span>{savedScriptEditor.action === "terminal" ? (language === "ko" ? "명령 텍스트" : "Command text") : (language === "ko" ? "프롬프트" : "Prompt")}</span>
               <textarea
                 value={savedScriptEditor.command}
                 onChange={(event) => updateSavedScriptEditor({ command: event.target.value })}
                 placeholder={
                   savedScriptEditor.action === "terminal"
                     ? "pnpm run dev:admin-bo"
-                    : "agent에게 이 워크스페이스를 조사하도록 요청하세요."
+                    : language === "ko" ? "agent에게 이 워크스페이스를 조사하도록 요청하세요." : "Ask an agent to inspect this workspace."
                 }
                 maxLength={MAX_SAVED_TERMINAL_SCRIPT_LENGTH}
               />
             </label>
 
             <details className="terminal-command-advanced">
-              <summary>고급</summary>
+              <summary>{language === "ko" ? "고급" : "Advanced"}</summary>
             </details>
 
             <footer>
@@ -1255,7 +1257,7 @@ export function TerminalScreen({
                 onClick={() => setSavedScriptEditor(null)}
                 type="button"
               >
-                취소
+                {language === "ko" ? "취소" : "Cancel"}
               </button>
               <button
                 className="terminal-command-save"
@@ -1266,7 +1268,7 @@ export function TerminalScreen({
                 }
                 type="submit"
               >
-                저장
+                {language === "ko" ? "저장" : "Save"}
                 <kbd>⌘ Enter</kbd>
               </button>
             </footer>

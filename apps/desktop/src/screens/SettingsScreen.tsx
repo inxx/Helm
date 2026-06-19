@@ -80,15 +80,13 @@ const CATEGORIES: Array<{
 
 const ROLE_DEFINITIONS: Array<{
   roleId: RoleAssignment["roleId"];
-  label: string;
-  group: string;
   selectionMode: RoleAssignment["selectionMode"];
 }> = [
-  { roleId: "planner", label: "설계자", group: "계획", selectionMode: "single" },
-  { roleId: "coder", label: "구현자", group: "구현", selectionMode: "single" },
-  { roleId: "plan_verifier", label: "계획 검수", group: "검수", selectionMode: "multiple" },
-  { roleId: "code_reviewer", label: "코드 리뷰", group: "검수", selectionMode: "multiple" },
-  { roleId: "tester", label: "테스트", group: "테스트", selectionMode: "multiple" },
+  { roleId: "planner", selectionMode: "single" },
+  { roleId: "coder", selectionMode: "single" },
+  { roleId: "plan_verifier", selectionMode: "multiple" },
+  { roleId: "code_reviewer", selectionMode: "multiple" },
+  { roleId: "tester", selectionMode: "multiple" },
 ];
 
 type MessageTone = "success" | "error" | "info";
@@ -237,9 +235,10 @@ export function SettingsScreen({
     } as ProjectSnapshot["settings"];
     return ROLE_DEFINITIONS.map((role) => ({
       ...role,
-      readiness: runnerReadinessFor(effectiveSettings, role.roleId),
+      label: roleLabel(role.roleId, language),
+      readiness: runnerReadinessFor(effectiveSettings, role.roleId, language),
     }));
-  }, [aiConnections, appSettings.rolePresets, parsedRolePresets, roleAssignments]);
+  }, [aiConnections, appSettings.rolePresets, language, parsedRolePresets, roleAssignments]);
   const readyRunnerCount = runnerOnboarding.filter((item) => item.readiness.ready).length;
 
   async function save() {
@@ -983,7 +982,7 @@ export function SettingsScreen({
                           <label>
                             <span>{t("settings.connection.defaultModel")}</span>
                             <input
-                              placeholder={defaultModelPlaceholder(orchestratorConnection.provider)}
+                              placeholder={defaultModelPlaceholder(orchestratorConnection.provider, language)}
                               value={orchestratorConnection.defaultModel ?? ""}
                               onChange={(event) =>
                                 updateOrchestratorConnection({
@@ -1116,18 +1115,20 @@ export function SettingsScreen({
               <section className="settings-section">
                 <div className="settings-section-head">
                   <h3>Runner Templates</h3>
-                  <p className="muted">기존 role preset과 새 AI CLI command/작업별 선택 기본값을 함께 적용합니다.</p>
+                  <p className="muted">{language === "ko" ? "기존 role preset과 새 AI CLI command/작업별 선택 기본값을 함께 적용합니다." : "Apply role presets, new AI CLI commands, and per-task defaults together."}</p>
                 </div>
                 <div className="runner-onboarding-panel">
                   <div className="runner-onboarding-summary">
                     <div>
-                      <strong>Runner 준비 상태</strong>
+                      <strong>{language === "ko" ? "Runner 준비 상태" : "Runner readiness"}</strong>
                       <span>
-                        {readyRunnerCount}/{ROLE_DEFINITIONS.length} 역할 준비됨 · 활성 CLI 연결 {enabledConnections.length}개
+                        {language === "ko"
+                          ? `${readyRunnerCount}/${ROLE_DEFINITIONS.length} 역할 준비됨 · 활성 CLI 연결 ${enabledConnections.length}개`
+                          : `${readyRunnerCount}/${ROLE_DEFINITIONS.length} roles ready · ${enabledConnections.length} active CLI connections`}
                       </span>
                     </div>
                     <span className={readyRunnerCount === ROLE_DEFINITIONS.length ? "check-pass" : "check-fail"}>
-                      {readyRunnerCount === ROLE_DEFINITIONS.length ? "준비 완료" : "설정 필요"}
+                      {readyRunnerCount === ROLE_DEFINITIONS.length ? (language === "ko" ? "준비 완료" : "Ready") : (language === "ko" ? "설정 필요" : "Needs setup")}
                     </span>
                   </div>
                   <ul className="runner-onboarding-roles">
@@ -1143,14 +1144,14 @@ export function SettingsScreen({
                   </ul>
                 </div>
                 {templates.length === 0 ? (
-                  <p className="muted">사용 가능한 template이 없습니다.</p>
+                  <p className="muted">{language === "ko" ? "사용 가능한 template이 없습니다." : "No templates available."}</p>
                 ) : (
                   <div className="template-grid">
                     {templates.map((template) => (
                       <article className="template-card" key={template.id}>
                         <div>
                           <strong>{template.label}</strong>
-                          <p>{template.description}</p>
+                          <p>{runnerTemplateDescription(template, language)}</p>
                         </div>
                         <button
                           className="secondary-button"
@@ -1158,7 +1159,7 @@ export function SettingsScreen({
                           onClick={() => applyTemplate(template.id)}
                           type="button"
                         >
-                          적용
+                          {language === "ko" ? "적용" : "Apply"}
                         </button>
                       </article>
                     ))}
@@ -1170,8 +1171,8 @@ export function SettingsScreen({
             {activeCategory === "connections" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
-                  <h3>AI CLI 연결</h3>
-                  <p className="muted">Codex, Claude Code, Gemini, 기타 로컬 LLM CLI를 이름과 실행 경로로 등록합니다.</p>
+                  <h3>{language === "ko" ? "AI CLI 연결" : "AI CLI Connections"}</h3>
+                  <p className="muted">{language === "ko" ? "Codex, Claude Code, Gemini, 기타 로컬 LLM CLI를 이름과 실행 경로로 등록합니다." : "Register Codex, Claude Code, Gemini, and other local LLM CLIs by name and executable path."}</p>
                 </div>
                 <div className="settings-actions">
                   <button
@@ -1204,13 +1205,15 @@ export function SettingsScreen({
                     onClick={() => addConnection("custom")}
                     type="button"
                   >
-                    + 기타
+                    + {language === "ko" ? "기타" : "Custom"}
                   </button>
                 </div>
                 <div className="connection-list">
                   {aiConnections.length === 0 ? (
                     <p className="settings-empty">
-                      등록된 AI CLI 연결이 없습니다. template을 적용하거나 CLI 연결을 추가하세요.
+                      {language === "ko"
+                        ? "등록된 AI CLI 연결이 없습니다. template을 적용하거나 CLI 연결을 추가하세요."
+                        : "No AI CLI connections are registered. Apply a template or add a CLI connection."}
                     </p>
                   ) : (
                     aiConnections.map((connection) => {
@@ -1243,16 +1246,16 @@ export function SettingsScreen({
                                 <span className="provider-pill">{providerLabel(connection.provider, language)}</span>
                                 {check ? (
                                   <span className={check.available ? "check-pass" : "check-fail"}>
-                                    {check.available ? "프롬프트 OK" : "확인 필요"}
+                                    {check.available ? (language === "ko" ? "프롬프트 OK" : "Prompt OK") : (language === "ko" ? "확인 필요" : "Needs check")}
                                   </span>
                                 ) : null}
-                                {modelRefresh?.busy ? <span className="check-info">모델 확인 중</span> : null}
-                                {isChecking ? <span className="check-info">프롬프트 확인 중</span> : null}
+                                {modelRefresh?.busy ? <span className="check-info">{language === "ko" ? "모델 확인 중" : "Checking models"}</span> : null}
+                                {isChecking ? <span className="check-info">{language === "ko" ? "프롬프트 확인 중" : "Checking prompt"}</span> : null}
                               </div>
                             </div>
                             <div className="connection-fields">
                               <label>
-                                <span>이름</span>
+                                <span>{language === "ko" ? "이름" : "Name"}</span>
                                 <input
                                   value={connection.label}
                                   onChange={(event) =>
@@ -1261,7 +1264,7 @@ export function SettingsScreen({
                                 />
                               </label>
                               <label>
-                                <span>LLM 경로</span>
+                                <span>{language === "ko" ? "LLM 경로" : "LLM path"}</span>
                                 <input
                                   placeholder={cliPathPlaceholder(connection.provider)}
                                   value={connectionCliPath(connection)}
@@ -1269,9 +1272,9 @@ export function SettingsScreen({
                                 />
                               </label>
                               <label>
-                                <span>기본 모델</span>
+                                <span>{language === "ko" ? "기본 모델" : "Default model"}</span>
                                 <input
-                                  placeholder={defaultModelPlaceholder(connection.provider)}
+                                  placeholder={defaultModelPlaceholder(connection.provider, language)}
                                   value={connection.defaultModel ?? ""}
                                   onChange={(event) =>
                                     updateConnection(connection.id, {
@@ -1281,12 +1284,12 @@ export function SettingsScreen({
                                 />
                               </label>
                               <label aria-busy={modelRefresh?.busy ? true : undefined}>
-                                <span>모델 목록</span>
+                                <span>{language === "ko" ? "모델 목록" : "Model list"}</span>
                                 {showModelSkeleton ? (
                                   <ModelListSkeleton />
                                 ) : (
                                   <input
-                                    placeholder="쉼표로 구분"
+                                    placeholder={language === "ko" ? "쉼표로 구분" : "Comma-separated"}
                                     value={modelList.join(", ")}
                                     onChange={(event) =>
                                       updateConnection(connection.id, {
@@ -1297,7 +1300,7 @@ export function SettingsScreen({
                                 )}
                                 {modelRefresh?.busy && modelList.length > 0 ? (
                                   <span className="model-list-inline-loading" role="status">
-                                    최신 모델 확인 중
+                                    {language === "ko" ? "최신 모델 확인 중" : "Checking latest models"}
                                   </span>
                                 ) : null}
                               </label>
@@ -1315,7 +1318,7 @@ export function SettingsScreen({
                                 />
                               </label>
                               <label className="connection-env-field">
-                                <span>환경 변수</span>
+                                <span>{language === "ko" ? "환경 변수" : "Environment variables"}</span>
                                 <textarea
                                   placeholder={envPlaceholder(connection.provider)}
                                   rows={3}
@@ -1329,11 +1332,11 @@ export function SettingsScreen({
                               </label>
                             </div>
                             <code className="command-preview">
-                              실행: {connection.commandArgs.join(" ") || "command 없음"}
+                              {language === "ko" ? "실행" : "Run"}: {connection.commandArgs.join(" ") || (language === "ko" ? "command 없음" : "no command")}
                             </code>
                             {connection.planningCommandArgs?.length ? (
                               <code className="command-preview">
-                                확인/계획: {connection.planningCommandArgs.join(" ")}
+                                {language === "ko" ? "확인/계획" : "Check/plan"}: {connection.planningCommandArgs.join(" ")}
                               </code>
                             ) : null}
                             {check?.message ? <p className="muted">{check.message}</p> : null}
@@ -1353,7 +1356,7 @@ export function SettingsScreen({
                                   type="button"
                                 >
                                   <RefreshCw className={isModelRefreshing ? "loading-icon" : undefined} size={14} aria-hidden />
-                                  {isModelRefreshing ? "불러오는 중..." : "모델 불러오기"}
+                                  {isModelRefreshing ? (language === "ko" ? "불러오는 중..." : "Loading...") : (language === "ko" ? "모델 불러오기" : "Load models")}
                                 </button>
                               ) : null}
                               <button
@@ -1364,7 +1367,7 @@ export function SettingsScreen({
                                 type="button"
                               >
                                 {isChecking ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
-                                {isChecking ? "확인 중..." : "연동 확인"}
+                                {isChecking ? (language === "ko" ? "확인 중..." : "Checking...") : (language === "ko" ? "연동 확인" : "Check connection")}
                               </button>
                               <button
                                 className="secondary-button danger"
@@ -1372,7 +1375,7 @@ export function SettingsScreen({
                                 onClick={() => removeConnection(connection.id)}
                                 type="button"
                               >
-                                삭제
+                                {language === "ko" ? "삭제" : "Delete"}
                               </button>
                             </div>
                           </article>
@@ -1386,12 +1389,14 @@ export function SettingsScreen({
             {activeCategory === "assignments" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
-                  <h3>작업별 CLI 선택</h3>
-                  <p className="muted">계획/구현은 단일 선택, 검수/테스트는 다중 선택으로 저장합니다.</p>
+                  <h3>{language === "ko" ? "작업별 CLI 선택" : "Role CLI Selection"}</h3>
+                  <p className="muted">{language === "ko" ? "계획/구현은 단일 선택, 검수/테스트는 다중 선택으로 저장합니다." : "Planner/coder use a single selection; review/test roles can use multiple selections."}</p>
                 </div>
                 {enabledConnections.length === 0 ? (
                   <p className="settings-empty">
-                    활성화된 AI CLI 연결이 없습니다. <strong>AI CLI 연결</strong> 탭에서 먼저 등록하세요.
+                    {language === "ko" ? "활성화된 AI CLI 연결이 없습니다. " : "No active AI CLI connections. "}
+                    <strong>{language === "ko" ? "AI CLI 연결" : "AI CLI Connections"}</strong>
+                    {language === "ko" ? " 탭에서 먼저 등록하세요." : " must be registered first."}
                   </p>
                 ) : (
                   <div className="role-assignment-list">
@@ -1404,11 +1409,11 @@ export function SettingsScreen({
                       return (
                         <article className="role-assignment-row" key={role.roleId}>
                           <div>
-                            <strong>{role.label}</strong>
+                            <strong>{roleLabel(role.roleId, language)}</strong>
                             <span>
-                              {role.group}
+                              {roleGroupLabel(role.roleId, language)}
                               <span className="role-mode-pill">
-                                {role.selectionMode === "single" ? "단일" : "다중 · all_pass"}
+                                {role.selectionMode === "single" ? (language === "ko" ? "단일" : "Single") : (language === "ko" ? "다중 · all_pass" : "Multiple · all_pass")}
                               </span>
                             </span>
                           </div>
@@ -1434,11 +1439,11 @@ export function SettingsScreen({
                                   </label>
                                   {isSelected ? (
                                     <select
-                                      aria-label={`${role.label} ${connection.label} 모델`}
+                                      aria-label={`${roleLabel(role.roleId, language)} ${connection.label} ${language === "ko" ? "모델" : "model"}`}
                                       value={roleModel}
                                       onChange={(event) => setRoleModel(role.roleId, connection.id, event.target.value)}
                                     >
-                                      <option value="">CLI 기본 모델</option>
+                                      <option value="">{language === "ko" ? "CLI 기본 모델" : "CLI default model"}</option>
                                       {modelOptions(connection, roleModel).map((model) => (
                                         <option key={model} value={model}>
                                           {model}
@@ -1461,9 +1466,11 @@ export function SettingsScreen({
             {activeCategory === "policies" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
-                  <h3>역할 정책 MD</h3>
+                  <h3>{language === "ko" ? "역할 정책 MD" : "Role Policy Markdown"}</h3>
                   <p className="muted">
-                    Context Pack에 함께 포함할 역할별 Markdown 정책입니다. 경로는 각 repo 기준 상대 .md 파일만 허용합니다.
+                    {language === "ko"
+                      ? "Context Pack에 함께 포함할 역할별 Markdown 정책입니다. 경로는 각 repo 기준 상대 .md 파일만 허용합니다."
+                      : "Markdown policies to include in the Context Pack per role. Paths must be relative .md files from each repo."}
                   </p>
                 </div>
                 <div className="role-assignment-list">
@@ -1472,10 +1479,10 @@ export function SettingsScreen({
                     return (
                       <article className="role-assignment-row" key={policy.roleId}>
                         <div>
-                          <strong>{role?.label ?? roleLabel(policy.roleId)}</strong>
+                          <strong>{roleLabel(policy.roleId, language)}</strong>
                           <span>
-                            {role?.group ?? "역할"}
-                            <span className="role-mode-pill">{policy.enabled ? "사용" : "비활성"}</span>
+                            {role ? roleGroupLabel(role.roleId, language) : language === "ko" ? "역할" : "Role"}
+                            <span className="role-mode-pill">{policy.enabled ? (language === "ko" ? "사용" : "Enabled") : (language === "ko" ? "비활성" : "Disabled")}</span>
                           </span>
                         </div>
                         <div className="connection-fields">
@@ -1488,10 +1495,10 @@ export function SettingsScreen({
                               type="checkbox"
                             />
                             <span className="toggle-switch-track" aria-hidden />
-                            <span className="toggle-switch-label">Context Pack에 정책 포함</span>
+                            <span className="toggle-switch-label">{language === "ko" ? "Context Pack에 정책 포함" : "Include policy in Context Pack"}</span>
                           </label>
                           <label>
-                            <span>정책 문서 경로</span>
+                            <span>{language === "ko" ? "정책 문서 경로" : "Policy document path"}</span>
                             <input
                               placeholder={`.helm/policies/${policy.roleId}.md`}
                               value={policy.path}
@@ -1510,7 +1517,7 @@ export function SettingsScreen({
               <section className="settings-section">
                 <div className="settings-section-head">
                   <h3>Jira</h3>
-                  <p className="muted">Planning과 host runner가 공통으로 참조할 Jira 기본값입니다.</p>
+                  <p className="muted">{language === "ko" ? "Planning과 host runner가 공통으로 참조할 Jira 기본값입니다." : "Default Jira values shared by planning and host runners."}</p>
                 </div>
                 <label className="toggle-switch">
                   <input
@@ -1519,7 +1526,7 @@ export function SettingsScreen({
                     type="checkbox"
                   />
                   <span className="toggle-switch-track" aria-hidden />
-                  <span className="toggle-switch-label">Jira 연동 정보 사용</span>
+                  <span className="toggle-switch-label">{language === "ko" ? "Jira 연동 정보 사용" : "Use Jira integration info"}</span>
                 </label>
                 <div className="connection-fields">
                   <label>
@@ -1533,7 +1540,7 @@ export function SettingsScreen({
                   <label>
                     <span>Project key</span>
                     <input
-                      placeholder="예: NC"
+                      placeholder={language === "ko" ? "예: NC" : "Ex: NC"}
                       value={jiraConfig.projectKey ?? ""}
                       onChange={(event) => updateJiraConfig({ projectKey: normalizeJiraProjectKey(event.target.value) })}
                     />
@@ -1556,7 +1563,9 @@ export function SettingsScreen({
                   </label>
                 </div>
                 <p className="muted">
-                  Host runner에는 <code>HELM_JIRA_PROJECT_KEY</code>, <code>HELM_JIRA_SITE_URL</code> 등으로 전달됩니다.
+                  {language === "ko" ? "Host runner에는 " : "Passed to host runners as "}
+                  <code>HELM_JIRA_PROJECT_KEY</code>, <code>HELM_JIRA_SITE_URL</code>
+                  {language === "ko" ? " 등으로 전달됩니다." : ", and related environment variables."}
                 </p>
               </section>
             ) : null}
@@ -1565,6 +1574,7 @@ export function SettingsScreen({
               <UsageStatsPanel
                 stats={usageStats}
                 loading={usageBusy}
+                language={language}
                 onRefresh={() => {
                   if (!snapshot) return;
                   setUsageBusy(true);
@@ -1587,16 +1597,16 @@ export function SettingsScreen({
               <section className="settings-section">
                 <div className="settings-section-head">
                   <h3>Worktree</h3>
-                  <p className="muted">병렬 작업용 git worktree가 만들어질 디렉터리입니다.</p>
+                  <p className="muted">{language === "ko" ? "병렬 작업용 git worktree가 만들어질 디렉터리입니다." : "Directory where parallel git worktrees are created."}</p>
                 </div>
                 <label className="settings-field">
                   <span>Worktree root</span>
                   <input
-                    placeholder="기본값: <repo>/.helm/worktrees"
+                    placeholder={language === "ko" ? "기본값: <repo>/.helm/worktrees" : "Default: <repo>/.helm/worktrees"}
                     value={worktreeRoot}
                     onChange={(event) => setWorktreeRoot(event.target.value)}
                   />
-                  <small className="muted">비워두면 프로젝트 내 <code>.helm/worktrees</code>가 사용됩니다.</small>
+                  <small className="muted">{language === "ko" ? "비워두면 프로젝트 내 " : "Leave empty to use "}<code>.helm/worktrees</code>{language === "ko" ? "가 사용됩니다." : " inside the project."}</small>
                 </label>
                 <label className="settings-field">
                   <span>Setup config JSON</span>
@@ -1607,7 +1617,9 @@ export function SettingsScreen({
                     onChange={(event) => setWorktreeSetup(event.target.value)}
                   />
                   <small className="muted">
-                    비워두면 <code>.helm/worktree-setup.json</code>이 있으면 사용합니다. Helm은 자동 실행하지 않고 Context Pack에만 포함합니다.
+                    {language === "ko" ? "비워두면 " : "Leave empty to use "}
+                    <code>.helm/worktree-setup.json</code>
+                    {language === "ko" ? "이 있으면 사용합니다. Helm은 자동 실행하지 않고 Context Pack에만 포함합니다." : " when present. Helm does not run it automatically; it only includes it in the Context Pack."}
                   </small>
                 </label>
                 <label className="settings-field">
@@ -1618,18 +1630,20 @@ export function SettingsScreen({
                     onChange={(event) => setObsidianVaultPath(event.target.value)}
                   />
                   <small className="muted">
-                    작업 보고서와 계획 문서가 연결될 Vault입니다. 비워두면 프로젝트별 Obsidian 연동을 끕니다.
+                    {language === "ko" ? "작업 보고서와 계획 문서가 연결될 Vault입니다. 비워두면 프로젝트별 Obsidian 연동을 끕니다." : "Vault linked to work reports and planning documents. Leave empty to disable project Obsidian integration."}
                   </small>
                 </label>
                 <label className="settings-field">
-                  <span>산출물 경로</span>
+                  <span>{language === "ko" ? "산출물 경로" : "Artifact path"}</span>
                   <input
-                    placeholder="예: projects/helm-artifacts 또는 /Users/me/Documents/Helm Artifacts"
+                    placeholder={language === "ko" ? "예: projects/helm-artifacts 또는 /Users/me/Documents/Helm Artifacts" : "Ex: projects/helm-artifacts or /Users/me/Documents/Helm Artifacts"}
                     value={obsidianArtifactPath}
                     onChange={(event) => setObsidianArtifactPath(event.target.value)}
                   />
                   <small className="muted">
-                    Obsidian 실행/계획 문서를 저장할 위치입니다. 상대 경로는 Vault 하위 경로로 해석하고, 비워두면 기존 <code>projects/&lt;project&gt;/desktop</code> 경로를 사용합니다.
+                    {language === "ko" ? "Obsidian 실행/계획 문서를 저장할 위치입니다. 상대 경로는 Vault 하위 경로로 해석하고, 비워두면 기존 " : "Where Obsidian run/planning documents are saved. Relative paths are resolved under the Vault. Leave empty to use "}
+                    <code>projects/&lt;project&gt;/desktop</code>
+                    {language === "ko" ? " 경로를 사용합니다." : "."}
                   </small>
                 </label>
               </section>
@@ -1739,12 +1753,12 @@ export function SettingsScreen({
             {activeCategory === "advanced" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
-                  <h3>고급</h3>
-                  <p className="muted">일반적으로 template과 AI CLI 연결 탭만으로 충분합니다.</p>
+                  <h3>{language === "ko" ? "고급" : "Advanced"}</h3>
+                  <p className="muted">{language === "ko" ? "일반적으로 template과 AI CLI 연결 탭만으로 충분합니다." : "Templates and AI CLI connections are usually enough."}</p>
                 </div>
                 <details className="settings-disclosure">
-                  <summary>Role presets JSON 직접 편집</summary>
-                  <p className="muted">기존 host runner 호환을 위해 JSON 편집을 유지합니다.</p>
+                  <summary>{language === "ko" ? "Role presets JSON 직접 편집" : "Edit role presets JSON directly"}</summary>
+                  <p className="muted">{language === "ko" ? "기존 host runner 호환을 위해 JSON 편집을 유지합니다." : "JSON editing remains for legacy host runner compatibility."}</p>
                   <label className="settings-field">
                     <span>Role presets</span>
                     <textarea
@@ -1755,19 +1769,19 @@ export function SettingsScreen({
                   </label>
                 </details>
                 <details className="settings-disclosure">
-                  <summary>기존 runner health check</summary>
-                  <p className="muted">role preset에 등록된 명령이 현재 실행 가능한지 확인합니다.</p>
+                  <summary>{language === "ko" ? "기존 runner health check" : "Legacy runner health check"}</summary>
+                  <p className="muted">{language === "ko" ? "role preset에 등록된 명령이 현재 실행 가능한지 확인합니다." : "Check whether commands registered in role presets can run now."}</p>
                   <button className="secondary-button" disabled={busy} onClick={checkRunners} type="button">
-                    runner 확인
+                    {language === "ko" ? "runner 확인" : "Check runners"}
                   </button>
                   {runnerChecks.length > 0 ? (
                     <ul className="runner-check-list">
                       {runnerChecks.map((check) => (
                         <li key={check.roleId}>
                           <span className={check.available ? "check-pass" : "check-fail"}>
-                            {check.available ? "사용 가능" : "확인 필요"}
+                            {check.available ? (language === "ko" ? "사용 가능" : "Available") : (language === "ko" ? "확인 필요" : "Needs check")}
                           </span>
-                          <strong>{roleLabel(check.roleId)}</strong>
+                          <strong>{roleLabel(check.roleId, language)}</strong>
                           <span>{check.message}</span>
                         </li>
                       ))}
@@ -1807,67 +1821,69 @@ interface UsageStats {
 function UsageStatsPanel({
   stats,
   loading,
+  language,
   onRefresh,
 }: {
   stats: UsageStats;
   loading: boolean;
+  language: AppLanguage;
   onRefresh: () => void;
 }) {
   return (
     <section className="settings-section usage-section" aria-busy={loading ? true : undefined}>
       <div className="settings-section-head">
-        <h3>통계 및 사용량</h3>
-        <p className="muted">현재 프로젝트의 Agent 실행 기록을 기준으로 집계합니다.</p>
+        <h3>{language === "ko" ? "통계 및 사용량" : "Stats & Usage"}</h3>
+        <p className="muted">{language === "ko" ? "현재 프로젝트의 Agent 실행 기록을 기준으로 집계합니다." : "Aggregated from agent run history for the current project."}</p>
       </div>
 
       <div className="usage-summary-grid">
-        <UsageMetric icon={Workflow} value={formatNumber(stats.totalRuns)} label="시작된 Agents" />
-        <UsageMetric icon={Info} value={formatDuration(stats.totalDurationMs)} label="agent 작업 시간" />
-        <UsageMetric icon={CheckCircle2} value={formatNumber(stats.completedTasks)} label="완료된 태스크" />
+        <UsageMetric icon={Workflow} value={formatNumber(stats.totalRuns)} label={language === "ko" ? "시작된 Agents" : "Started agents"} />
+        <UsageMetric icon={Info} value={formatDuration(stats.totalDurationMs)} label={language === "ko" ? "agent 작업 시간" : "Agent work time"} />
+        <UsageMetric icon={CheckCircle2} value={formatNumber(stats.completedTasks)} label={language === "ko" ? "완료된 태스크" : "Completed tasks"} />
       </div>
 
       <p className="usage-tracking">
-        Tracking since {stats.trackingSince ? formatDateTime(stats.trackingSince) : "기록 없음"}
+        Tracking since {stats.trackingSince ? formatDateTime(stats.trackingSince) : language === "ko" ? "기록 없음" : "no records"}
       </p>
 
       <div className="usage-panel-header">
         <div>
-          <strong>사용량 개요</strong>
+          <strong>{language === "ko" ? "사용량 개요" : "Usage overview"}</strong>
           <span>Updated {formatDateTime(stats.updatedAt)}</span>
         </div>
-        <button className="icon-button" disabled={loading} onClick={onRefresh} title="통계 새로고침" type="button">
+        <button className="icon-button" disabled={loading} onClick={onRefresh} title={language === "ko" ? "통계 새로고침" : "Refresh stats"} type="button">
           <RefreshCw className={loading ? "loading-icon" : undefined} size={15} aria-hidden />
         </button>
       </div>
 
       <div className="usage-kpi-grid">
-        <UsageMetric icon={BarChart3} value={formatNumber(stats.totalRuns)} label="총 실행" />
-        <UsageMetric icon={FolderTree} value={formatNumber(stats.activeDays)} label="활성 일수" />
-        <UsageMetric icon={CheckCircle2} value={formatPercent(stats.successRate)} label="성공률" />
-        <UsageMetric icon={Plug} value={`${stats.providers.length}`} label="활성 provider" />
+        <UsageMetric icon={BarChart3} value={formatNumber(stats.totalRuns)} label={language === "ko" ? "총 실행" : "Total runs"} />
+        <UsageMetric icon={FolderTree} value={formatNumber(stats.activeDays)} label={language === "ko" ? "활성 일수" : "Active days"} />
+        <UsageMetric icon={CheckCircle2} value={formatPercent(stats.successRate)} label={language === "ko" ? "성공률" : "Success rate"} />
+        <UsageMetric icon={Plug} value={`${stats.providers.length}`} label={language === "ko" ? "활성 provider" : "Active providers"} />
       </div>
 
       <div className="usage-analysis-grid">
         <article className="usage-analysis-card">
           <div className="usage-card-heading">
             <div>
-              <strong>일일 강도</strong>
-              <span>최근 42일 Agent 실행 밀도</span>
+              <strong>{language === "ko" ? "일일 강도" : "Daily intensity"}</strong>
+              <span>{language === "ko" ? "최근 42일 Agent 실행 밀도" : "Agent run density over the last 42 days"}</span>
             </div>
-            {stats.peakDay ? <span className="usage-pill">최상위: {formatShortDate(stats.peakDay.date)}</span> : null}
+            {stats.peakDay ? <span className="usage-pill">{language === "ko" ? "최상위" : "Peak"}: {formatShortDate(stats.peakDay.date)}</span> : null}
           </div>
-          <div className="usage-heatmap" aria-label="최근 42일 실행 강도">
+          <div className="usage-heatmap" aria-label={language === "ko" ? "최근 42일 실행 강도" : "Run intensity over the last 42 days"}>
             {stats.heatmap.map((day) => (
               <span
                 key={day.date}
                 className={`usage-heatmap-cell level-${day.level}`}
-                title={`${formatShortDate(day.date)} · ${day.count}회`}
+                title={`${formatShortDate(day.date)} · ${day.count}${language === "ko" ? "회" : " runs"}`}
               />
             ))}
           </div>
           <div className="usage-heatmap-legend">
             <span>{stats.heatmap[0] ? formatShortDate(stats.heatmap[0].date) : ""}</span>
-            <span>더 적은</span>
+            <span>{language === "ko" ? "더 적은" : "Less"}</span>
             <span className="usage-legend-squares" aria-hidden>
               <i className="level-0" />
               <i className="level-1" />
@@ -1875,7 +1891,7 @@ function UsageStatsPanel({
               <i className="level-3" />
               <i className="level-4" />
             </span>
-            <span>더</span>
+            <span>{language === "ko" ? "더" : "More"}</span>
             <span>{stats.heatmap.at(-1) ? formatShortDate(stats.heatmap.at(-1)?.date ?? "") : ""}</span>
           </div>
         </article>
@@ -1883,21 +1899,21 @@ function UsageStatsPanel({
         <article className="usage-analysis-card">
           <div className="usage-card-heading">
             <div>
-              <strong>Provider 믹스</strong>
-              <span>실행 횟수와 누적 작업 시간 기준</span>
+              <strong>{language === "ko" ? "Provider 믹스" : "Provider mix"}</strong>
+              <span>{language === "ko" ? "실행 횟수와 누적 작업 시간 기준" : "Based on run count and cumulative work time"}</span>
             </div>
-            <span className="usage-pill">{formatNumber(stats.totalRuns)} 세션</span>
+            <span className="usage-pill">{formatNumber(stats.totalRuns)} {language === "ko" ? "세션" : "sessions"}</span>
           </div>
           <div className="usage-provider-bars">
             {stats.providers.length === 0 ? (
-              <p className="settings-empty">아직 실행 기록이 없습니다.</p>
+              <p className="settings-empty">{language === "ko" ? "아직 실행 기록이 없습니다." : "No run history yet."}</p>
             ) : (
               stats.providers.map((provider) => (
                 <div className="usage-provider-row" key={provider.id}>
                   <div>
                     <strong>{provider.label}</strong>
                     <span>
-                      {formatNumber(provider.runCount)}회 · {formatDuration(provider.durationMs)}
+                      {formatNumber(provider.runCount)}{language === "ko" ? "회" : " runs"} · {formatDuration(provider.durationMs)}
                     </span>
                   </div>
                   <div className="usage-provider-bar" aria-hidden>
@@ -1918,14 +1934,14 @@ function UsageStatsPanel({
               <strong>{provider.label}</strong>
               <span className="check-info">{formatPercent(provider.successRate)}</span>
             </div>
-            <p>{provider.latestAt ? `${formatDateTime(provider.latestAt)} 마지막 실행` : "실행 기록 없음"}</p>
+            <p>{provider.latestAt ? (language === "ko" ? `${formatDateTime(provider.latestAt)} 마지막 실행` : `Last run ${formatDateTime(provider.latestAt)}`) : (language === "ko" ? "실행 기록 없음" : "No run history")}</p>
             <dl>
               <div>
-                <dt>세션</dt>
+                <dt>{language === "ko" ? "세션" : "Sessions"}</dt>
                 <dd>{formatNumber(provider.runCount)}</dd>
               </div>
               <div>
-                <dt>작업 시간</dt>
+                <dt>{language === "ko" ? "작업 시간" : "Work time"}</dt>
                 <dd>{formatDuration(provider.durationMs)}</dd>
               </div>
             </dl>
@@ -1934,8 +1950,8 @@ function UsageStatsPanel({
       </div>
 
       <div className="usage-note">
-        <strong>토큰/비용</strong>
-        <span>현재 Helm DB에는 provider별 token/cost 이벤트가 저장되지 않아 집계하지 않습니다.</span>
+        <strong>{language === "ko" ? "토큰/비용" : "Tokens/Cost"}</strong>
+        <span>{language === "ko" ? "현재 Helm DB에는 provider별 token/cost 이벤트가 저장되지 않아 집계하지 않습니다." : "The current Helm DB does not store provider token/cost events, so they are not aggregated."}</span>
       </div>
     </section>
   );
@@ -2327,11 +2343,11 @@ function canRefreshModels(provider: string): boolean {
   return provider === "codex" || provider === "claude" || provider === "gemini";
 }
 
-function defaultModelPlaceholder(provider: string): string {
-  if (provider === "codex") return "예: gpt-5.2";
-  if (provider === "claude") return "예: sonnet";
-  if (provider === "gemini") return "예: gemini-2.5-pro";
-  return "선택 사항";
+function defaultModelPlaceholder(provider: string, language: AppLanguage): string {
+  if (provider === "codex") return language === "ko" ? "예: gpt-5.2" : "Ex: gpt-5.2";
+  if (provider === "claude") return language === "ko" ? "예: sonnet" : "Ex: sonnet";
+  if (provider === "gemini") return language === "ko" ? "예: gemini-2.5-pro" : "Ex: gemini-2.5-pro";
+  return language === "ko" ? "선택 사항" : "Optional";
 }
 
 function modelOptions(connection: AiConnection, selectedModel: string): string[] {
@@ -2347,6 +2363,38 @@ function providerLabel(provider: string, language: AppLanguage = "en"): string {
   if (provider === "custom") return language === "ko" ? "기타" : "Custom";
   if (provider === "fixture") return "Fixture";
   return provider;
+}
+
+function roleGroupLabel(roleId: RoleAssignment["roleId"], language: AppLanguage): string {
+  switch (roleId) {
+    case "planner":
+      return language === "ko" ? "계획" : "Planning";
+    case "coder":
+      return language === "ko" ? "구현" : "Coding";
+    case "plan_verifier":
+    case "code_reviewer":
+      return language === "ko" ? "검수" : "Review";
+    case "tester":
+      return language === "ko" ? "테스트" : "Testing";
+    default:
+      return language === "ko" ? "역할" : "Role";
+  }
+}
+
+function runnerTemplateDescription(template: RunnerTemplateSummary, language: AppLanguage): string {
+  if (language === "ko") return template.description;
+  switch (template.id) {
+    case "fixture":
+      return "Local verification runner. Generates artifacts and diffs without calling a real AI.";
+    case "codex":
+      return "Use the installed codex CLI as the role runner. Adjust the command for your environment.";
+    case "claude":
+      return "Use the installed claude CLI as the role runner. Local authentication is required.";
+    case "gemini":
+      return "Use the installed gemini CLI as the role runner. Local authentication or GEMINI_API_KEY is required.";
+    default:
+      return template.description;
+  }
 }
 
 function cliPathPlaceholder(provider: string): string {
