@@ -1,9 +1,10 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
+import { I18nProvider, normalizeLanguage, translate, type AppLanguage } from "./lib/i18n";
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
@@ -16,11 +17,11 @@ type Screen = "sessions" | "tasks" | "git" | "terminal" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItems = [
-  { id: "sessions" as const, label: "채팅", icon: MessageSquare },
-  { id: "tasks" as const, label: "태스크", icon: ListChecks },
-  { id: "git" as const, label: "깃", icon: GitBranch },
-  { id: "terminal" as const, label: "터미널", icon: SquareTerminal },
-  { id: "settings" as const, label: "설정", icon: Settings },
+  { id: "sessions" as const, labelKey: "nav.chat" as const, icon: MessageSquare },
+  { id: "tasks" as const, labelKey: "nav.tasks" as const, icon: ListChecks },
+  { id: "git" as const, labelKey: "nav.git" as const, icon: GitBranch },
+  { id: "terminal" as const, labelKey: "nav.terminal" as const, icon: SquareTerminal },
+  { id: "settings" as const, labelKey: "nav.settings" as const, icon: Settings },
 ];
 
 export function App() {
@@ -32,6 +33,13 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
   const [terminalMounted, setTerminalMounted] = useState(false);
+  const [switchingProjectId, setSwitchingProjectId] = useState<string | null>(null);
+  const [language, setLanguage] = useState<AppLanguage>("en");
+
+  const localizedNavItems = useMemo(
+    () => navItems.map((item) => ({ ...item, label: translate(language, item.labelKey) })),
+    [language],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -40,8 +48,12 @@ export function App() {
       setBusy(true);
       try {
         const launch = await api.getLaunchState();
+        const settings = await api.getAppSettings().catch(() => null);
         if (cancelled) return;
 
+        if (settings) {
+          setLanguage(normalizeLanguage(settings.language));
+        }
         setRecents(launch.recentProjects);
         saveRecents(launch.recentProjects);
 
@@ -52,7 +64,7 @@ export function App() {
         }
       } catch (err) {
         if (!cancelled) {
-          setError(errorMessage(err));
+          setError(errorMessage(err, language));
         }
       } finally {
         if (!cancelled) {
@@ -131,7 +143,7 @@ export function App() {
       if (typeof path !== "string") return;
       await openProjectPath(path);
     } catch (err) {
-      setError(errorMessage(err));
+      setError(errorMessage(err, language));
     } finally {
       setBusy(false);
     }
@@ -149,6 +161,7 @@ export function App() {
 
   async function switchProject(projectId: string) {
     setError(null);
+    setSwitchingProjectId(projectId);
     setBusy(true);
     try {
       const next = await api.openProjectById(projectId, { reconcileStaleRuns: true });
@@ -159,8 +172,9 @@ export function App() {
       setRecents(nextRecents);
       saveRecents(nextRecents);
     } catch (err) {
-      setError(errorMessage(err));
+      setError(errorMessage(err, language));
     } finally {
+      setSwitchingProjectId(null);
       setBusy(false);
     }
   }
@@ -185,7 +199,7 @@ export function App() {
         setScreen("sessions");
       }
     } catch (err) {
-      setError(errorMessage(err));
+      setError(errorMessage(err, language));
     } finally {
       setBusy(false);
     }
@@ -198,7 +212,7 @@ export function App() {
       const next = await api.getProjectSnapshot(snapshot.project.id);
       applySnapshotUpdate(next);
     } catch (err) {
-      setError(errorMessage(err));
+      setError(errorMessage(err, language));
     } finally {
       setBusy(false);
     }
@@ -208,90 +222,100 @@ export function App() {
     setSnapshot(next);
   }
 
+  const activeProjectId = switchingProjectId ?? snapshot?.project.id ?? null;
+
   return (
-    <AppShell
-      navItems={navItems}
-      activeScreen={screen}
-      onNavigate={setScreen}
-      onOpenProject={openProject}
-      recents={recents}
-      activeProjectId={snapshot?.project.id ?? null}
-      onSwitchProject={switchProject}
-      onForgetProject={forgetProject}
-      busy={busy}
-      hideSidebar={screen === "sessions" || screen === "tasks" || screen === "terminal"}
-    >
-      {error ? <div className="error-banner">{error}</div> : null}
-      {bootStatus === "restoring" ? (
-        <section className="empty-state">
-          <h2>마지막 프로젝트 여는 중</h2>
-          <p>이전에 열었던 Helm 프로젝트와 실행 상태를 확인하고 있습니다.</p>
-        </section>
-      ) : (
-        <>
-          {screen === "sessions" ? (
-            <SessionsScreen
-              snapshot={snapshot}
-              selectedTaskId={selectedTaskId}
-              onSelectTask={setSelectedTaskId}
-              onOpenProject={openProject}
-              recents={recents}
-              activeProjectId={snapshot?.project.id ?? null}
-              onSwitchProject={switchProject}
-              onForgetProject={forgetProject}
-              busy={busy}
-              onGoTerminal={() => setScreen("terminal")}
-              onGoSettings={() => setScreen("settings")}
-              onRefresh={refresh}
-            />
-          ) : null}
-          {screen === "tasks" ? (
-            <TasksScreen
-              snapshot={snapshot}
-              selectedTaskId={selectedTaskId}
-              onSelectTask={(taskId) => {
-                setSelectedTaskId(taskId);
-              }}
-              onOpenProject={openProject}
-              onRefresh={refresh}
-              recents={recents}
-              onGoGit={() => setScreen("git")}
-              onGoSettings={() => setScreen("settings")}
-            />
-          ) : null}
-          {screen === "git" ? (
-            <GitScreen snapshot={snapshot} onOpenProject={openProject} />
-          ) : null}
-          {terminalMounted ? (
-            <div
-              className={screen === "terminal" ? "screen-host" : "screen-host inactive"}
-              aria-hidden={screen !== "terminal"}
-            >
-              <TerminalScreen
+    <I18nProvider language={language}>
+      <AppShell
+        navItems={localizedNavItems}
+        activeScreen={screen}
+        onNavigate={setScreen}
+        onOpenProject={openProject}
+        recents={recents}
+        activeProjectId={activeProjectId}
+        onSwitchProject={switchProject}
+        onForgetProject={forgetProject}
+        busy={busy}
+        hideSidebar={screen === "sessions" || screen === "tasks" || screen === "terminal" || screen === "settings"}
+      >
+        {error ? <div className="error-banner">{error}</div> : null}
+        {bootStatus === "restoring" ? (
+          <section className="empty-state">
+            <h2>{translate(language, "app.restore.title")}</h2>
+            <p>{translate(language, "app.restore.description")}</p>
+          </section>
+        ) : (
+          <>
+            {screen === "sessions" ? (
+              <SessionsScreen
                 snapshot={snapshot}
-                isActive={screen === "terminal"}
+                selectedTaskId={selectedTaskId}
+                onSelectTask={setSelectedTaskId}
                 onOpenProject={openProject}
                 recents={recents}
-                activeProjectId={snapshot?.project.id ?? null}
+                activeProjectId={activeProjectId}
                 onSwitchProject={switchProject}
-                onSnapshotUpdated={applySnapshotUpdate}
+                onForgetProject={forgetProject}
+                busy={busy}
+                onGoTerminal={() => setScreen("terminal")}
+                onGoSettings={() => setScreen("settings")}
+                onRefresh={refresh}
               />
-            </div>
-          ) : null}
-          {screen === "settings" ? (
-            <SettingsScreen snapshot={snapshot} onRefresh={refresh} onOpenProject={openProject} />
-          ) : null}
-        </>
-      )}
-    </AppShell>
+            ) : null}
+            {screen === "tasks" ? (
+              <TasksScreen
+                snapshot={snapshot}
+                selectedTaskId={selectedTaskId}
+                onSelectTask={(taskId) => {
+                  setSelectedTaskId(taskId);
+                }}
+                onOpenProject={openProject}
+                onRefresh={refresh}
+                recents={recents}
+                onGoGit={() => setScreen("git")}
+                onGoSettings={() => setScreen("settings")}
+              />
+            ) : null}
+            {screen === "git" ? (
+              <GitScreen snapshot={snapshot} onOpenProject={openProject} />
+            ) : null}
+            {terminalMounted ? (
+              <div
+                className={screen === "terminal" ? "screen-host" : "screen-host inactive"}
+                aria-hidden={screen !== "terminal"}
+              >
+                <TerminalScreen
+                  snapshot={snapshot}
+                  isActive={screen === "terminal"}
+                  onOpenProject={openProject}
+                  recents={recents}
+                  activeProjectId={activeProjectId}
+                  onSwitchProject={switchProject}
+                  onSnapshotUpdated={applySnapshotUpdate}
+                />
+              </div>
+            ) : null}
+            {screen === "settings" ? (
+              <SettingsScreen
+                snapshot={snapshot}
+                onRefresh={refresh}
+                onOpenProject={openProject}
+                appLanguage={language}
+                onAppLanguageChange={setLanguage}
+              />
+            ) : null}
+          </>
+        )}
+      </AppShell>
+    </I18nProvider>
   );
 }
 
-function errorMessage(error: unknown): string {
+function errorMessage(error: unknown, language: AppLanguage): string {
   if (typeof error === "string") return error;
   if (typeof error === "object" && error !== null && "message" in error) {
     return (error as CommandError).message;
   }
   if (error instanceof Error) return error.message;
-  return "알 수 없는 오류가 발생했습니다.";
+  return translate(language, "app.error.unknown");
 }

@@ -2642,6 +2642,7 @@ fn app_settings_cwd(app: &AppHandle) -> CommandResult<PathBuf> {
 fn default_app_settings() -> AppSettings {
     AppSettings {
         version: 1,
+        language: "en".to_string(),
         orchestrator: OrchestratorSettings {
             enabled: false,
             mode: "observe".to_string(),
@@ -2653,6 +2654,10 @@ fn default_app_settings() -> AppSettings {
 
 fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
     settings.version = 1;
+    settings.language = match settings.language.as_str() {
+        "ko" => "ko".to_string(),
+        _ => "en".to_string(),
+    };
     settings.orchestrator.mode = match settings.orchestrator.mode.as_str() {
         "gate" => "gate".to_string(),
         _ => "observe".to_string(),

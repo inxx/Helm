@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { Bot, Check, FileText, Folder, GitBranch, Loader2, MessageSquare, MoreHorizontal, Pencil, Plus, Send, Square, SquareTerminal, Trash2, User, X } from "lucide-react";
 import { ApprovalInbox } from "../components/ApprovalInbox";
 import { api } from "../lib/api";
+import { useI18n } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
 import { roleLabel } from "../lib/runnerReadiness";
 import type {
@@ -46,6 +47,7 @@ export function SessionsScreen({
   onGoTerminal,
   onRefresh,
 }: SessionsScreenProps) {
+  const { t } = useI18n();
   const [sessions, setSessions] = useState<AgentSessionSummary[]>([]);
   const [terminalPtys, setTerminalPtys] = useState<TerminalPtySummary[]>([]);
   const [changedFiles, setChangedFiles] = useState<GitFileStatus[]>([]);
@@ -162,10 +164,10 @@ export function SessionsScreen({
   if (!snapshot) {
     return (
       <section className="empty-state">
-        <h2>프로젝트를 열어주세요</h2>
-        <p>세션 채팅은 프로젝트의 실행 기록과 작업 맥락을 기준으로 구성됩니다.</p>
+        <h2>{t("sessions.emptyProject.title")}</h2>
+        <p>{t("sessions.emptyProject.description")}</p>
         <button className="primary-button" onClick={onOpenProject} type="button">
-          프로젝트 열기
+          {t("sessions.openProject")}
         </button>
       </section>
     );
@@ -282,10 +284,10 @@ export function SessionsScreen({
 
   return (
     <div className="sessions-layout">
-      <aside className="sessions-rail" aria-label="세션 목록">
+      <aside className="sessions-rail" aria-label={t("sessions.listAria")}>
         <div className="sessions-project-header">
           <Folder size={18} aria-hidden />
-          <h2>프로젝트</h2>
+          <h2>{t("sessions.projects")}</h2>
         </div>
         {loadError ? <div className="error-banner compact">{loadError}</div> : null}
         <div className="session-list">
@@ -314,10 +316,10 @@ export function SessionsScreen({
                   </button>
                   {activeProject ? (
                     <button
-                      aria-label={`${project.name} 세션 추가`}
+                      aria-label={`${project.name} ${t("sessions.addSession")}`}
                       className="session-project-action"
                       onClick={startNewSession}
-                      title="세션 추가"
+                      title={t("sessions.addSession")}
                       type="button"
                     >
                       <Plus size={14} aria-hidden />
@@ -325,10 +327,10 @@ export function SessionsScreen({
                   ) : null}
                   <div className="session-project-menu-wrap">
                     <button
-                      aria-label={`${project.name} 메뉴`}
+                      aria-label={`${project.name} ${t("sessions.projectMenu")}`}
                       className="session-project-action"
                       onClick={() => setOpenProjectMenuId((current) => (current === project.id ? null : project.id))}
-                      title="프로젝트 메뉴"
+                      title={t("sessions.projectMenu")}
                       type="button"
                     >
                       <MoreHorizontal size={15} aria-hidden />
@@ -343,7 +345,7 @@ export function SessionsScreen({
                           type="button"
                         >
                           <Trash2 size={13} aria-hidden />
-                          <span>프로젝트 삭제</span>
+                          <span>{t("sessions.deleteProject")}</span>
                         </button>
                       </div>
                     ) : null}
@@ -354,7 +356,7 @@ export function SessionsScreen({
                     {sessions.length === 0 ? (
                       <div className="session-list-empty">
                         <MessageSquare size={16} />
-                        <span>아직 세션이 없습니다.</span>
+                        <span>{t("sessions.noSessions")}</span>
                       </div>
                     ) : null}
                     {sessions.map((session) => {
@@ -373,7 +375,7 @@ export function SessionsScreen({
                           <span className={`session-status-dot ${session.nextAction}`} />
                           <span className="session-row-main">
                             <strong>{session.title}</strong>
-                            <small>{session.provider ?? "provider 미정"} · {formatRelative(session.lastSignalAt)}</small>
+                            <small>{session.provider ?? t("sessions.providerUnknown")} · {formatRelative(session.lastSignalAt)}</small>
                           </span>
                         </button>
                       );
@@ -386,18 +388,18 @@ export function SessionsScreen({
         </div>
         <button className="sidebar-add-project sessions-add-project" disabled={loading} onClick={onOpenProject} type="button">
           <Plus size={14} aria-hidden />
-          <span>프로젝트 추가</span>
+          <span>{t("sessions.addProject")}</span>
         </button>
       </aside>
 
-      <section className="session-chat" aria-label="세션 채팅 상세">
+      <section className="session-chat" aria-label={t("sessions.chatAria")}>
         {activeSession || activeTask ? (
           <>
             <header className="session-chat-header">
               <div>
                 <h1>{activeSession?.title ?? activeTask?.title}</h1>
                 <p>
-                  {activeSession?.provider ?? "provider 미정"}
+                  {activeSession?.provider ?? t("sessions.providerUnknown")}
                   {activeSession?.model ? ` · ${activeSession.model}` : ""}
                 </p>
               </div>
@@ -410,15 +412,13 @@ export function SessionsScreen({
                 ) : null}
                 <button className="secondary-button" onClick={onGoTerminal} type="button">
                   <SquareTerminal size={14} />
-                  <span>터미널</span>
+                  <span>{t("sessions.terminal")}</span>
                 </button>
               </div>
             </header>
             <div className="session-chat-scroll">
-              <SessionMessage role="assistant" icon="bot" title="오케스트레이터" timestamp={activeSession?.lastSignalAt ?? null}>
-                <p>
-                  작업 지시는 아래 입력으로 이어서 받습니다. 상세 이벤트와 산출물은 이 채팅에 누적되고, 전체 진행상황은 태스크 탭에서 봅니다.
-                </p>
+              <SessionMessage role="assistant" icon="bot" title={t("sessions.assistantTitle")} timestamp={activeSession?.lastSignalAt ?? null}>
+                <p>{t("sessions.introMessage")}</p>
               </SessionMessage>
               {orchestratorMessages.map((message) => (
                 <SessionMessage
@@ -426,26 +426,26 @@ export function SessionsScreen({
                   key={message.id}
                   role={message.role}
                   timestamp={null}
-                  title={message.role === "user" ? "요청" : "오케스트레이터"}
+                  title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
                 >
                   <p>{message.content}</p>
                 </SessionMessage>
               ))}
-              <SessionMessage role="user" icon="user" title="요청" timestamp={activeTask?.createdAt ?? activeSession?.createdAt ?? null}>
+              <SessionMessage role="user" icon="user" title={t("sessions.requestTitle")} timestamp={activeTask?.createdAt ?? activeSession?.createdAt ?? null}>
                 <strong>{activeTask?.title ?? activeSession?.title}</strong>
                 {activeTask?.description ? <p>{activeTask.description}</p> : null}
               </SessionMessage>
               {activeSession ? (
-                <SessionMessage role="assistant" icon="bot" title="진행 상태" timestamp={activeSession.lastSignalAt ?? activeSession.updatedAt}>
+                <SessionMessage role="assistant" icon="bot" title={t("sessions.progressTitle")} timestamp={activeSession.lastSignalAt ?? activeSession.updatedAt}>
                   <p>{sessionStatusCopy(activeSession)}</p>
                 </SessionMessage>
               ) : (
-                <SessionMessage role="assistant" icon="bot" title="대기" timestamp={activeTask?.updatedAt ?? null}>
-                  <p>아직 연결된 실행 세션이 없습니다. 실행이 시작되면 이 화면에 진행 이벤트가 누적됩니다.</p>
+                <SessionMessage role="assistant" icon="bot" title={t("sessions.waitingTitle")} timestamp={activeTask?.updatedAt ?? null}>
+                  <p>{t("sessions.noLinkedRun")}</p>
                 </SessionMessage>
               )}
               {activeApprovalCount > 0 ? (
-                <SessionMessage role="assistant" icon="bot" title="승인 요청" timestamp={activeSession?.lastSignalAt ?? activeTask?.updatedAt ?? null}>
+                <SessionMessage role="assistant" icon="bot" title={t("sessions.approvalTitle")} timestamp={activeSession?.lastSignalAt ?? activeTask?.updatedAt ?? null}>
                   <ApprovalInbox
                     compact
                     entityIds={activeApprovalEntityIds}
@@ -466,7 +466,7 @@ export function SessionsScreen({
                 </SessionMessage>
               ))}
               {summaryText && activeSession ? (
-                <SessionMessage icon="file" role="assistant" timestamp={activeSession.updatedAt} title="요약">
+                <SessionMessage icon="file" role="assistant" timestamp={activeSession.updatedAt} title={t("sessions.summaryTitle")}>
                   <div className="session-markdown">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryText.trim()}</ReactMarkdown>
                   </div>
@@ -489,13 +489,13 @@ export function SessionsScreen({
                   event.preventDefault();
                   void submitOrchestratorInstruction();
                 }}
-                placeholder="오케스트레이터에게 새 작업 지시..."
+                placeholder={t("sessions.composerPlaceholder")}
                 rows={2}
                 value={orchestratorInput}
               />
               <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
                 {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
-                <span>{orchestratorBusy ? "전송 중" : "보내기"}</span>
+                <span>{orchestratorBusy ? t("sessions.sending") : t("sessions.send")}</span>
               </button>
             </form>
           </>
@@ -503,15 +503,15 @@ export function SessionsScreen({
           <>
             <div className="session-chat-empty">
               <MessageSquare size={20} />
-              <h2>오케스트레이터와 대화하세요</h2>
-              <p>새 작업 지시를 보내거나, 세션을 선택해 상세 진행사항을 확인합니다.</p>
+              <h2>{t("sessions.emptyChat.title")}</h2>
+              <p>{t("sessions.emptyChat.description")}</p>
               {orchestratorMessages.map((message) => (
                 <SessionMessage
                   icon={message.role === "user" ? "user" : "bot"}
                   key={message.id}
                   role={message.role}
                   timestamp={null}
-                  title={message.role === "user" ? "요청" : "오케스트레이터"}
+                  title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
                 >
                   <p>{message.content}</p>
                 </SessionMessage>
@@ -533,13 +533,13 @@ export function SessionsScreen({
                   event.preventDefault();
                   void submitOrchestratorInstruction();
                 }}
-                placeholder="오케스트레이터에게 새 작업 지시..."
+                placeholder={t("sessions.composerPlaceholder")}
                 rows={2}
                 value={orchestratorInput}
               />
               <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
                 {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
-                <span>{orchestratorBusy ? "전송 중" : "보내기"}</span>
+                <span>{orchestratorBusy ? t("sessions.sending") : t("sessions.send")}</span>
               </button>
             </form>
           </>
@@ -558,7 +558,12 @@ export function SessionsScreen({
         <ContextRow label="Worktree" value={activeSession?.worktreePath ?? "-"} />
         <ContextRow label="Changed files" value={changedFileCountLabel(changedFiles, activeSession)} />
         <ContextRow label="Events" value={activeSession?.eventCount?.toString() ?? "0"} />
-        <ContextRow label="Obsidian" value={snapshot.settings.obsidianVaultPath ?? "미설정"} />
+        <ContextRow
+          className="path-value"
+          label="Obsidian"
+          value={snapshot.settings.obsidianVaultPath ?? "미설정"}
+          displayValue={compactHomePath(snapshot.settings.obsidianVaultPath)}
+        />
         <div className="session-context-section">
           <div className="session-context-section-title">
             <span>Changes</span>
@@ -780,11 +785,23 @@ function SessionMessage(props: {
   );
 }
 
-function ContextRow({ label, value }: { label: string; value: string }) {
+function ContextRow({
+  className,
+  displayValue,
+  label,
+  value,
+}: {
+  className?: string;
+  displayValue?: string;
+  label: string;
+  value: string;
+}) {
   return (
     <div className="session-context-row">
       <span>{label}</span>
-      <strong title={value}>{value}</strong>
+      <strong className={className} title={value}>
+        {displayValue ?? value}
+      </strong>
     </div>
   );
 }
@@ -818,6 +835,11 @@ function shortPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
   if (parts.length <= 2) return path || "/";
   return `.../${parts.slice(-2).join("/")}`;
+}
+
+function compactHomePath(path: string | null | undefined): string | undefined {
+  if (!path) return undefined;
+  return path.replace(/^\/Users\/[^/]+/, "~");
 }
 
 function shortTerminalId(value: string): string {

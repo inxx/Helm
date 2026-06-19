@@ -49,6 +49,7 @@ export interface ControlTowerProjectSummary {
 
 export interface AppSettings {
   version: number;
+  language: "en" | "ko";
   orchestrator: OrchestratorSettings;
 }
 

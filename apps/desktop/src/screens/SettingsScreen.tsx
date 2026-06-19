@@ -16,6 +16,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
+import { normalizeLanguage, useI18n, type AppLanguage } from "../lib/i18n";
 import { roleLabel, runnerReadinessFor } from "../lib/runnerReadiness";
 import { checkForManualUpdate, type ManualUpdateInfo } from "../lib/updater";
 import type {
@@ -37,6 +38,8 @@ interface SettingsScreenProps {
   snapshot: ProjectSnapshot | null;
   onRefresh: () => Promise<void>;
   onOpenProject: () => void;
+  appLanguage: AppLanguage;
+  onAppLanguageChange: (language: AppLanguage) => void;
 }
 
 type SettingsCategory =
@@ -51,23 +54,70 @@ type SettingsCategory =
   | "app"
   | "advanced";
 
-const CATEGORIES: Array<{
+const CATEGORY_META: Array<{
   id: SettingsCategory;
-  label: string;
-  hint: string;
   icon: typeof Layers;
 }> = [
-  { id: "orchestrator", label: "오케스트레이터", hint: "모든 프로젝트에 적용되는 지휘자 AI", icon: BrainCircuit },
-  { id: "templates", label: "Runner Templates", hint: "역할 프리셋과 AI CLI 연결을 한 번에 적용", icon: Layers },
-  { id: "connections", label: "AI CLI 연결", hint: "Codex · Claude Code · Gemini · 기타 LLM 경로", icon: Plug },
-  { id: "assignments", label: "작업별 CLI 선택", hint: "계획 · 구현 · 검수 · 테스트 매핑", icon: Workflow },
-  { id: "policies", label: "역할 정책", hint: "Role별 기본 정책 MD", icon: FileText },
-  { id: "usage", label: "통계 및 사용량", hint: "Agent 실행, 작업 시간, provider 분포", icon: BarChart3 },
-  { id: "jira", label: "Jira", hint: "프로젝트 키와 기본 이슈 타입", icon: CheckCircle2 },
-  { id: "worktree", label: "Worktree", hint: "병렬 작업 디렉터리 위치", icon: FolderTree },
-  { id: "app", label: "앱", hint: "Helm 업데이트 확인", icon: Info },
-  { id: "advanced", label: "고급", hint: "Role presets JSON · 기존 runner 확인", icon: Wrench },
+  { id: "orchestrator", icon: BrainCircuit },
+  { id: "templates", icon: Layers },
+  { id: "connections", icon: Plug },
+  { id: "assignments", icon: Workflow },
+  { id: "policies", icon: FileText },
+  { id: "usage", icon: BarChart3 },
+  { id: "jira", icon: CheckCircle2 },
+  { id: "worktree", icon: FolderTree },
+  { id: "app", icon: Info },
+  { id: "advanced", icon: Wrench },
 ];
+
+const CATEGORY_MESSAGE_KEYS: Record<
+  SettingsCategory,
+  {
+    label: Parameters<ReturnType<typeof useI18n>["t"]>[0];
+    hint: Parameters<ReturnType<typeof useI18n>["t"]>[0];
+  }
+> = {
+  orchestrator: {
+    label: "settings.category.orchestrator.label",
+    hint: "settings.category.orchestrator.hint",
+  },
+  templates: {
+    label: "settings.category.templates.label",
+    hint: "settings.category.templates.hint",
+  },
+  connections: {
+    label: "settings.category.connections.label",
+    hint: "settings.category.connections.hint",
+  },
+  assignments: {
+    label: "settings.category.assignments.label",
+    hint: "settings.category.assignments.hint",
+  },
+  policies: {
+    label: "settings.category.policies.label",
+    hint: "settings.category.policies.hint",
+  },
+  usage: {
+    label: "settings.category.usage.label",
+    hint: "settings.category.usage.hint",
+  },
+  jira: {
+    label: "settings.category.jira.label",
+    hint: "settings.category.jira.hint",
+  },
+  worktree: {
+    label: "settings.category.worktree.label",
+    hint: "settings.category.worktree.hint",
+  },
+  app: {
+    label: "settings.category.app.label",
+    hint: "settings.category.app.hint",
+  },
+  advanced: {
+    label: "settings.category.advanced.label",
+    hint: "settings.category.advanced.hint",
+  },
+};
 
 const ROLE_DEFINITIONS: Array<{
   roleId: RoleAssignment["roleId"];
@@ -85,8 +135,15 @@ const ROLE_DEFINITIONS: Array<{
 type MessageTone = "success" | "error" | "info";
 type ModelRefreshState = { busy: boolean; tone: MessageTone; message: string };
 
-export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsScreenProps) {
+export function SettingsScreen({
+  snapshot,
+  onRefresh,
+  onOpenProject,
+  appLanguage,
+  onAppLanguageChange,
+}: SettingsScreenProps) {
   const { showToast } = useToast();
+  const { t } = useI18n();
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>("orchestrator");
   const [appSettings, setAppSettings] = useState<AppSettings>(() => emptyAppSettings());
   const [appSettingsBusy, setAppSettingsBusy] = useState(false);
@@ -123,6 +180,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         const settings = await api.getAppSettings();
         if (!cancelled) {
           setAppSettings(normalizeAppSettings(settings));
+          onAppLanguageChange(normalizeLanguage(settings.language));
         }
       } catch (error) {
         if (!cancelled) {
@@ -143,7 +201,17 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     return () => {
       cancelled = true;
     };
-  }, [showToast]);
+  }, [onAppLanguageChange, showToast]);
+
+  const categories = useMemo(
+    () =>
+      CATEGORY_META.map((category) => ({
+        ...category,
+        label: t(CATEGORY_MESSAGE_KEYS[category.id].label),
+        hint: t(CATEGORY_MESSAGE_KEYS[category.id].hint),
+      })),
+    [t],
+  );
 
   useEffect(() => {
     if (!snapshot) return;
@@ -192,8 +260,11 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   }, [activeCategory, showToast, snapshot]);
 
   const visibleCategories = useMemo(
-    () => (snapshot ? CATEGORIES : CATEGORIES.filter((category) => category.id === "orchestrator" || category.id === "app")),
-    [snapshot],
+    () =>
+      snapshot
+        ? categories
+        : categories.filter((category) => category.id === "orchestrator" || category.id === "app"),
+    [categories, snapshot],
   );
 
   useEffect(() => {
@@ -260,16 +331,18 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     setAppSettingsBusy(true);
     try {
       const saved = await api.updateAppSettings(normalizeAppSettings(appSettings));
-      setAppSettings(normalizeAppSettings(saved));
+      const normalized = normalizeAppSettings(saved);
+      setAppSettings(normalized);
+      onAppLanguageChange(normalized.language);
       showToast({
         tone: "success",
-        title: "전역 오케스트레이터 저장 완료",
-        description: "모든 프로젝트에 적용될 지휘자 AI 설정을 저장했습니다.",
+        title: t("settings.toast.appSettingsSaved.title"),
+        description: t("settings.toast.appSettingsSaved.description"),
       });
     } catch (error) {
       showToast({
         tone: "error",
-        title: "전역 설정 저장 실패",
+        title: t("settings.toast.appSettingsFailed.title"),
         description: errorMessage(error, "전역 설정 저장에 실패했습니다."),
       });
     } finally {
@@ -278,7 +351,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   }
 
   async function saveActiveSettings() {
-    if (activeCategory === "orchestrator") {
+    if (activeCategory === "orchestrator" || activeCategory === "app") {
       await saveAppSettings();
       return;
     }
@@ -739,9 +812,16 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     setJiraConfig((current) => normalizeJiraConfig({ ...current, ...patch }));
   }
 
-  const activeMeta = visibleCategories.find((category) => category.id === activeCategory) ?? CATEGORIES[0];
-  const activeSaveBusy = activeCategory === "orchestrator" ? appSettingsBusy : busy;
-  const canSaveActiveSettings = activeCategory === "orchestrator" || (Boolean(snapshot) && activeCategory !== "app");
+  function updateAppLanguage(language: AppLanguage) {
+    setAppSettings((current) => normalizeAppSettings({ ...current, language }));
+    onAppLanguageChange(language);
+  }
+
+  const activeMeta = visibleCategories.find((category) => category.id === activeCategory) ?? categories[0];
+  const activeSaveBusy = activeCategory === "orchestrator" || activeCategory === "app" ? appSettingsBusy : busy;
+  const canSaveActiveSettings = activeCategory === "orchestrator" || activeCategory === "app" || Boolean(snapshot);
+  const activeSaveDisabled =
+    activeSaveBusy || ((activeCategory === "orchestrator" || activeCategory === "app") && !appSettingsLoaded);
   const orchestrator = appSettings.orchestrator;
   const orchestratorConnection = orchestrator.connection;
   const orchestratorModelList = orchestratorConnection?.availableModels ?? [];
@@ -793,11 +873,15 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
               {canSaveActiveSettings ? (
                 <button
                   className="primary-button"
-                  disabled={activeSaveBusy}
+                  disabled={activeSaveDisabled}
                   onClick={saveActiveSettings}
                   type="button"
                 >
-                  {activeSaveBusy ? "저장 중…" : activeCategory === "orchestrator" ? "전역 저장" : "저장"}
+                  {activeSaveBusy
+                    ? t("settings.save.saving")
+                    : activeCategory === "orchestrator" || activeCategory === "app"
+                      ? t("settings.save.global")
+                      : t("settings.save.default")}
                 </button>
               ) : null}
             </div>
@@ -1572,7 +1656,8 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                     onChange={(event) => setObsidianArtifactPath(event.target.value)}
                   />
                   <small className="muted">
-                    Obsidian 실행/계획 문서를 저장할 위치입니다. 상대 경로는 Vault 하위 경로로 해석하고, 비워두면 기존 <code>projects/&lt;project&gt;/desktop</code> 경로를 사용합니다.
+                    Obsidian 실행/계획 문서를 저장할 base 경로입니다. 상대 경로는 Vault 하위로, 절대경로는 그대로 사용합니다. 심링크 폴더를 지정해도 되고,
+                    비워두면 기존 <code>projects/&lt;project&gt;/desktop</code> 경로를 사용합니다.
                   </small>
                 </label>
               </section>
@@ -1581,38 +1666,57 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
             {activeCategory === "app" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
-                  <h3>앱 업데이트</h3>
-                  <p className="muted">자동 확인 대신 필요할 때 Helm updater를 수동으로 실행합니다.</p>
+                  <h3>{t("settings.app.language.title")}</h3>
+                  <p className="muted">{t("settings.app.language.description")}</p>
+                </div>
+                <label className="settings-field">
+                  <span>{t("settings.app.language.label")}</span>
+                  <select
+                    value={appLanguage}
+                    onChange={(event) => updateAppLanguage(normalizeLanguage(event.target.value))}
+                  >
+                    <option value="en">{t("settings.app.language.english")}</option>
+                    <option value="ko">{t("settings.app.language.korean")}</option>
+                  </select>
+                  <small className="muted">{t("settings.app.language.note")}</small>
+                </label>
+                <div className="settings-section-head">
+                  <h3>{t("settings.app.update.title")}</h3>
+                  <p className="muted">{t("settings.app.update.description")}</p>
                 </div>
                 {!snapshot ? (
                   <div className="settings-empty">
-                    <strong>프로젝트별 설정은 프로젝트를 연 뒤 표시됩니다.</strong>
-                    <span>전역 오케스트레이터와 앱 업데이트는 프로젝트 없이도 관리할 수 있습니다.</span>
+                    <strong>{t("settings.app.projectRequired.title")}</strong>
+                    <span>{t("settings.app.projectRequired.description")}</span>
                     <button className="secondary-button" onClick={onOpenProject} type="button">
-                      프로젝트 열기
+                      {t("settings.app.openProject")}
                     </button>
                   </div>
                 ) : null}
                 <div className="update-check-panel">
                   <div>
                     <strong>Helm</strong>
-                    <span>현재 버전 {currentVersion ?? "확인 전"}</span>
+                    <span>
+                      {t("settings.app.currentVersion", {
+                        version: currentVersion ?? t("settings.app.versionUnknown"),
+                      })}
+                    </span>
                   </div>
                   <button className="secondary-button" disabled={updaterBusy} onClick={checkUpdates} type="button">
                     <RefreshCw size={14} aria-hidden />
-                    {updaterBusy ? "확인 중…" : "업데이트 확인"}
+                    {updaterBusy ? t("settings.app.checking") : t("settings.app.checkUpdates")}
                   </button>
                 </div>
                 {pendingUpdate ? (
                   <article className="update-card">
                     <div>
-                      <strong>새 버전 {pendingUpdate.version}</strong>
-                      <span>{pendingUpdate.date ? formatDate(pendingUpdate.date) : "배포일 정보 없음"}</span>
+                      <strong>{t("settings.app.newVersion", { version: pendingUpdate.version })}</strong>
+                      <span>{pendingUpdate.date ? formatDate(pendingUpdate.date) : t("settings.app.noReleaseDate")}</span>
                     </div>
                     {pendingUpdate.body ? <p>{pendingUpdate.body}</p> : null}
                     <button className="primary-button" disabled={updaterBusy} onClick={installUpdate} type="button">
                       <Download size={14} aria-hidden />
-                      다운로드 및 설치
+                      {t("settings.app.install")}
                     </button>
                   </article>
                 ) : null}
@@ -1859,6 +1963,7 @@ function ModelListSkeleton() {
 function emptyAppSettings(): AppSettings {
   return {
     version: 1,
+    language: "en",
     orchestrator: emptyOrchestratorSettings(),
   };
 }
@@ -1877,6 +1982,7 @@ function normalizeAppSettings(value: unknown): AppSettings {
   const record = value as Partial<AppSettings>;
   return {
     version: 1,
+    language: normalizeLanguage(record.language),
     orchestrator: normalizeOrchestratorSettings(record.orchestrator),
   };
 }

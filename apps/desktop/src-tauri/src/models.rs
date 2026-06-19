@@ -82,6 +82,8 @@ pub struct EffectiveSettings {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub version: u32,
+    #[serde(default = "default_app_language")]
+    pub language: String,
     pub orchestrator: OrchestratorSettings,
 }
 
@@ -92,6 +94,10 @@ pub struct OrchestratorSettings {
     pub mode: String,
     pub connection: Option<Value>,
     pub model: Option<String>,
+}
+
+fn default_app_language() -> String {
+    "en".to_string()
 }
 
 #[derive(Debug, Serialize)]

@@ -1,7 +1,8 @@
-import { Plus, Trash2 } from "lucide-react";
+import { SquarePen, Trash2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { shortenPath, type RecentProject } from "@/lib/recents";
 
@@ -38,9 +39,11 @@ export function AppShell<T extends string>({
   hideSidebar = false,
   children,
 }: AppShellProps<T>) {
+  const { t } = useI18n();
+
   return (
     <div className="app-shell">
-      <header className="app-topbar" role="tablist" aria-label="도메인 탭">
+      <header className="app-topbar" role="tablist" aria-label={t("shell.domainTabs")}>
         <div className="app-topbar-brand">
           <span className="brand-mark">H</span>
           <span className="brand-name">Helm</span>
@@ -70,9 +73,9 @@ export function AppShell<T extends string>({
         {!hideSidebar && (
         <aside className="sidebar">
           <div className="sidebar-projects">
-            <h3 className="sidebar-title">프로젝트</h3>
+            <h3 className="sidebar-title">{t("shell.projects")}</h3>
             {recents.length === 0 ? (
-              <p className="sidebar-empty">아직 열린 프로젝트가 없습니다.</p>
+              <p className="sidebar-empty">{t("shell.noProjects")}</p>
             ) : (
               <ul className="sidebar-project-list">
                 {recents.map((project) => {
@@ -101,8 +104,8 @@ export function AppShell<T extends string>({
                         disabled={busy}
                         onClick={() => onForgetProject(project.id)}
                         className="sidebar-project-delete"
-                        title="프로젝트 목록에서 삭제"
-                        aria-label={`${project.name} 프로젝트 목록에서 삭제`}
+                        title={t("shell.removeProjectTitle")}
+                        aria-label={t("shell.removeProjectAria", { name: project.name })}
                       >
                         <Trash2 size={14} aria-hidden="true" />
                       </Button>
@@ -122,8 +125,8 @@ export function AppShell<T extends string>({
               onClick={onOpenProject}
               className="sidebar-add-project"
             >
-              <Plus size={14} aria-hidden="true" />
-              <span>{busy ? "처리 중" : "프로젝트 추가"}</span>
+              <SquarePen size={14} aria-hidden="true" />
+              <span>{busy ? t("shell.processing") : t("shell.addProject")}</span>
             </Button>
           </div>
         </aside>
