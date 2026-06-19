@@ -348,8 +348,30 @@ fn update_app_settings(settings: AppSettings, app: AppHandle) -> CommandResult<A
 fn get_project_snapshot(
     project_id: String,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> CommandResult<ProjectSnapshot> {
-    let context = project_context(&state, &project_id)?;
+    let context = match project_context(&state, &project_id) {
+        Ok(context) => context,
+        Err(err) if err.code == "ProjectNotOpen" => {
+            let stored = load_stored_launch_state(&app)?;
+            let root_path = stored
+                .recent_projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .map(|project| project.root_path.clone())
+                .or_else(|| {
+                    if stored.active_project_id.as_deref() == Some(project_id.as_str()) {
+                        stored.active_project_root_path.clone()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or(err)?;
+            open_project_from_path(Path::new(&root_path), &state, false)?;
+            project_context(&state, &project_id)?
+        }
+        Err(err) => return Err(err),
+    };
     let conn = db::open_existing_db(&context.db_path)?;
     let project = db::get_project(&conn, &project_id)?;
     project_snapshot(&conn, &context.root_path, project)
