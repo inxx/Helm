@@ -220,6 +220,7 @@ h3 {
    ============================================================ */
 
 .app-shell {
+  --app-sidebar-width: 232px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   width: 100%;
@@ -241,7 +242,7 @@ h3 {
 
 .app-topbar-brand {
   display: flex;
-  flex: 0 0 232px;
+  flex: 0 0 var(--app-sidebar-width);
   align-items: center;
   gap: 10px;
   border-right: 1px solid var(--border);
@@ -294,7 +295,7 @@ h3 {
 
 .app-body {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -5561,7 +5562,7 @@ textarea {
 
 .settings-body {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
@@ -5570,7 +5571,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  border-right: 1px solid var(--line);
+  border-right: 1px solid var(--border);
   background: var(--surface-2);
   padding: 14px 12px;
   overflow-y: auto;
@@ -8875,7 +8876,7 @@ textarea {
   }
 
   .settings-body {
-    grid-template-columns: 200px minmax(0, 1fr);
+    grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr);
   }
 
   .terminal-controls {
