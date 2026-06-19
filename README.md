@@ -1,187 +1,174 @@
 # Helm
 
-**Helm is a local desktop control plane for AI software work.**
+**A local-first desktop control plane for AI coding agents.**
 
-It is designed for developers who already use agents such as Codex, Claude, or Gemini, but do not want a loose pile of chats, terminal logs, diffs, and half-remembered decisions. Helm turns AI-assisted development into a visible workflow: plan the work, run the right role, inspect the result, approve the next step, and keep an audit trail beside the repository.
+Helm helps you run AI-assisted software work like an accountable engineering workflow, not a pile of chat tabs. It gives each task a clear plan, role-based agent runs, isolated worktrees, captured artifacts, Git evidence, approvals, and an audit trail that lives with your local repository.
 
-Helm is not another chat box. It is the deterministic layer around AI agents.
+If you have ever asked Claude, Codex, Gemini, or another coding agent to work on the same project and then lost track of what changed, why it changed, which branch it touched, or whether the result was reviewed, Helm is built for that gap.
 
-```text
-AI agents produce work
-Helm records the result
-Helm decides the allowed next state
-The user approves the important transitions
-```
+> Helm is not Kubernetes Helm. The CLI is named `inxx-helm` to avoid binary conflicts.
 
-## Why Helm
+## Why Helm Exists
 
-AI coding tools are powerful, but the workflow around them is still fragile:
+AI coding tools are powerful, but most workflows still rely on humans to manually coordinate:
 
-- Plans live in chat history instead of the project.
-- Reviews, test results, and decisions are hard to trace later.
-- Multiple agents can step on each other without clear ownership.
-- Git state is often trusted from agent summaries instead of inspected directly.
-- Human approval gates are informal, inconsistent, or missing.
+- Which task is being worked on
+- Which agent role should run next
+- Whether the plan was approved
+- Which files actually changed
+- Whether review and test gates passed
+- What evidence supports a merge decision
 
-Helm is being built to make that workflow explicit.
-
-## What Helm Does
-
-Helm manages AI development work around a local repository:
-
-- Task and epic tracking for local development work
-- Role-based agent runs such as planner, coder, reviewer, verifier, and tester
-- Approval gates before sensitive transitions
-- Repo-local SQLite state in `.helm/helm.sqlite`
-- Artifact storage under `.helm/artifacts`
-- Read-only Git status from the backend, not from agent claims
-- Audit logs for runs, approvals, and task state changes
-- A Tauri desktop app with React, TypeScript, Rust, and SQLite
-
-The long-term goal is a local operating console for AI-assisted software teams: tasks, agents, Git, terminals, artifacts, approvals, and project memory in one place.
-
-## Current Status
-
-Helm is under active development.
-
-The repository currently contains two layers:
-
-- `apps/desktop/`: the new Tauri desktop app and the future main product
-- `src/`: the legacy Node.js CLI prototype kept as a reference implementation
-
-The desktop app is the primary direction. The legacy CLI is useful for understanding early experiments around Git status, session artifacts, agent binary resolution, safe commits, and PR flows, but it is not the foundation for the new product.
-
-## Product Roadmap
-
-Helm is intentionally being built in small vertical slices.
+Helm turns that coordination into a deterministic local app. Agents produce outputs; Helm owns the state machine, approvals, Git inspection, artifacts, and next-step control.
 
 ```text
-Phase 1: Open a project, create repo-local DB, show task and Git skeletons
-Phase 2: Stub role runs, approvals, audit log, and state transitions
-Phase 3a: Task worktrees and a single local Codex/Claude host run
-Phase 3b: Docker-based observer for execution evidence and audit support
-Phase 3c: Reviewer, verifier, tester chain with gate results
-Phase 4+: Git graph, terminal workspace, Jira, Slack, backup, recovery
+Human approves plan
+-> Helm prepares context and task worktree
+-> Agent performs one role
+-> Helm captures stdout, stderr, diff, changed files, and structured result
+-> Helm decides whether the next role is allowed
+-> Human keeps final approval authority
 ```
 
-The first real success target is small but important: one local task can move from plan to execution to review to approval with traceable artifacts and Git evidence.
+## What You Can Do Today
 
-## Desktop App
+The active product is the Tauri desktop app in `apps/desktop`.
 
-The desktop app lives in `apps/desktop`.
+- Open a local Git project
+- Create and track epics, tasks, approvals, and external references
+- Store project state in repo-local SQLite under `.helm/`
+- Inspect read-only Git status and task worktree changes
+- Prepare role-specific context packs for planner, coder, verifier, reviewer, and tester runs
+- Run configured local host commands for agent roles
+- Capture run artifacts including summary, structured result, logs, diffs, and changed files
+- Enforce simple gate behavior before task status transitions
+- Cancel, retry, and inspect role runs
+- Use a terminal surface for project or task worktree commands
+- Review task evidence through audit and timeline views
 
-### Requirements
+The older Node CLI remains in `src/` as a reference implementation for Git status, session artifacts, safe commit, and PR flow experiments.
 
-- Node.js 25+
-- Rust stable
-- Tauri v2 prerequisites for your platform
+## Product Direction
 
-### Install
+Helm is aiming to become the local operating console for AI engineering work:
+
+- Task planning and approval before code starts
+- Role-based AI execution: planner, coder, plan verifier, code reviewer, tester
+- Task-scoped Git worktrees
+- Artifact-first run history
+- Gate checks based on real Git diffs and command results
+- Merge readiness and human approval
+- Obsidian, Jira, Slack, and terminal workflows after the core loop is solid
+- Local-first storage and explicit user control by default
+
+The goal is not full autonomy. The goal is controlled acceleration: agents can move fast, but Helm keeps the workflow inspectable, replayable, and accountable.
+
+## Architecture
+
+```text
+Desktop app      Tauri v2 + React + TypeScript
+Backend          Rust command layer
+Local state      SQLite in repo/.helm/helm.sqlite
+Git integration  git CLI, task worktrees, diff/status inspection
+Runner           Host commands for local Claude/Codex/Gemini-style CLIs
+Artifacts        Markdown, JSON, logs, diffs, changed-file manifests
+Terminal         xterm.js-based desktop terminal surface
+```
+
+Core principle: the frontend does not get generic shell authority. Git state, command execution, task transitions, and approvals are owned by the backend command layer.
+
+## Getting Started
+
+### Desktop app
 
 ```bash
 cd apps/desktop
 npm install
-```
-
-### Run Development Build
-
-```bash
 npm run dev
 ```
 
-This builds the React app and serves the compiled desktop frontend for local development.
-
-### Typecheck and Build
+For a production-style build check:
 
 ```bash
-npm run typecheck
+cd apps/desktop
 npm run build
-```
-
-### Tests
-
-```bash
 npm test
 ```
 
-## Legacy CLI
+### Legacy CLI
 
-The legacy CLI remains at the repository root.
-
-### Requirements
-
-- Node.js 25+
-
-### Commands
+The legacy CLI requires Node.js 25 or newer because it uses Node's TypeScript type stripping.
 
 ```bash
+npm install
 npm run check
 node src/cli.ts --help
-node src/cli.ts agents
-node src/cli.ts run --agent codex --dry-run "Summarize this repository"
 node src/cli.ts status
-node src/cli.ts show <session>
-node src/cli.ts commit <session> --check "npm run check" -m "Fix failing tests"
-node src/cli.ts pr <session> --dry-run --base main --title "Fix failing tests"
-node src/cli.ts ui
 ```
 
-You can also link the CLI locally:
+You can link the CLI locally as `inxx-helm`:
 
 ```bash
 npm link
 inxx-helm --help
 ```
 
-The binary is named `inxx-helm` to avoid conflicting with Kubernetes Helm.
-
-## Repository Layout
+## Repo Layout
 
 ```text
-Helm/
-  apps/
-    desktop/          # Tauri + React desktop app
-  docs/               # Product design and implementation plans
-  scripts/            # Local automation and sync helpers
-  src/                # Legacy Node CLI prototype
-  test/               # Legacy CLI tests
+apps/desktop/  Tauri desktop app
+src/           Legacy Node CLI reference
+docs/          Product plans, architecture notes, and phase contracts
+test/          Legacy CLI tests
+.helm/         Local runtime state, ignored by Git
 ```
 
-## Design Principles
-
-- Helm is deterministic; agents are workers, not orchestrators.
-- AI agents do not directly call other AI agents.
-- Git state comes from the backend reading the repository.
-- Planning approval and merge approval are explicit user decisions.
-- The frontend does not get generic shell execution access.
-- Repo-local metadata stays under `.helm/` and should not be committed.
-- Real multi-agent execution starts only after worktree isolation, artifacts, audit logs, and cancellation are reliable.
-
-## Key Docs
+Start with these docs if you want to understand the product model:
 
 - [Orchestrator Design](docs/orchestrator-design.md)
-- [Phase 0-1 Implementation Plan](docs/phase-0-1-implementation-plan.md)
-- [Phase 1-2 User Flow](docs/phase-1-2-user-flow.md)
-- [Phase 2 Implementation Plan](docs/phase-2-implementation-plan.md)
+- [Core Loop Completion Plan](docs/core-loop-completion-plan.md)
 - [Phase 3a Implementation Plan](docs/phase-3a-implementation-plan.md)
-- [Executable Planning Contract](docs/executable-planning-contract.md)
 - [Role Artifact Contract](docs/role-artifact-contract.md)
-- [Hermes Local API Guide](docs/hermes-local-api-guide.md)
+- [Executable Planning Contract](docs/executable-planning-contract.md)
 
-## Project Philosophy
+## Roadmap
 
-Helm is built around a simple belief: AI coding becomes more useful when the surrounding workflow is more explicit.
+- Close the full task core loop from planning to `MergeWaiting`
+- Strengthen reviewer and tester gate contracts
+- Add merge readiness, merge approval, and safer branch operations
+- Improve run search, pinned sessions, and usage reporting
+- Add workflow presets for repeatable checks and agent runs
+- Expand integrations only after the local core loop is reliable
 
-The product should make it obvious:
+## Configuration
 
-- what is being worked on,
-- who or what produced each artifact,
-- what changed in Git,
-- which gate is blocking progress,
-- what the user approved,
-- and why the final change exists.
+The legacy CLI reads optional repo-local settings from `.helm/config.json`.
 
-That is the layer Helm is trying to provide.
+```json
+{
+  "agentBinaries": {
+    "codex": "/opt/homebrew/bin/codex",
+    "claude": "/opt/homebrew/bin/claude",
+    "gemini": "/opt/homebrew/bin/gemini"
+  },
+  "defaultCheckCommand": "npm run check",
+  "prBaseBranch": "main"
+}
+```
+
+CLI flags and environment variables override this file.
+
+## Contributing
+
+Helm is still early, and the most valuable contributions are the ones that make agent work safer and easier to inspect:
+
+- Smaller, clearer state transitions
+- Better run artifacts
+- Better Git evidence
+- Better failure and retry UX
+- Tests that protect the task execution loop
+
+If the idea of a local, auditable control plane for AI coding agents is useful to you, a star helps the project reach more developers who are trying to make agentic coding workflows less chaotic.
 
 ## License
 

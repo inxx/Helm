@@ -1,4 +1,4 @@
-import { Plus, Trash2 } from "lucide-react";
+import { SquarePen, Trash2 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -125,7 +125,7 @@ export function AppShell<T extends string>({
               onClick={onOpenProject}
               className="sidebar-add-project"
             >
-              <Plus size={14} aria-hidden="true" />
+              <SquarePen size={14} aria-hidden="true" />
               <span>{busy ? t("shell.processing") : t("shell.addProject")}</span>
             </Button>
           </div>
