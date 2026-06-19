@@ -16,6 +16,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
+import { useI18n, type AppLanguage } from "../lib/i18n";
 import { roleLabel, runnerReadinessFor } from "../lib/runnerReadiness";
 import { checkForManualUpdate, type ManualUpdateInfo } from "../lib/updater";
 import type {
@@ -86,6 +87,7 @@ type MessageTone = "success" | "error" | "info";
 type ModelRefreshState = { busy: boolean; tone: MessageTone; message: string };
 
 export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsScreenProps) {
+  const { language, t } = useI18n();
   const { showToast } = useToast();
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>("orchestrator");
   const [appSettings, setAppSettings] = useState<AppSettings>(() => emptyAppSettings());
@@ -807,33 +809,33 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
             {activeCategory === "orchestrator" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
-                  <h3>전역 오케스트레이터</h3>
-                  <p className="muted">
-                    다음 단계 복구는 Helm supervisor가 맡고, 지휘자 AI는 queued run 시작 전 기록 또는 확인만 맡습니다.
-                  </p>
+                  <h3>{t("settings.orchestrator.title")}</h3>
+                  <p className="muted">{t("settings.orchestrator.description")}</p>
                 </div>
                 {!appSettingsLoaded ? (
-                  <p className="settings-empty">전역 설정을 불러오는 중입니다.</p>
+                  <p className="settings-empty">{t("settings.orchestrator.loading")}</p>
                 ) : (
                   <>
                     <div className="runner-onboarding-panel">
                       <div className="runner-onboarding-summary">
                         <div>
-                          <strong>적용 범위</strong>
-                          <span>이 설정은 현재 프로젝트가 아니라 Helm 앱 전체에 저장됩니다.</span>
+                          <strong>{t("settings.orchestrator.scope.title")}</strong>
+                          <span>{t("settings.orchestrator.scope.description")}</span>
                         </div>
                         <span className={orchestrator.enabled && orchestratorConnection ? "check-pass" : "check-info"}>
-                          {orchestrator.enabled && orchestratorConnection ? "전역 적용" : "꺼짐"}
+                          {orchestrator.enabled && orchestratorConnection
+                            ? t("settings.orchestrator.scope.enabled")
+                            : t("settings.orchestrator.scope.disabled")}
                         </span>
                       </div>
                     </div>
 
                     {canImportLegacyConductor ? (
                       <div className="settings-empty">
-                        <strong>현재 프로젝트에 기존 지휘자 설정이 있습니다.</strong>
-                        <span>전역 오케스트레이터로 가져오면 다른 프로젝트에서도 같은 설정을 사용합니다.</span>
+                        <strong>{t("settings.orchestrator.import.title")}</strong>
+                        <span>{t("settings.orchestrator.import.description")}</span>
                         <button className="secondary-button" onClick={importLegacyConductor} type="button">
-                          전역으로 가져오기
+                          {t("settings.orchestrator.import.button")}
                         </button>
                       </div>
                     ) : null}
@@ -846,7 +848,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                         type="checkbox"
                       />
                       <span className="toggle-switch-track" aria-hidden />
-                      <span className="toggle-switch-label">오케스트레이터 사용</span>
+                      <span className="toggle-switch-label">{t("settings.orchestrator.enabled")}</span>
                     </label>
 
                     <div className="settings-actions">
@@ -856,7 +858,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                         onClick={() => setOrchestratorConnectionProvider("codex")}
                         type="button"
                       >
-                        Codex 사용
+                        {t("settings.orchestrator.useCodex")}
                       </button>
                       <button
                         className="secondary-button"
@@ -864,7 +866,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                         onClick={() => setOrchestratorConnectionProvider("claude")}
                         type="button"
                       >
-                        Claude Code 사용
+                        {t("settings.orchestrator.useClaude")}
                       </button>
                       <button
                         className="secondary-button"
@@ -872,7 +874,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                         onClick={() => setOrchestratorConnectionProvider("gemini")}
                         type="button"
                       >
-                        Gemini 사용
+                        {t("settings.orchestrator.useGemini")}
                       </button>
                       <button
                         className="secondary-button"
@@ -880,12 +882,12 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                         onClick={() => setOrchestratorConnectionProvider("custom")}
                         type="button"
                       >
-                        기타 CLI 사용
+                        {t("settings.orchestrator.useCustom")}
                       </button>
                     </div>
 
                     {!orchestratorConnection ? (
-                      <p className="settings-empty">오케스트레이터에 사용할 AI CLI를 선택하세요.</p>
+                      <p className="settings-empty">{t("settings.orchestrator.selectCli")}</p>
                     ) : (
                       <article
                         aria-busy={orchestratorCheckBusy || orchestratorModelRefresh?.busy ? true : undefined}
@@ -898,28 +900,32 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                         <div className="connection-card-header">
                           <div>
                             <strong>{orchestratorConnection.label}</strong>
-                            <p className="muted">전역 지휘자 AI 연결</p>
+                            <p className="muted">{t("settings.orchestrator.connection.subtitle")}</p>
                           </div>
                           <div className="connection-card-meta">
-                            <span className="provider-pill">{providerLabel(orchestratorConnection.provider)}</span>
+                            <span className="provider-pill">{providerLabel(orchestratorConnection.provider, language)}</span>
                             {orchestratorCheck ? (
                               <span className={orchestratorCheck.available ? "check-pass" : "check-fail"}>
-                                {orchestratorCheck.available ? "프롬프트 OK" : "확인 필요"}
+                                {orchestratorCheck.available
+                                  ? t("settings.orchestrator.promptOk")
+                                  : t("settings.orchestrator.checkRequired")}
                               </span>
                             ) : null}
-                            {orchestratorModelRefresh?.busy ? <span className="check-info">모델 확인 중</span> : null}
+                            {orchestratorModelRefresh?.busy ? (
+                              <span className="check-info">{t("settings.orchestrator.modelChecking")}</span>
+                            ) : null}
                           </div>
                         </div>
                         <div className="connection-fields">
                           <label>
-                            <span>이름</span>
+                            <span>{t("settings.connection.name")}</span>
                             <input
                               value={orchestratorConnection.label}
                               onChange={(event) => updateOrchestratorConnection({ label: event.target.value })}
                             />
                           </label>
                           <label>
-                            <span>LLM 경로</span>
+                            <span>{t("settings.connection.cliPath")}</span>
                             <input
                               placeholder={cliPathPlaceholder(orchestratorConnection.provider)}
                               value={connectionCliPath(orchestratorConnection)}
@@ -927,7 +933,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                             />
                           </label>
                           <label>
-                            <span>기본 모델</span>
+                            <span>{t("settings.connection.defaultModel")}</span>
                             <input
                               placeholder={defaultModelPlaceholder(orchestratorConnection.provider)}
                               value={orchestratorConnection.defaultModel ?? ""}
@@ -939,12 +945,12 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                             />
                           </label>
                           <label aria-busy={orchestratorModelRefresh?.busy ? true : undefined}>
-                            <span>모델 목록</span>
+                            <span>{t("settings.connection.modelList")}</span>
                             {showOrchestratorModelSkeleton ? (
                               <ModelListSkeleton />
                             ) : (
                               <input
-                                placeholder="쉼표로 구분"
+                                placeholder={t("settings.connection.commaSeparated")}
                                 value={orchestratorModelList.join(", ")}
                                 onChange={(event) =>
                                   updateOrchestratorConnection({
@@ -955,22 +961,22 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                             )}
                           </label>
                           <label>
-                            <span>모드</span>
+                            <span>{t("settings.connection.mode")}</span>
                             <select
                               value={orchestrator.mode}
                               onChange={(event) => updateOrchestrator({ mode: event.target.value })}
                             >
-                              <option value="observe">기록만</option>
-                              <option value="gate">실행 전 확인</option>
+                              <option value="observe">{t("settings.connection.modeObserve")}</option>
+                              <option value="gate">{t("settings.connection.modeGate")}</option>
                             </select>
                           </label>
                           <label>
-                            <span>사용 모델</span>
+                            <span>{t("settings.connection.selectedModel")}</span>
                             <select
                               value={orchestrator.model ?? ""}
                               onChange={(event) => updateOrchestrator({ model: event.target.value.trim() || null })}
                             >
-                              <option value="">CLI 기본 모델</option>
+                              <option value="">{t("settings.connection.cliDefaultModel")}</option>
                               {modelOptions(orchestratorConnection, orchestrator.model ?? "").map((model) => (
                                 <option key={model} value={model}>
                                   {model}
@@ -979,7 +985,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                             </select>
                           </label>
                           <label className="connection-env-field">
-                            <span>환경 변수</span>
+                            <span>{t("settings.connection.env")}</span>
                             <textarea
                               placeholder={envPlaceholder(orchestratorConnection.provider)}
                               rows={3}
@@ -993,7 +999,8 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                           </label>
                         </div>
                         <code className="command-preview">
-                          확인/계획: {(orchestratorConnection.planningCommandArgs ?? []).join(" ") || "command 없음"}
+                          {t("settings.connection.planCommand")}:{" "}
+                          {(orchestratorConnection.planningCommandArgs ?? []).join(" ") || t("settings.connection.noCommand")}
                         </code>
                         {orchestratorCheck?.message ? <p className="muted">{orchestratorCheck.message}</p> : null}
                         {orchestratorCheck?.modelRefreshMessage ? (
@@ -1022,7 +1029,9 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                                 size={14}
                                 aria-hidden
                               />
-                              {orchestratorModelRefresh?.busy ? "불러오는 중..." : "모델 불러오기"}
+                              {orchestratorModelRefresh?.busy
+                                ? t("settings.connection.loadingModels")
+                                : t("settings.connection.loadModels")}
                             </button>
                           ) : null}
                           <button
@@ -1037,7 +1046,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                             type="button"
                           >
                             {orchestratorCheckBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
-                            {orchestratorCheckBusy ? "확인 중..." : "연동 확인"}
+                            {orchestratorCheckBusy ? t("settings.connection.checking") : t("settings.connection.check")}
                           </button>
                           <button
                             className="secondary-button danger"
@@ -1045,7 +1054,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                             onClick={clearOrchestratorConnection}
                             type="button"
                           >
-                            연결 제거
+                            {t("settings.connection.remove")}
                           </button>
                         </div>
                       </article>
@@ -1183,7 +1192,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                                 <span className="toggle-switch-label">{connection.label}</span>
                               </label>
                               <div className="connection-card-meta">
-                                <span className="provider-pill">{providerLabel(connection.provider)}</span>
+                                <span className="provider-pill">{providerLabel(connection.provider, language)}</span>
                                 {check ? (
                                   <span className={check.available ? "check-pass" : "check-fail"}>
                                     {check.available ? "프롬프트 OK" : "확인 필요"}
@@ -2181,11 +2190,11 @@ function modelOptions(connection: AiConnection, selectedModel: string): string[]
   );
 }
 
-function providerLabel(provider: string): string {
+function providerLabel(provider: string, language: AppLanguage = "en"): string {
   if (provider === "codex") return "Codex";
   if (provider === "claude") return "Claude Code";
   if (provider === "gemini") return "Gemini";
-  if (provider === "custom") return "기타";
+  if (provider === "custom") return language === "ko" ? "기타" : "Custom";
   if (provider === "fixture") return "Fixture";
   return provider;
 }

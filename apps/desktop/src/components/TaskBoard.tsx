@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef } from "react";
 import { deriveRunLiveState, isRunActiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
 import { roleLabel } from "../lib/runnerReadiness";
-import { TASK_STATUS_LABEL, TASK_STATUS_ORDER } from "../lib/status";
+import { TASK_STATUS_ORDER } from "../lib/status";
 import type { AgentRunSummary, TaskStatus, TaskSummary } from "../lib/types";
+import { useI18n } from "../lib/i18n";
 
 type StageTone = "idle" | "ready" | "active" | "review" | "done" | "blocked";
 
@@ -72,17 +73,30 @@ const COLUMN_HINT: Record<TaskStatus, string> = {
   Blocked: "needs decision",
 };
 
-const EMPTY_COLUMN_COPY: Record<TaskStatus, string> = {
-  Planned: "새 계획 후보가 들어오면 여기에 쌓입니다.",
-  Ready: "승인된 계획이 구현 대기 상태로 이동합니다.",
-  Coding: "실행 중인 구현 작업이 여기에 표시됩니다.",
-  PlanVerification: "구현 diff가 계획과 맞는지 확인하는 단계입니다.",
-  CodeReview: "품질과 위험을 검토할 작업이 들어옵니다.",
-  Testing: "테스트 검증이 필요한 작업이 들어옵니다.",
-  MergeWaiting: "모든 gate를 통과한 작업이 merge 결정을 기다립니다.",
-  Merged: "브랜치가 반영된 작업이 표시됩니다.",
-  Done: "완전히 닫힌 작업이 표시됩니다.",
-  Blocked: "사용자 결정이나 추가 입력이 필요한 작업이 표시됩니다.",
+const STATUS_MESSAGE_KEYS: Record<TaskStatus, Parameters<ReturnType<typeof useI18n>["t"]>[0]> = {
+  Planned: "tasks.status.Planned",
+  Ready: "tasks.status.Ready",
+  Coding: "tasks.status.Coding",
+  PlanVerification: "tasks.status.PlanVerification",
+  CodeReview: "tasks.status.CodeReview",
+  Testing: "tasks.status.Testing",
+  MergeWaiting: "tasks.status.MergeWaiting",
+  Merged: "tasks.status.Merged",
+  Done: "tasks.status.Done",
+  Blocked: "tasks.status.Blocked",
+};
+
+const EMPTY_COLUMN_MESSAGE_KEYS: Record<TaskStatus, Parameters<ReturnType<typeof useI18n>["t"]>[0]> = {
+  Planned: "tasks.column.Planned.empty",
+  Ready: "tasks.column.Ready.empty",
+  Coding: "tasks.column.Coding.empty",
+  PlanVerification: "tasks.column.PlanVerification.empty",
+  CodeReview: "tasks.column.CodeReview.empty",
+  Testing: "tasks.column.Testing.empty",
+  MergeWaiting: "tasks.column.MergeWaiting.empty",
+  Merged: "tasks.column.Merged.empty",
+  Done: "tasks.column.Done.empty",
+  Blocked: "tasks.column.Blocked.empty",
 };
 
 interface TaskBoardProps {
@@ -94,6 +108,7 @@ interface TaskBoardProps {
 }
 
 export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, projectLabels }: TaskBoardProps) {
+  const { t } = useI18n();
   const tasksByStatus = groupTasksByStatus(tasks);
   const boardRef = useRef<HTMLDivElement | null>(null);
   const focusStatus = useMemo(
@@ -117,7 +132,7 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
           <section className="task-column" data-status={status} data-tone={columnTone} key={status}>
             <header className="task-column-header">
               <div>
-                <span>{TASK_STATUS_LABEL[status]}</span>
+                <span>{t(STATUS_MESSAGE_KEYS[status])}</span>
                 <small>{COLUMN_HINT[status]}</small>
               </div>
               <strong>{columnTasks.length}</strong>
@@ -126,15 +141,15 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
               {columnTasks.length === 0 ? (
                 <div className="task-column-empty">
                   <strong>{stage.label}</strong>
-                  <span>{EMPTY_COLUMN_COPY[status]}</span>
+                  <span>{t(EMPTY_COLUMN_MESSAGE_KEYS[status])}</span>
                 </div>
               ) : null}
               {columnTasks.map((task) => {
                 const externalRef = task.externalRefs[0];
                 const activeRun = activeRunForTask(taskRuns[task.id] ?? []);
                 const flowLabel = activeRun ? runFlowLabel(activeRun) : stage.next;
-                const flowCaption = activeRun ? "run" : "next";
-                const taskAriaLabel = taskCardAriaLabel(task, activeRun, flowLabel);
+                const flowCaption = activeRun ? t("tasks.card.run") : t("tasks.card.next");
+                const taskAriaLabel = taskCardAriaLabel(task, activeRun, flowLabel, t);
                 const projectLabel = projectLabels?.[task.projectId];
                 return (
                   <button
@@ -162,7 +177,7 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
                             <span className="task-card-run-model"> · {runnerModelLabel(activeRun)}</span>
                           ) : null}
                         </strong>
-                        <small>{runHint(activeRun)}</small>
+                        <small>{runHint(activeRun, t)}</small>
                       </div>
                     ) : null}
                     <div className="task-card-flow">
@@ -196,14 +211,14 @@ function runFlowLabel(run: AgentRunSummary): string {
   return `${roleLabel(run.roleId)} · ${live.label}`;
 }
 
-function runHint(run: AgentRunSummary): string {
+function runHint(run: AgentRunSummary, t: ReturnType<typeof useI18n>["t"]): string {
   const live = deriveRunLiveState(run);
   if (live.state === "running") return live.summary;
-  if (live.state === "approval_pending") return "승인 전에는 다음 단계로 진행하지 않습니다.";
+  if (live.state === "approval_pending") return t("tasks.run.approvalPending");
   if (live.state === "quiet" || live.state === "stalled_candidate") return `${live.summary} · ${live.ageLabel}`;
   if (live.state === "queued" || live.state === "starting") return live.summary;
-  if (run.failureKind) return humanizedFailureReason(run) ?? `${failureKindLabel(run.failureKind)} · 재시도 가능`;
-  return live.summary || (run.resultStatus ? `${run.resultStatus} · 재시도 가능` : "상세에서 근거 확인");
+  if (run.failureKind) return humanizedFailureReason(run, t) ?? `${failureKindLabel(run.failureKind, t)} · ${t("tasks.run.retryPossible")}`;
+  return live.summary || (run.resultStatus ? `${run.resultStatus} · ${t("tasks.run.retryPossible")}` : t("tasks.run.checkDetails"));
 }
 
 function runStatusLabel(run: AgentRunSummary): string {
@@ -218,36 +233,41 @@ function runTone(run: AgentRunSummary): "running" | "queued" | "attention" | "do
   return deriveRunLiveState(run).tone;
 }
 
-function failureKindLabel(kind: string): string {
-  if (kind === "needs_inspection") return "점검 필요";
-  if (kind === "blocking_gate") return "게이트 차단";
-  if (kind === "diff_mismatch") return "diff 불일치";
-  if (kind === "schema_invalid") return "결과 포맷 불일치";
-  if (kind === "timeout") return "시간 초과";
-  if (kind === "exit_failed") return "실행 실패";
-  if (kind === "canceled") return "취소됨";
+function failureKindLabel(kind: string, t: ReturnType<typeof useI18n>["t"]): string {
+  if (kind === "needs_inspection") return t("tasks.failure.needsInspection");
+  if (kind === "blocking_gate") return t("tasks.failure.blockingGate");
+  if (kind === "diff_mismatch") return t("tasks.failure.diffMismatch");
+  if (kind === "schema_invalid") return t("tasks.failure.schemaInvalid");
+  if (kind === "timeout") return t("tasks.failure.timeout");
+  if (kind === "exit_failed") return t("tasks.failure.exitFailed");
+  if (kind === "canceled") return t("tasks.failure.canceled");
   return kind;
 }
 
-function humanizedFailureReason(run: AgentRunSummary): string | null {
+function humanizedFailureReason(run: AgentRunSummary, t: ReturnType<typeof useI18n>["t"]): string | null {
   if (!run.failureReason) return null;
   if (run.failureKind === "needs_inspection") {
-    return "자동 판정에 필요한 근거가 부족해 수동 점검이 필요합니다.";
+    return t("tasks.failure.needsInspectionReason");
   }
   if (run.failureKind === "blocking_gate") {
-    return "차단 이슈가 감지되어 다음 단계로 진행되지 않았습니다.";
+    return t("tasks.failure.blockingGateReason");
   }
   return run.failureReason;
 }
 
-function taskCardAriaLabel(task: TaskSummary, activeRun: AgentRunSummary | null, flowLabel: string): string {
-  const parts = [`${task.title}`, `현재 단계 ${TASK_STATUS_LABEL[task.status]}`];
+function taskCardAriaLabel(
+  task: TaskSummary,
+  activeRun: AgentRunSummary | null,
+  flowLabel: string,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  const parts = [`${task.title}`, `${t("tasks.card.currentStage")} ${t(STATUS_MESSAGE_KEYS[task.status])}`];
   if (activeRun) {
     const live = deriveRunLiveState(activeRun);
     const model = runnerModelLabel(activeRun);
     parts.push(`${roleLabel(activeRun.roleId)}${model ? ` ${model}` : ""} ${live.label}`);
   } else {
-    parts.push(`다음 액션 ${flowLabel}`);
+    parts.push(`${t("tasks.card.nextAction")} ${flowLabel}`);
   }
   return parts.join(". ");
 }

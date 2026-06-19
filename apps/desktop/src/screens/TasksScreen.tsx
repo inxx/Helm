@@ -14,6 +14,7 @@ import { api } from "../lib/api";
 import { deriveRunLiveState, isRunActiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
 import { roleLabel } from "../lib/runnerReadiness";
 import { TASK_STATUS_LABEL } from "../lib/status";
+import { useI18n } from "../lib/i18n";
 
 interface TasksScreenProps {
   snapshot: ProjectSnapshot | null;
@@ -36,6 +37,7 @@ export function TasksScreen({
   onGoGit: _onGoGit,
   onGoSettings: _onGoSettings,
 }: TasksScreenProps) {
+  const { t } = useI18n();
   const [taskRuns, setTaskRuns] = useState<Record<string, AgentRunSummary[]>>({});
   const [selectedSessionId, setSelectedSessionId] = useState<string>("all");
   const [runRefreshKey, setRunRefreshKey] = useState(0);
@@ -113,24 +115,29 @@ export function TasksScreen({
   if (!snapshot) {
     return (
       <section className="empty-state">
-        <h2>프로젝트를 열어주세요</h2>
-        <p>Git 저장소를 열면 Helm이 repo-local DB와 작업자 상태 화면을 준비합니다.</p>
+        <h2>{t("tasks.emptyProject.title")}</h2>
+        <p>{t("tasks.emptyProject.description")}</p>
         <button className="primary-button" onClick={onOpenProject} type="button">
-          프로젝트 열기
+          {t("tasks.openProject")}
         </button>
       </section>
     );
   }
 
-  const observerSummary = buildWorkspaceObserverSummary(snapshot, visibleTaskRuns, activeSession?.title ?? "전체 세션");
+  const observerSummary = buildWorkspaceObserverSummary(
+    snapshot,
+    visibleTaskRuns,
+    activeSession?.title ?? t("tasks.board.allProjects"),
+    t,
+  );
 
   return (
     <div className={selectedTask ? "tasks-layout with-detail" : "tasks-layout"}>
       <section className="task-workspace">
         <div className="section-header">
           <div>
-            <h2>전체 진행상황</h2>
-            <p>Task 기준으로 현재 단계, 실행 상태, 승인 대기 항목을 한눈에 확인합니다.</p>
+            <h2>{t("tasks.board.title")}</h2>
+            <p>{t("tasks.board.description")}</p>
           </div>
         </div>
 
@@ -598,8 +605,9 @@ interface WorkspaceObserverSummary {
 }
 
 function WorkspaceObserverStrip({ summary }: { summary: WorkspaceObserverSummary }) {
+  const { t } = useI18n();
   return (
-    <section className="workspace-observer-strip" aria-label="전체 관찰 요약">
+    <section className="workspace-observer-strip" aria-label={t("tasks.observer.aria")}>
       <div className="workspace-observer-copy">
         <span>Observer</span>
         <strong>{summary.headline}</strong>
@@ -723,6 +731,7 @@ function buildWorkspaceObserverSummary(
   snapshot: ProjectSnapshot,
   taskRuns: Record<string, AgentRunSummary[]>,
   sessionTitle: string,
+  t: ReturnType<typeof useI18n>["t"],
 ): WorkspaceObserverSummary {
   const runs = Object.values(taskRuns).flat();
   const activeRuns = runs.filter((run) => ["Queued", "Running"].includes(run.status)).length;
@@ -731,12 +740,12 @@ function buildWorkspaceObserverSummary(
   const dirtyFiles = snapshot.repository.dirtyCount;
   const headline =
     activeRuns > 0
-      ? `${activeRuns}개 실행 관찰 중`
+      ? t("tasks.observer.activeRuns", { count: activeRuns })
       : pendingApprovals > 0
-        ? `${pendingApprovals}개 승인 대기`
+        ? t("tasks.observer.pendingApprovals", { count: pendingApprovals })
         : dirtyFiles > 0
-          ? `${dirtyFiles}개 변경 파일 감지`
-          : "대기 중인 실행 없음";
+          ? t("tasks.observer.dirtyFiles", { count: dirtyFiles })
+          : t("tasks.observer.idle");
 
   return {
     activeRuns,
