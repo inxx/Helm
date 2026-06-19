@@ -2426,7 +2426,7 @@ textarea {
 }
 
 /* ============================================================
-   Tasks layout — board + detail aside
+   Tasks layout — unified board
    ============================================================ */
 
 .tasks-layout {
@@ -2651,7 +2651,7 @@ textarea {
 
 .task-observer-workspace {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
@@ -2687,97 +2687,6 @@ textarea {
 .task-board-empty-note span {
   color: var(--text-muted);
   font-size: 12px;
-}
-
-.task-session-rail {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  border-right: 1px solid var(--line);
-  background: var(--surface);
-}
-
-.task-session-rail-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  border-bottom: 1px solid var(--line);
-  padding: 10px 12px;
-}
-
-.task-session-rail-header span {
-  color: var(--text-muted);
-  font-size: 10.5px;
-  font-weight: 750;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.task-session-rail-header strong {
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
-.task-session-rail ul {
-  display: grid;
-  align-content: start;
-  gap: 6px;
-  min-height: 0;
-  overflow-y: auto;
-  margin: 0;
-  padding: 10px;
-  list-style: none;
-}
-
-.task-session-rail li {
-  min-width: 0;
-}
-
-.task-session-rail button {
-  display: grid;
-  gap: 4px;
-  width: 100%;
-  min-width: 0;
-  border: 1px solid transparent;
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text);
-  padding: 9px 10px;
-  text-align: left;
-}
-
-.task-session-rail button:hover {
-  border-color: var(--line);
-  background: var(--surface-2);
-}
-
-.task-session-rail button.active {
-  border-color: var(--brand);
-  background: var(--brand-weak);
-}
-
-.task-session-rail button span {
-  overflow: hidden;
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.task-session-rail button small,
-.task-session-rail button em {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-style: normal;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .task-observer-empty {
@@ -9400,12 +9309,6 @@ textarea {
 
   .workspace-observer-strip dl > div {
     justify-content: flex-start;
-  }
-
-  .task-session-rail {
-    max-height: 220px;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
   }
 
   .task-observer-empty-grid {

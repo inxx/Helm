@@ -19,23 +19,17 @@ import { useI18n, type AppLanguage } from "../lib/i18n";
 
 interface TasksScreenProps {
   snapshot: ProjectSnapshot | null;
-  selectedTask: TaskSummary | null;
-  selectedTaskId: string | null;
-  onSelectTask: (taskId: string | null) => void;
+  onOpenTaskChat: (taskId: string) => void;
   onOpenProject: () => void;
-  onRefresh: () => Promise<void>;
   onGoGit: () => void;
   onGoSettings: () => void;
-  onFocusProjectTask: (projectId: string, taskId: string) => Promise<void>;
+  onFocusProjectTask: (projectId: string, taskId: string, nextScreen?: "sessions" | "tasks") => Promise<void>;
 }
 
 export function TasksScreen({
   snapshot,
-  selectedTask,
-  selectedTaskId,
-  onSelectTask,
+  onOpenTaskChat,
   onOpenProject,
-  onRefresh,
   onGoGit: _onGoGit,
   onGoSettings: _onGoSettings,
   onFocusProjectTask,
@@ -44,24 +38,12 @@ export function TasksScreen({
   const [taskRuns, setTaskRuns] = useState<Record<string, AgentRunSummary[]>>({});
   const [towerProjects, setTowerProjects] = useState<ControlTowerProjectSummary[]>([]);
   const [towerLoadError, setTowerLoadError] = useState<string | null>(null);
-  const [selectedSessionId, setSelectedSessionId] = useState<string>("all");
   const [runRefreshKey, setRunRefreshKey] = useState(0);
   const taskRunKey = useMemo(
     () => snapshot?.tasks.map((task) => task.id).join(":") ?? "",
     [snapshot?.tasks],
   );
   const combined = useMemo(() => buildCombinedTasks(towerProjects, snapshot, taskRuns), [snapshot, taskRuns, towerProjects]);
-  const sessions = useMemo(() => buildTaskSessions(combined.tasks, combined.taskRuns, language), [combined, language]);
-  const activeSession = sessions.find((session) => session.id === selectedSessionId) ?? sessions[0];
-  const visibleTasks = activeSession
-    ? combined.tasks.filter((task) => activeSession.taskIds.has(task.id)) ?? []
-    : combined.tasks;
-  const visibleTaskRuns = useMemo(() => {
-    const visibleIds = new Set(visibleTasks.map((task) => task.id));
-    return Object.fromEntries(
-      Object.entries(combined.taskRuns).filter(([taskId]) => visibleIds.has(taskId)),
-    ) as Record<string, AgentRunSummary[]>;
-  }, [combined.taskRuns, visibleTasks]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -112,10 +94,6 @@ export function TasksScreen({
   }, [snapshot?.project.id, taskRunKey, runRefreshKey]);
 
   useEffect(() => {
-    setSelectedSessionId("all");
-  }, [snapshot?.project.id]);
-
-  useEffect(() => {
     let disposed = false;
     setTowerLoadError(null);
     void api
@@ -146,10 +124,10 @@ export function TasksScreen({
     );
   }
 
-  const observerSummary = buildWorkspaceObserverSummary(snapshot, visibleTaskRuns, activeSession?.title ?? t("tasks.board.allProjects"), t);
+  const observerSummary = buildWorkspaceObserverSummary(snapshot, combined.taskRuns, t("tasks.board.allProjects"), t);
 
   return (
-    <div className={selectedTask ? "tasks-layout with-detail" : "tasks-layout"}>
+    <div className="tasks-layout">
       <section className="task-workspace">
         <div className="section-header">
           <div>
@@ -159,34 +137,25 @@ export function TasksScreen({
         </div>
 
         <WorkspaceObserverStrip summary={observerSummary} />
-        {towerLoadError ? <div className="error-banner compact">{towerLoadError}</div> : null}
+        <div className="task-board-alert-slot">
+          {towerLoadError ? <div className="error-banner compact">{towerLoadError}</div> : null}
+        </div>
 
         <div className="task-observer-workspace">
-          <TaskSessionRail
-            sessions={sessions}
-            selectedSessionId={activeSession?.id ?? "all"}
-            onSelectSession={(sessionId) => {
-              setSelectedSessionId(sessionId);
-              onSelectTask(null);
-            }}
-          />
-          {visibleTasks.length > 0 ? (
+          {combined.tasks.length > 0 ? (
             <TaskBoard
-              tasks={visibleTasks}
-              taskRuns={visibleTaskRuns}
+              tasks={combined.tasks}
+              taskRuns={combined.taskRuns}
               projectLabels={combined.projectLabels}
-              selectedTaskId={selectedTaskId}
+              selectedTaskId={null}
               onSelectTask={(taskId) => {
-                if (!taskId) {
-                  onSelectTask(null);
-                  return;
-                }
+                if (!taskId) return;
                 const projectId = combined.taskProject[taskId];
                 if (projectId && projectId !== snapshot.project.id) {
-                  void onFocusProjectTask(projectId, taskId);
+                  void onFocusProjectTask(projectId, taskId, "sessions");
                   return;
                 }
-                onSelectTask(taskId);
+                onOpenTaskChat(taskId);
               }}
             />
           ) : (
@@ -194,25 +163,12 @@ export function TasksScreen({
               project={snapshot.project.name}
               branch={snapshot.repository.currentBranch}
               dirtyCount={snapshot.repository.dirtyCount}
-              sessionTitle={activeSession?.title ?? (language === "ko" ? "전체 세션" : "All sessions")}
+              sessionTitle={language === "ko" ? "전체 태스크" : "All tasks"}
               language={language}
             />
           )}
         </div>
       </section>
-      {selectedTask ? (
-        <TaskFocusDetail
-          snapshot={snapshot}
-          task={selectedTask}
-          runs={combined.taskRuns[selectedTask.id] ?? taskRuns[selectedTask.id] ?? []}
-          onClose={() => onSelectTask(null)}
-          onRefresh={onRefresh}
-          onDeleted={async () => {
-            onSelectTask(null);
-            await onRefresh();
-          }}
-        />
-      ) : null}
     </div>
   );
 }
@@ -671,59 +627,11 @@ function WorkspaceObserverStrip({ summary }: { summary: WorkspaceObserverSummary
   );
 }
 
-interface TaskSessionSummary {
-  id: string;
-  title: string;
-  subtitle: string;
-  taskIds: Set<string>;
-  taskCount: number;
-  activeCount: number;
-  attentionCount: number;
-}
-
 interface CombinedTasks {
   tasks: TaskSummary[];
   taskRuns: Record<string, AgentRunSummary[]>;
   projectLabels: Record<string, string>;
   taskProject: Record<string, string>;
-}
-
-function TaskSessionRail({
-  onSelectSession,
-  selectedSessionId,
-  sessions,
-}: {
-  onSelectSession: (sessionId: string) => void;
-  selectedSessionId: string;
-  sessions: TaskSessionSummary[];
-}) {
-  return (
-    <aside className="task-session-rail" aria-label="태스크 세션">
-      <div className="task-session-rail-header">
-        <span>Sessions</span>
-        <strong>{sessions.length}</strong>
-      </div>
-      <ul>
-        {sessions.map((session) => (
-          <li key={session.id}>
-            <button
-              type="button"
-              className={session.id === selectedSessionId ? "active" : ""}
-              onClick={() => onSelectSession(session.id)}
-            >
-              <span>{session.title}</span>
-              <small>{session.subtitle}</small>
-              <em>
-                {session.taskCount} tasks
-                {session.activeCount > 0 ? ` · ${session.activeCount} active` : ""}
-                {session.attentionCount > 0 ? ` · ${session.attentionCount} attention` : ""}
-              </em>
-            </button>
-          </li>
-        ))}
-      </ul>
-    </aside>
-  );
 }
 
 function TaskObserverEmptyState({
@@ -845,88 +753,6 @@ function buildCombinedTasks(
   return { tasks, taskRuns, projectLabels, taskProject };
 }
 
-function buildTaskSessions(
-  tasks: TaskSummary[],
-  taskRuns: Record<string, AgentRunSummary[]>,
-  language: AppLanguage,
-): TaskSessionSummary[] {
-  const groups = new Map<string, { title: string; subtitle: string; tasks: TaskSummary[] }>();
-  for (const task of tasks) {
-    const session = sessionForTask(task, language);
-    const group = groups.get(session.id) ?? { title: session.title, subtitle: session.subtitle, tasks: [] };
-    group.tasks.push(task);
-    groups.set(session.id, group);
-  }
-
-  const sessionSummaries = [...groups.entries()]
-    .map(([id, group]) => {
-      const taskIds = new Set(group.tasks.map((task) => task.id));
-      const runs = group.tasks.flatMap((task) => taskRuns[task.id] ?? []);
-      return {
-        id,
-        title: group.title,
-        subtitle: group.subtitle,
-        taskIds,
-        taskCount: group.tasks.length,
-        activeCount: runs.filter((run) => ["Queued", "Running"].includes(run.status)).length,
-        attentionCount: runs.filter(isRunAttentionState).length,
-      };
-    })
-    .sort((left, right) => right.taskCount - left.taskCount || left.title.localeCompare(right.title));
-
-  return [
-    {
-      id: "all",
-      title: language === "ko" ? "전체 세션" : "All sessions",
-      subtitle: tasks.length > 0 ? (language === "ko" ? "모든 태스크" : "All tasks") : language === "ko" ? "태스크 없음" : "No tasks",
-      taskIds: new Set(tasks.map((task) => task.id)),
-      taskCount: tasks.length,
-      activeCount: Object.values(taskRuns).flat().filter((run) => ["Queued", "Running"].includes(run.status)).length,
-      attentionCount: Object.values(taskRuns).flat().filter(isRunAttentionState).length,
-    },
-    ...sessionSummaries,
-  ];
-}
-
-function sessionForTask(task: TaskSummary, language: AppLanguage): { id: string; title: string; subtitle: string } {
-  const markdownRef = task.externalRefs.find((ref) => ref.refType === "MarkdownPlan" || ref.refValue.includes(".helm/planning/"));
-  if (markdownRef) {
-    const planningId = markdownRef.refValue.match(/\.helm\/planning\/([^/]+)/)?.[1];
-    const title = usefulRefTitle(markdownRef.refTitle) ?? titlePrefix(task.title) ?? (language === "ko" ? "계획 세션" : "Planning session");
-    return {
-      id: planningId ? `planning:${planningId}` : `markdown:${markdownRef.refValue}`,
-      title,
-      subtitle: planningId ? `planning ${planningId.slice(0, 8)}` : markdownRef.refValue,
-    };
-  }
-  if (task.epicId) {
-    return {
-      id: `epic:${task.epicId}`,
-      title: language === "ko" ? "Epic 태스크" : "Epic tasks",
-      subtitle: task.epicId,
-    };
-  }
-  return {
-    id: "standalone",
-    title: language === "ko" ? "수동 태스크" : "Manual tasks",
-    subtitle: language === "ko" ? "세션 연결 없음" : "No linked session",
-  };
-}
-
-function usefulRefTitle(value: string | null): string | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === "Plan Document" || trimmed === "Markdown") return null;
-  return trimmed;
-}
-
-function titlePrefix(title: string): string | null {
-  const trimmed = title.trim();
-  if (!trimmed) return null;
-  const separator = trimmed.match(/[:：-]/);
-  if (!separator || separator.index === undefined || separator.index < 8) return trimmed;
-  return trimmed.slice(0, separator.index).trim();
-}
 
 interface TaskObserverSnapshot {
   headline: string;

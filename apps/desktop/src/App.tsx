@@ -6,7 +6,7 @@ import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
 import { I18nProvider, normalizeLanguage, translate, type AppLanguage, type MessageKey } from "./lib/i18n";
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
-import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
+import type { CommandError, ProjectSnapshot } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { SessionsScreen } from "./screens/SessionsScreen";
@@ -43,11 +43,6 @@ export function App() {
       })),
     [language],
   );
-
-  const selectedTask = useMemo<TaskSummary | null>(() => {
-    if (!snapshot || !selectedTaskId) return null;
-    return snapshot.tasks.find((task) => task.id === selectedTaskId) ?? null;
-  }, [selectedTaskId, snapshot]);
 
   useEffect(() => {
     let cancelled = false;
@@ -185,19 +180,19 @@ export function App() {
     }
   }
 
-  async function focusProjectTask(projectId: string, taskId: string) {
+  async function focusProjectTask(projectId: string, taskId: string, nextScreen: Screen = "tasks") {
     setError(null);
     setBusy(true);
     try {
       if (snapshot?.project.id === projectId) {
         setSelectedTaskId(taskId);
-        setScreen("tasks");
+        setScreen(nextScreen);
         return;
       }
       const next = await api.openProjectById(projectId, { reconcileStaleRuns: true });
       setSnapshot(next);
       setSelectedTaskId(taskId);
-      setScreen("tasks");
+      setScreen(nextScreen);
       setError(null);
       const nextRecents = upsertRecent(recents, next.project, {
         preserveExistingPosition: true,
@@ -298,13 +293,11 @@ export function App() {
           {screen === "tasks" ? (
             <TasksScreen
               snapshot={snapshot}
-              selectedTask={selectedTask}
-              selectedTaskId={selectedTaskId}
-              onSelectTask={(taskId) => {
+              onOpenTaskChat={(taskId) => {
                 setSelectedTaskId(taskId);
+                setScreen("sessions");
               }}
               onOpenProject={openProject}
-              onRefresh={refresh}
               onGoGit={() => setScreen("git")}
               onGoSettings={() => setScreen("settings")}
               onFocusProjectTask={focusProjectTask}
