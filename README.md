@@ -1,146 +1,188 @@
 # Helm
 
-Helm은 로컬 CLI agent hub MVP에서 **AI 개발 작업을 운영하는 데스크톱 control plane**으로 재설계 중인 프로젝트다.
+**Helm is a local desktop control plane for AI software work.**
 
-목표는 또 하나의 채팅창을 만드는 것이 아니다. Helm은 로컬 프로젝트 안에서 에픽, 태스크, 역할별 AI 작업자, 승인, Git 상태, 산출물, 감사 로그를 관리하는 결정론적 오케스트레이터가 되어야 한다.
+It is designed for developers who already use agents such as Codex, Claude, or Gemini, but do not want a loose pile of chats, terminal logs, diffs, and half-remembered decisions. Helm turns AI-assisted development into a visible workflow: plan the work, run the right role, inspect the result, approve the next step, and keep an audit trail beside the repository.
 
-```text
-AI 작업자 -> Helm에 결과 보고
-Helm -> 다음 허용 상태 전이 결정
-Helm -> 승인된 다음 role 실행
-```
-
-AI 작업자는 다른 AI 작업자를 직접 호출하지 않는다. 상태 머신과 실행 순서는 Helm이 소유한다.
-
-## 현재 상태
-
-이 저장소에는 현재 두 층이 함께 있다.
-
-- `src/`: legacy Node CLI MVP reference
-- `docs/`: 새 데스크톱 오케스트레이터 설계와 Phase 0-1 구현 계획
-
-다음 제품 구현은 `apps/desktop/` 아래에 새 Tauri 데스크톱 앱으로 만든다. Phase 1에서는 기존 Node CLI를 감싸거나 runtime dependency로 import하지 않는다.
-
-## 제품 방향
-
-Helm의 목표 UX는 한국어 우선 로컬 데스크톱 앱이다. 최상위 화면은 세 가지로 둔다.
-
-- `태스크`: 에픽, 태스크, 승인, role 실행, 리뷰/테스트/머지 상태
-- `깃`: 처음에는 read-only local Git 상태, 이후 branch/commit graph
-- `터미널`: 이후 프로젝트 root와 task worktree 터미널
-
-핵심 원칙:
-
-- 오케스트레이터는 AI가 아니라 결정론적 프로그램이다.
-- 계획 승인과 merge 승인은 사용자가 명시적으로 한다.
-- AI 출력은 산출물이고, 실제 Git diff/status는 Helm backend가 직접 계산한 값을 기준으로 삼는다.
-- frontend에는 generic shell execute 권한을 열지 않는다.
-- 기존 CLI 코드는 참고 자료이며 새 제품 기반 코드가 아니다.
-
-## 문서 입구
-
-먼저 읽을 문서:
-
-- [Orchestrator Design](docs/orchestrator-design.md): 장기 제품 아키텍처
-- [Phase 0-1 Implementation Plan](docs/phase-0-1-implementation-plan.md): 즉시 구현 범위의 source of truth
-- [Phase 1-2 User Flow](docs/phase-1-2-user-flow.md): Jira 작업과 Jira 없는 작업을 모두 포함한 초기 사용자 흐름
-- [Phase 2 Implementation Plan](docs/phase-2-implementation-plan.md): stub role run, approval, audit vertical slice
-- [Phase 3a Implementation Plan](docs/phase-3a-implementation-plan.md): task worktree, context pack, HelmHostRunner single run
-- [Hermes Local API Guide](docs/hermes-local-api-guide.md): 로컬 Docker Hermes를 Helm backend에서 호출하는 방식과 운영 원칙
-- [Claude Desktop to Helm Handoff](docs/claude-desktop-handoff.md): Claude Desktop 계획 파일을 Helm 실행/보고로 자동 이관하는 로컬 inbox/outbox 계약
-- [Planner Conversation Approval Feature](docs/ai-plan-conversation-approval-feature.md): planner와 계획 문서를 고정하고 승인 후 Task로 변환하는 기능 계약
-- [Executable Planning Contract](docs/executable-planning-contract.md): 큰 작업을 task graph, task card, ownership map, barrier, verification gate로 쪼개는 기본 계획 계약
-- [Role Artifact Contract](docs/role-artifact-contract.md): planner/coder/verifier/reviewer/tester 역할별 md dossier와 공통 실행 산출물 계약
-- [Reference Adoption Application Plan](docs/reference-adoption-application-plan.md): 외부 레퍼런스 차용 포인트별 Helm 적용 계획
-- [Reference-Driven Work Plan](docs/reference-driven-work-plan.md): 레퍼런스 기반 blocker 해소와 제품화 작업 전체 계획
-- [Reference Product Quality Upgrade Plan](docs/reference-product-quality-upgrade-plan.md): 레퍼런스에서 가져올 제품/운영 패턴과 기술 blocker 제거 계획
-- [UX / Operation Blocker Remediation Plan](docs/ux-operation-blocker-remediation-plan.md): 관찰/승인/실행 준비/host 실행 경계와 blocker 해소 순서
-- [Next Steps](docs/next-steps.md): legacy CLI MVP 완료 기록
-
-Phase 1 구현자는 `Phase 0-1 Implementation Plan`의 command/DTO, migration runner, Git parser, verification contract를 먼저 따른다. 장기 설계와 충돌하면 Phase 0-1 문서가 우선한다.
-
-Phase 2 구현자는 `Phase 2 Implementation Plan`의 `AgentRun`, `Approval`, stub adapter, audit event 계약을 먼저 따른다. Phase 2에서는 실제 Claude/Codex 실행이나 Docker Hermes observer를 구현하지 않는다.
-
-Phase 1은 의도적으로 작게 닫는다.
-
-- `apps/desktop` 생성
-- Git 프로젝트 열기
-- `repo/.helm/helm.sqlite` 생성/열기
-- 프로젝트 설정 skeleton 저장/로드
-- 한국어 라이트 태스크 보드 skeleton 표시
-- read-only local Git snapshot 표시
-
-Phase 1에서는 agent 실행, terminal PTY, worktree, Jira/Slack, Obsidian backfill, Keychain, merge, quality gate를 구현하지 않는다.
-
-## 성공 경로
-
-Helm은 범위를 한 번에 넓히면 실패하기 쉬운 제품이다. 성공 기준은 "많은 연동을 빨리 붙이는 것"이 아니라, 로컬 프로젝트에서 태스크 하나가 계획, 실행, 검토, 승인, 기록까지 추적되는 core loop를 먼저 닫는 것이다.
-
-권장 구현 순서:
+Helm is not another chat box. It is the deterministic layer around AI agents.
 
 ```text
-Phase 1: 프로젝트 열기 + repo-local DB + 태스크/Git skeleton
-Phase 2: stub role run + approval + audit log + 상태 전이
-Phase 3a: Helm host runner + Codex/Claude 단일 실행
-Phase 3b: Docker Hermes observer + 실행 관찰/감사 보조
-Phase 3c: reviewer/tester chain + gate result
-Phase 4+: Git graph, terminal, Jira, Slack, backup/recovery
+AI agents produce work
+Helm records the result
+Helm decides the allowed next state
+The user approves the important transitions
 ```
 
-초기 다중 agent 실행은 금지한다. 실제 agent 실행은 `maxParallelRuns=1`에서 시작하고, worktree 격리와 artifact/audit 검증이 안정화된 뒤 `2`로 올린다. Claude/Codex 인증과 CLI 실행은 Helm backend가 로컬 host에서 담당한다. Hermes는 Helm을 대체하는 오케스트레이터나 agent 실행자가 아니라 Docker 기반 관찰/감사 보조 계층으로 다룬다.
+## Why Helm
 
-## Legacy Node CLI
+AI coding tools are powerful, but the workflow around them is still fragile:
 
-기존 CLI는 Git 상태, 세션 artifact, agent binary resolution, safe commit, PR dry-run/create 흐름을 검증한 reference로 남긴다.
+- Plans live in chat history instead of the project.
+- Reviews, test results, and decisions are hard to trace later.
+- Multiple agents can step on each other without clear ownership.
+- Git state is often trusted from agent summaries instead of inspected directly.
+- Human approval gates are informal, inconsistent, or missing.
 
-Legacy CLI 요구사항:
+Helm is being built to make that workflow explicit.
 
-- Node.js 25 이상
+## What Helm Does
 
-현재 CLI는 Node의 TypeScript type stripping을 사용한다. Node 20에서는 `node src/cli.ts`를 직접 실행할 수 없다.
+Helm manages AI development work around a local repository:
 
-주요 명령:
+- Task and epic tracking for local development work
+- Role-based agent runs such as planner, coder, reviewer, verifier, and tester
+- Approval gates before sensitive transitions
+- Repo-local SQLite state in `.helm/helm.sqlite`
+- Artifact storage under `.helm/artifacts`
+- Read-only Git status from the backend, not from agent claims
+- Audit logs for runs, approvals, and task state changes
+- A Tauri desktop app with React, TypeScript, Rust, and SQLite
+
+The long-term goal is a local operating console for AI-assisted software teams: tasks, agents, Git, terminals, artifacts, approvals, and project memory in one place.
+
+## Current Status
+
+Helm is under active development.
+
+The repository currently contains two layers:
+
+- `apps/desktop/`: the new Tauri desktop app and the future main product
+- `src/`: the legacy Node.js CLI prototype kept as a reference implementation
+
+The desktop app is the primary direction. The legacy CLI is useful for understanding early experiments around Git status, session artifacts, agent binary resolution, safe commits, and PR flows, but it is not the foundation for the new product.
+
+## Product Roadmap
+
+Helm is intentionally being built in small vertical slices.
+
+```text
+Phase 1: Open a project, create repo-local DB, show task and Git skeletons
+Phase 2: Stub role runs, approvals, audit log, and state transitions
+Phase 3a: Task worktrees and a single local Codex/Claude host run
+Phase 3b: Docker-based observer for execution evidence and audit support
+Phase 3c: Reviewer, verifier, tester chain with gate results
+Phase 4+: Git graph, terminal workspace, Jira, Slack, backup, recovery
+```
+
+The first real success target is small but important: one local task can move from plan to execution to review to approval with traceable artifacts and Git evidence.
+
+## Desktop App
+
+The desktop app lives in `apps/desktop`.
+
+### Requirements
+
+- Node.js 25+
+- Rust stable
+- Tauri v2 prerequisites for your platform
+
+### Install
+
+```bash
+cd apps/desktop
+npm install
+```
+
+### Run Development Build
+
+```bash
+npm run dev
+```
+
+This builds the React app and serves the compiled desktop frontend for local development.
+
+### Typecheck and Build
+
+```bash
+npm run typecheck
+npm run build
+```
+
+### Tests
+
+```bash
+npm test
+```
+
+## Legacy CLI
+
+The legacy CLI remains at the repository root.
+
+### Requirements
+
+- Node.js 25+
+
+### Commands
 
 ```bash
 npm run check
 node src/cli.ts --help
 node src/cli.ts agents
-node src/cli.ts run --agent codex --dry-run "현재 repo 상태 요약"
+node src/cli.ts run --agent codex --dry-run "Summarize this repository"
 node src/cli.ts status
 node src/cli.ts show <session>
-node src/cli.ts commit <session> --check "npm run check" -m "테스트 실패 수정"
-node src/cli.ts pr <session> --dry-run --base main --title "테스트 실패 수정"
+node src/cli.ts commit <session> --check "npm run check" -m "Fix failing tests"
+node src/cli.ts pr <session> --dry-run --base main --title "Fix failing tests"
 node src/cli.ts ui
 ```
 
-로컬 개발 중에는 `npm link`로 `inxx-helm` 명령을 연결할 수 있다. Kubernetes Helm과 binary 이름 충돌을 피하기 위해 `helm`이 아니라 `inxx-helm`을 사용한다.
+You can also link the CLI locally:
 
 ```bash
 npm link
 inxx-helm --help
-inxx-helm run --agent codex --dry-run "현재 repo 상태 요약"
 ```
 
-Legacy 실행 기록은 `.helm/` 아래에 저장하며 git에 커밋하지 않는다.
+The binary is named `inxx-helm` to avoid conflicting with Kubernetes Helm.
 
-## Repo-Local Config
+## Repository Layout
 
-Legacy CLI는 `.helm/config.json`에서 agent binary, 기본 commit check, PR base branch를 읽는다.
-
-```json
-{
-  "agentBinaries": {
-    "codex": "/opt/homebrew/bin/codex",
-    "claude": "/opt/homebrew/bin/claude",
-    "gemini": "/opt/homebrew/bin/gemini"
-  },
-  "defaultCheckCommand": "npm run check",
-  "prBaseBranch": "main"
-}
+```text
+Helm/
+  apps/
+    desktop/          # Tauri + React desktop app
+  docs/               # Product design and implementation plans
+  scripts/            # Local automation and sync helpers
+  src/                # Legacy Node CLI prototype
+  test/               # Legacy CLI tests
 ```
 
-CLI 옵션과 환경 변수는 이 파일보다 우선한다. 예를 들어 `HELM_CODEX_BIN`은 `agentBinaries.codex`를 덮어쓴다.
+## Design Principles
 
-## Cleanup Note
+- Helm is deterministic; agents are workers, not orchestrators.
+- AI agents do not directly call other AI agents.
+- Git state comes from the backend reading the repository.
+- Planning approval and merge approval are explicit user decisions.
+- The frontend does not get generic shell execution access.
+- Repo-local metadata stays under `.helm/` and should not be committed.
+- Real multi-agent execution starts only after worktree isolation, artifacts, audit logs, and cancellation are reliable.
 
-기존 `src/ui/` static HTTP UI는 미래 Tauri 앱의 기반이 아니다. Phase 1 구현은 `apps/desktop`에서 새로 시작하고, legacy static UI는 reference로만 둔다.
+## Key Docs
+
+- [Orchestrator Design](docs/orchestrator-design.md)
+- [Phase 0-1 Implementation Plan](docs/phase-0-1-implementation-plan.md)
+- [Phase 1-2 User Flow](docs/phase-1-2-user-flow.md)
+- [Phase 2 Implementation Plan](docs/phase-2-implementation-plan.md)
+- [Phase 3a Implementation Plan](docs/phase-3a-implementation-plan.md)
+- [Executable Planning Contract](docs/executable-planning-contract.md)
+- [Role Artifact Contract](docs/role-artifact-contract.md)
+- [Hermes Local API Guide](docs/hermes-local-api-guide.md)
+
+## Project Philosophy
+
+Helm is built around a simple belief: AI coding becomes more useful when the surrounding workflow is more explicit.
+
+The product should make it obvious:
+
+- what is being worked on,
+- who or what produced each artifact,
+- what changed in Git,
+- which gate is blocking progress,
+- what the user approved,
+- and why the final change exists.
+
+That is the layer Helm is trying to provide.
+
+## License
+
+MIT
