@@ -8194,6 +8194,13 @@ textarea {
   flex: 1 1 260px;
 }
 
+.terminal-pane-path > span {
+  flex: 0 0 auto;
+  color: var(--term-muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
 .terminal-pane-project select,
 .terminal-pane-path select {
   width: 100%;
