@@ -286,14 +286,90 @@ pub fn changed_files(root: &Path) -> CommandResult<Vec<GitFileStatus>> {
     Ok(files)
 }
 
+pub fn ignored_files(root: &Path, limit: usize) -> CommandResult<Vec<GitFileStatus>> {
+    let output = git_output(
+        root,
+        &["status", "--porcelain=v1", "-z", "--ignored=matching"],
+    )?;
+    let mut files = Vec::new();
+
+    for entry in output.split('\0').filter(|part| !part.is_empty()) {
+        if files.len() >= limit {
+            break;
+        }
+        if entry.len() < 4 || &entry[0..2] != "!!" {
+            continue;
+        }
+
+        files.push(GitFileStatus {
+            path: entry[3..].to_string(),
+            status: "ignored".to_string(),
+            staged: false,
+            renamed_from: None,
+        });
+    }
+
+    Ok(files)
+}
+
+pub fn commit_changed_files(root: &Path, commit_hash: &str) -> CommandResult<Vec<GitFileStatus>> {
+    let commit_hash = resolve_commit_hash(root, commit_hash)?;
+    let output = git_output(
+        root,
+        &[
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            "-M",
+            &commit_hash,
+        ],
+    )?;
+
+    Ok(output
+        .lines()
+        .filter_map(parse_name_status_line)
+        .collect())
+}
+
+pub fn commit_file_diff(
+    root: &Path,
+    commit_hash: &str,
+    path: &str,
+) -> CommandResult<GitFileDiff> {
+    let commit_hash = resolve_commit_hash(root, commit_hash)?;
+    let path = validated_repo_relative_path(path)?;
+    let parent_hash = first_parent_or_empty_tree(root, &commit_hash)?;
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--no-color", "-M"])
+        .arg(parent_hash)
+        .arg(&commit_hash)
+        .arg("--")
+        .arg(path)
+        .output()
+        .map_err(|err| CommandError::io("Git diff를 만들지 못했습니다.", err))?;
+
+    if !(output.status.success() || output.status.code() == Some(1)) {
+        return Err(CommandError::with_details(
+            "GitCommandFailed",
+            "Git diff 실행에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    Ok(GitFileDiff {
+        path: path.to_string(),
+        mode: "commit".to_string(),
+        diff: String::from_utf8_lossy(&output.stdout).to_string(),
+    })
+}
+
 pub fn file_diff(root: &Path, path: &str, mode: &str) -> CommandResult<GitFileDiff> {
-    let path = path.trim();
-    if path.is_empty() {
-        return Err(CommandError::validation("diff를 볼 파일을 선택해주세요."));
-    }
-    if path.starts_with('/') || path.split('/').any(|part| part == "..") {
-        return Err(CommandError::validation("저장소 내부 파일만 diff를 볼 수 있습니다."));
-    }
+    let path = validated_repo_relative_path(path)?;
 
     let mode = match mode {
         "staged" => "staged",
@@ -344,6 +420,71 @@ pub fn file_diff(root: &Path, path: &str, mode: &str) -> CommandResult<GitFileDi
         path: path.to_string(),
         mode: mode.to_string(),
         diff: String::from_utf8_lossy(&output.stdout).to_string(),
+    })
+}
+
+fn resolve_commit_hash(root: &Path, commit_hash: &str) -> CommandResult<String> {
+    let commit_hash = commit_hash.trim();
+    if commit_hash.is_empty()
+        || commit_hash.starts_with('-')
+        || !commit_hash
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == '/' || ch == '-' || ch == '_' || ch == '.')
+    {
+        return Err(CommandError::validation("커밋을 선택해주세요."));
+    }
+
+    let revision = format!("{commit_hash}^{{commit}}");
+    Ok(git_output(root, &["rev-parse", "--verify", &revision])?
+        .trim()
+        .to_string())
+}
+
+fn first_parent_or_empty_tree(root: &Path, commit_hash: &str) -> CommandResult<String> {
+    let output = git_output(root, &["rev-list", "--parents", "-n", "1", commit_hash])?;
+    let parts: Vec<&str> = output.split_whitespace().collect();
+    Ok(parts
+        .get(1)
+        .copied()
+        .unwrap_or("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
+        .to_string())
+}
+
+fn validated_repo_relative_path(path: &str) -> CommandResult<&str> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(CommandError::validation("diff를 볼 파일을 선택해주세요."));
+    }
+    if path.starts_with('/') || path.split('/').any(|part| part == "..") {
+        return Err(CommandError::validation("저장소 내부 파일만 diff를 볼 수 있습니다."));
+    }
+    Ok(path)
+}
+
+fn parse_name_status_line(line: &str) -> Option<GitFileStatus> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    let raw_status = fields.first()?.trim();
+    let status_code = raw_status.chars().next()?;
+
+    let (path, renamed_from) = if status_code == 'R' || status_code == 'C' {
+        (fields.get(2)?.to_string(), fields.get(1).map(|value| (*value).to_string()))
+    } else {
+        (fields.get(1)?.to_string(), None)
+    };
+
+    let status = match status_code {
+        'A' => "added",
+        'D' => "deleted",
+        'R' => "renamed",
+        'C' => "copied",
+        _ => "modified",
+    };
+
+    Some(GitFileStatus {
+        path,
+        status: status.to_string(),
+        staged: false,
+        renamed_from,
     })
 }
 

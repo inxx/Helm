@@ -1118,6 +1118,15 @@ fn get_changed_files(
 }
 
 #[tauri::command]
+fn get_ignored_files(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<GitFileStatus>> {
+    let context = project_context(&state, &project_id)?;
+    git::ignored_files(&context.root_path, 200)
+}
+
+#[tauri::command]
 fn get_file_diff(
     project_id: String,
     path: String,
@@ -1126,6 +1135,27 @@ fn get_file_diff(
 ) -> CommandResult<GitFileDiff> {
     let context = project_context(&state, &project_id)?;
     git::file_diff(&context.root_path, &path, &mode)
+}
+
+#[tauri::command]
+fn get_commit_changed_files(
+    project_id: String,
+    commit_hash: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<GitFileStatus>> {
+    let context = project_context(&state, &project_id)?;
+    git::commit_changed_files(&context.root_path, &commit_hash)
+}
+
+#[tauri::command]
+fn get_commit_file_diff(
+    project_id: String,
+    commit_hash: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> CommandResult<GitFileDiff> {
+    let context = project_context(&state, &project_id)?;
+    git::commit_file_diff(&context.root_path, &commit_hash, &path)
 }
 
 #[tauri::command]
@@ -6231,7 +6261,10 @@ fn main() {
             get_local_branches,
             get_recent_commits,
             get_changed_files,
+            get_ignored_files,
             get_file_diff,
+            get_commit_changed_files,
+            get_commit_file_diff,
             get_task_worktree_changed_files,
             switch_git_branch,
             list_node_runtimes,

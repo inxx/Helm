@@ -5251,7 +5251,7 @@ textarea {
 
 .git-changes-sidebar {
   display: grid;
-  grid-template-rows: minmax(180px, 0.36fr) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) minmax(0, 0.85fr);
   gap: 1px;
   min-width: 0;
   min-height: 0;
@@ -5452,6 +5452,46 @@ textarea {
   background: var(--surface);
 }
 
+.git-commit-detail {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
+.git-commit-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 14px 16px;
+}
+
+.git-commit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 120px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.git-commit-changes {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.42fr) minmax(0, 1fr);
+  gap: 1px;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--line);
+}
+
+.git-commit-diff-panel {
+  min-width: 0;
+}
+
 .git-detail-heading {
   display: flex;
   align-items: flex-start;
@@ -5606,6 +5646,12 @@ textarea {
   color: var(--red);
 }
 
+.git-file-list button > span.code-ignored,
+.git-diff-file-meta > span.code-ignored {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
 .git-file-list button strong {
   flex: 1;
   min-width: 0;
@@ -5749,6 +5795,17 @@ textarea {
 .git-empty-copy {
   padding: 14px 16px;
   font-size: 12.5px;
+}
+
+.git-ignored-files {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.git-ignored-files .git-empty-copy {
+  padding-bottom: 8px;
 }
 
 .git-branches-view {

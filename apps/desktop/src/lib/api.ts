@@ -232,8 +232,17 @@ export const api = {
   getChangedFiles(projectId: string) {
     return invoke<GitFileStatus[]>("get_changed_files", { projectId });
   },
+  getIgnoredFiles(projectId: string) {
+    return invoke<GitFileStatus[]>("get_ignored_files", { projectId });
+  },
   getFileDiff(projectId: string, path: string, mode: GitDiffMode = "worktree") {
     return invoke<GitFileDiff>("get_file_diff", { projectId, path, mode });
+  },
+  getCommitChangedFiles(projectId: string, commitHash: string) {
+    return invoke<GitFileStatus[]>("get_commit_changed_files", { projectId, commitHash });
+  },
+  getCommitFileDiff(projectId: string, commitHash: string, path: string) {
+    return invoke<GitFileDiff>("get_commit_file_diff", { projectId, commitHash, path });
   },
   getTaskWorktreeChangedFiles(projectId: string, taskId: string) {
     return invoke<GitFileStatus[]>("get_task_worktree_changed_files", { projectId, taskId });

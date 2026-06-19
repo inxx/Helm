@@ -73,6 +73,7 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
   const [branches, setBranches] = useState<GitBranchSummary[]>([]);
   const [commits, setCommits] = useState<GitCommitSummary[]>([]);
   const [files, setFiles] = useState<GitFileStatus[]>([]);
+  const [ignoredFiles, setIgnoredFiles] = useState<GitFileStatus[]>([]);
   const [gitError, setGitError] = useState<string | null>(null);
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
 
@@ -83,6 +84,7 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
       setBranches([]);
       setCommits([]);
       setFiles([]);
+      setIgnoredFiles([]);
       setGitError(null);
       return;
     }
@@ -91,18 +93,21 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
     setBranches([]);
     setCommits([]);
     setFiles([]);
+    setIgnoredFiles([]);
     setSelectedRowId(null);
 
     void Promise.all([
       api.getLocalBranches(snapshot.project.id),
       api.getRecentCommits(snapshot.project.id, 100),
       api.getChangedFiles(snapshot.project.id),
+      api.getIgnoredFiles(snapshot.project.id),
     ])
-      .then(([nextBranches, nextCommits, nextFiles]) => {
+      .then(([nextBranches, nextCommits, nextFiles, nextIgnoredFiles]) => {
         if (cancelled) return;
         setBranches(nextBranches);
         setCommits(nextCommits);
         setFiles(nextFiles);
+        setIgnoredFiles(nextIgnoredFiles);
       })
       .catch((error) => {
         if (cancelled) return;
@@ -196,7 +201,7 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
           />
         ) : null}
         {activeView === "changes" ? (
-          <ChangesView files={files} snapshot={snapshot} language={language} />
+          <ChangesView files={files} ignoredFiles={ignoredFiles} snapshot={snapshot} language={language} />
         ) : null}
         {activeView === "branches" ? <BranchesView branches={branches} language={language} /> : null}
       </div>
@@ -520,11 +525,96 @@ function SelectedGitDetail({
     );
   }
 
-  const commit = selectedRow.commit;
+  return <CommitDetail commit={selectedRow.commit} language={language} projectId={snapshot.project.id} />;
+}
+
+function CommitDetail({
+  commit,
+  language,
+  projectId,
+}: {
+  commit: GitCommitSummary;
+  language: AppLanguage;
+  projectId: string;
+}) {
+  const [files, setFiles] = useState<GitFileStatus[]>([]);
+  const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
+  const [fileDiff, setFileDiff] = useState<GitFileDiff | null>(null);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  const [loadingDiff, setLoadingDiff] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    setFiles([]);
+    setSelectedFileKey(null);
+    setFileDiff(null);
+    setFilesError(null);
+    setDiffError(null);
+    setLoadingFiles(true);
+
+    void api
+      .getCommitChangedFiles(projectId, commit.hash)
+      .then((nextFiles) => {
+        if (cancelled) return;
+        setFiles(nextFiles);
+        setSelectedFileKey(nextFiles[0] ? fileKey(nextFiles[0]) : null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setFilesError(messageFromError(error));
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoadingFiles(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [commit.hash, projectId]);
+
+  const selectedFile = files.find((file) => fileKey(file) === selectedFileKey) ?? files[0] ?? null;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!selectedFile) {
+      setFileDiff(null);
+      setDiffError(null);
+      setLoadingDiff(false);
+      return;
+    }
+
+    setLoadingDiff(true);
+    setDiffError(null);
+
+    void api
+      .getCommitFileDiff(projectId, commit.hash, selectedFile.path)
+      .then((nextDiff) => {
+        if (cancelled) return;
+        setFileDiff(nextDiff);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setFileDiff(null);
+        setDiffError(messageFromError(error));
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoadingDiff(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [commit.hash, projectId, selectedFile]);
 
   return (
-    <div className="git-selected-content">
-      <div className="git-detail-main">
+    <div className="git-commit-detail">
+      <div className="git-commit-summary">
         <div className="git-detail-heading">
           <GitCommitHorizontal size={16} />
           <div>
@@ -532,44 +622,64 @@ function SelectedGitDetail({
             <span>
               {commit.authorName}
               {commit.isMine ? language === "ko" ? " · 내 커밋" : " · my commit" : ""}
+              {" · "}
+              {commit.shortHash}
             </span>
           </div>
         </div>
-        <dl className="git-detail-list">
-          <div>
-            <dt>hash</dt>
-            <dd>{commit.hash}</dd>
-          </div>
-          <div>
-            <dt>author</dt>
-            <dd>
-              {commit.authorName} &lt;{commit.authorEmail}&gt;
-            </dd>
-          </div>
-          <div>
-            <dt>date</dt>
-            <dd>{formatCommitDate(commit.committedAt)}</dd>
-          </div>
-        </dl>
+        <div className="git-commit-meta">
+          <span>{formatCommitDate(commit.committedAt)}</span>
+          {commit.refs.slice(0, 3).map((ref) => (
+            <span className="git-ref-label" key={ref}>
+              {formatRefLabel(ref)}
+            </span>
+          ))}
+        </div>
       </div>
-      <div className="git-detail-side">
-        {commit.refs.length === 0 ? (
-          <p className="muted">{language === "ko" ? "refs 없음" : "No refs"}</p>
-        ) : (
-          <div className="git-ref-stack">
-            {commit.refs.map((ref) => (
-              <span className="git-ref-label" key={ref}>
-                {formatRefLabel(ref)}
-              </span>
-            ))}
+
+      <div className="git-commit-changes">
+        <section className="git-panel">
+          <div className="git-panel-title">
+            <span>{language === "ko" ? "변경 파일" : "Changed files"}</span>
+            <strong>{loadingFiles ? "..." : files.length}</strong>
           </div>
-        )}
+          {filesError ? (
+            <div className="git-inline-error">{filesError}</div>
+          ) : loadingFiles ? (
+            <div className="empty-inline">{language === "ko" ? "파일 불러오는 중" : "Loading files"}</div>
+          ) : (
+            <FilesList
+              files={files}
+              selectedFileKey={selectedFileKey}
+              onSelectFile={setSelectedFileKey}
+              language={language}
+            />
+          )}
+        </section>
+
+        <section className="git-panel git-commit-diff-panel">
+          <div className="git-panel-title">
+            <span>Diff</span>
+            <strong>{selectedFile ? selectedFile.path : "none"}</strong>
+          </div>
+          <DiffContent diff={fileDiff?.diff ?? ""} error={diffError} loading={loadingDiff} language={language} />
+        </section>
       </div>
     </div>
   );
 }
 
-function ChangesView({ files, snapshot, language }: { files: GitFileStatus[]; snapshot: ProjectSnapshot; language: AppLanguage }) {
+function ChangesView({
+  files,
+  ignoredFiles,
+  snapshot,
+  language,
+}: {
+  files: GitFileStatus[];
+  ignoredFiles: GitFileStatus[];
+  snapshot: ProjectSnapshot;
+  language: AppLanguage;
+}) {
   const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
   const [diffMode, setDiffMode] = useState<GitDiffMode>("worktree");
   const [fileDiff, setFileDiff] = useState<GitFileDiff | null>(null);
@@ -656,6 +766,13 @@ function ChangesView({ files, snapshot, language }: { files: GitFileStatus[]; sn
             language={language}
           />
         </section>
+        <section className="git-panel">
+          <div className="git-panel-title">
+            <span>{language === "ko" ? "Git에서 무시됨" : "Ignored by Git"}</span>
+            <strong>{ignoredFiles.length}</strong>
+          </div>
+          <IgnoredFilesList files={ignoredFiles} language={language} />
+        </section>
       </div>
       <section className="git-panel git-diff-panel">
         <div className="git-panel-title">
@@ -693,6 +810,37 @@ function ChangesView({ files, snapshot, language }: { files: GitFileStatus[]; sn
           <DiffContent diff={fileDiff?.diff ?? ""} error={diffError} loading={loadingDiff} language={language} />
         </div>
       </section>
+    </div>
+  );
+}
+
+function IgnoredFilesList({ files, language }: { files: GitFileStatus[]; language: AppLanguage }) {
+  if (files.length === 0) {
+    return <p className="muted git-empty-copy">{language === "ko" ? "무시된 파일 없음" : "No ignored files"}</p>;
+  }
+
+  return (
+    <div className="git-ignored-files">
+      <p className="muted git-empty-copy">
+        {language === "ko"
+          ? "아래 파일은 .gitignore 규칙 때문에 변경 목록과 diff에 표시되지 않습니다."
+          : "These files are hidden from changed files and diffs by .gitignore rules."}
+      </p>
+      <ul className="file-list git-file-list">
+        {files.map((file) => (
+          <li key={`ignored:${file.path}`}>
+            <button disabled type="button">
+              <span className={fileCodeClass(file.status)}>{fileStatusCode(file.status)}</span>
+              <strong title={file.path}>{file.path}</strong>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {files.length >= 200 ? (
+        <p className="muted git-empty-copy">
+          {language === "ko" ? "처음 200개만 표시합니다." : "Showing the first 200 only."}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -869,13 +1017,14 @@ function gitGraphColor(colorIndex: number): string {
 function fileCodeClass(status: string): string {
   const trimmed = status.trim();
   if (!trimmed) return "";
-  if (trimmed === "added" || trimmed === "untracked" || trimmed.includes("A")) {
+  if (trimmed === "added" || trimmed === "copied" || trimmed === "untracked" || trimmed.includes("A")) {
     return "code-added";
   }
   if (trimmed === "deleted" || trimmed.includes("D")) return "code-deleted";
   if (trimmed === "renamed" || trimmed === "modified" || trimmed.includes("M")) {
     return "code-modified";
   }
+  if (trimmed === "ignored") return "code-ignored";
   return "";
 }
 
@@ -887,10 +1036,14 @@ function fileStatusCode(status: string): string {
       return "D";
     case "renamed":
       return "R";
+    case "copied":
+      return "C";
     case "untracked":
       return "??";
     case "modified":
       return "M";
+    case "ignored":
+      return "IG";
     default:
       return status.slice(0, 2).toUpperCase();
   }
