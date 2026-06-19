@@ -11,6 +11,7 @@ import {
   Cpu,
   FileTerminal,
   Folder,
+  FolderOpen,
   Pencil,
   Play,
   Plus,
@@ -74,6 +75,7 @@ interface SavedScriptEditorState {
 const MAX_TERMINAL_COMMAND_HISTORY = 200;
 const MAX_TERMINAL_COMMAND_LENGTH = 500;
 const MAX_SAVED_TERMINAL_SCRIPT_LENGTH = 4000;
+const MAX_TERMINAL_PANE_NAME_LENGTH = 60;
 
 export function TerminalScreen({
   snapshot,
@@ -113,6 +115,9 @@ export function TerminalScreen({
   const [savedScriptEditor, setSavedScriptEditor] = useState<SavedScriptEditorState | null>(null);
   const [directoriesByPane, setDirectoriesByPane] = useState<Record<string, TerminalDirectoryEntry[]>>({});
   const [switchingProjectId, setSwitchingProjectId] = useState<string | null>(null);
+  const [paneNames, setPaneNames] = useState<Record<string, string>>({});
+  const [editingPaneNameId, setEditingPaneNameId] = useState<string | null>(null);
+  const [paneNameDraft, setPaneNameDraft] = useState("");
 
   const selectedPaneId = activePaneId ?? panes[0]?.id ?? null;
   const activePane = panes.find((pane) => pane.id === selectedPaneId) ?? panes[0] ?? null;
@@ -155,6 +160,9 @@ export function TerminalScreen({
     }
     let cancelled = false;
     commandHistoryRef.current = loadTerminalCommandHistory(snapshot.project.id);
+    setPaneNames(loadTerminalPaneNames(snapshot.project.id));
+    setEditingPaneNameId(null);
+    setPaneNameDraft("");
     setSavedScripts([]);
     setSavedScriptsBusy(true);
     void api
@@ -173,7 +181,7 @@ export function TerminalScreen({
     setAutocompleteByPane({});
     disposeAllPanes({ stopPty: false });
     void api
-      .listTerminalPtys(null)
+      .listTerminalPtys(snapshot.project.id)
       .then((sessions) => {
         if (cancelled) return;
         const nextPanes = terminalPanesForProject(snapshot.project.id, snapshot.project.rootPath, sessions);
@@ -347,6 +355,29 @@ export function TerminalScreen({
     setActivePaneId(nextPane.id);
   }
 
+  function beginRenamePane(pane: TerminalPaneState, index: number) {
+    setActivePaneId(pane.id);
+    setEditingPaneNameId(pane.id);
+    setPaneNameDraft(paneNames[pane.id] ?? `pane ${index + 1}`);
+  }
+
+  function commitRenamePane(paneId: string) {
+    if (!snapshot) return;
+    const name = normalizeTerminalPaneName(paneNameDraft);
+    const nextNames = { ...paneNames };
+    if (name) nextNames[paneId] = name;
+    else delete nextNames[paneId];
+    setPaneNames(nextNames);
+    saveTerminalPaneNames(snapshot.project.id, nextNames);
+    setEditingPaneNameId(null);
+    setPaneNameDraft("");
+  }
+
+  function cancelRenamePane() {
+    setEditingPaneNameId(null);
+    setPaneNameDraft("");
+  }
+
   async function restartPane(pane: TerminalPaneState, patch: Partial<TerminalPaneState> = {}) {
     const nextPane = { ...pane, ...patch };
     disposePane(pane.id, { stopPty: false });
@@ -392,6 +423,12 @@ export function TerminalScreen({
 
     const nextPanes = panes.filter((pane) => pane.id !== id);
     setPanes(nextPanes);
+    if (snapshot && paneNames[id]) {
+      const nextNames = { ...paneNames };
+      delete nextNames[id];
+      setPaneNames(nextNames);
+      saveTerminalPaneNames(snapshot.project.id, nextNames);
+    }
     if (selectedPaneId === id) {
       setActivePaneId(nextPanes[Math.min(targetIndex, nextPanes.length - 1)]?.id ?? null);
     }
@@ -746,6 +783,15 @@ export function TerminalScreen({
             <span className="terminal-pane-project" title={project.rootPath}>
               {project.name}
             </span>
+            <button
+              className="terminal-project-folder-button"
+              onClick={onOpenProject}
+              title="프로젝트 폴더 선택"
+              type="button"
+            >
+              <FolderOpen size={12} aria-hidden="true" />
+              <span>{shortenPath(project.rootPath)}</span>
+            </button>
             <label className="terminal-pane-path" title={pane.cwd}>
               <Folder size={12} aria-hidden="true" />
               <select
@@ -1025,23 +1071,59 @@ export function TerminalScreen({
                 className={selectedPaneId === pane.id ? "terminal-session-row active" : "terminal-session-row"}
                 key={pane.id}
               >
+                {editingPaneNameId === pane.id ? (
+                  <form
+                    className="terminal-session-edit"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      commitRenamePane(pane.id);
+                    }}
+                  >
+                    <input
+                      autoFocus
+                      maxLength={MAX_TERMINAL_PANE_NAME_LENGTH}
+                      onBlur={() => commitRenamePane(pane.id)}
+                      onChange={(event) => setPaneNameDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelRenamePane();
+                        }
+                      }}
+                      value={paneNameDraft}
+                      aria-label={`pane ${index + 1} 이름`}
+                    />
+                    <small>{shortPath(pane.cwd)}</small>
+                  </form>
+                ) : (
+                  <button
+                    className="terminal-session-select"
+                    onClick={() => setActivePaneId(pane.id)}
+                    onDoubleClick={() => beginRenamePane(pane, index)}
+                    type="button"
+                  >
+                    <span
+                      className={
+                        pane.running
+                          ? "terminal-dot running"
+                          : pane.exitCode !== null && pane.exitCode !== 0
+                            ? "terminal-dot failed"
+                            : "terminal-dot"
+                      }
+                      aria-hidden="true"
+                    />
+                    <strong>{paneNames[pane.id] ?? `pane ${index + 1}`}</strong>
+                    <small>{shortPath(pane.cwd)}</small>
+                  </button>
+                )}
                 <button
-                  className="terminal-session-select"
-                  onClick={() => setActivePaneId(pane.id)}
+                  className="terminal-session-rename"
+                  onClick={() => beginRenamePane(pane, index)}
+                  title="pane 이름 변경"
                   type="button"
+                  aria-label={`pane ${index + 1} 이름 변경`}
                 >
-                  <span
-                    className={
-                      pane.running
-                        ? "terminal-dot running"
-                        : pane.exitCode !== null && pane.exitCode !== 0
-                          ? "terminal-dot failed"
-                          : "terminal-dot"
-                    }
-                    aria-hidden="true"
-                  />
-                  <strong>pane {index + 1}</strong>
-                  <small>{shortPath(pane.cwd)}</small>
+                  <Pencil size={12} aria-hidden="true" />
                 </button>
                 <button
                   className="terminal-session-remove"
@@ -1255,6 +1337,38 @@ function saveTerminalCommandHistory(projectId: string, history: string[]): void 
 
 function terminalCommandHistoryKey(projectId: string): string {
   return `helm.terminal.commandHistory.${projectId}`;
+}
+
+function loadTerminalPaneNames(projectId: string): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(terminalPaneNamesKey(projectId));
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .map(([id, name]) => [id, normalizeTerminalPaneName(String(name))])
+        .filter(([, name]) => name),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function saveTerminalPaneNames(projectId: string, names: Record<string, string>): void {
+  try {
+    localStorage.setItem(terminalPaneNamesKey(projectId), JSON.stringify(names));
+  } catch {
+    // pane 이름도 편의 기능이라 저장 실패가 터미널 사용을 막으면 안 된다.
+  }
+}
+
+function terminalPaneNamesKey(projectId: string): string {
+  return `helm.terminal.paneNames.${projectId}`;
+}
+
+function normalizeTerminalPaneName(value: string): string {
+  return value.trim().replace(/\s+/g, " ").slice(0, MAX_TERMINAL_PANE_NAME_LENGTH);
 }
 
 function addTerminalCommandHistory(history: string[], command: string): string[] {

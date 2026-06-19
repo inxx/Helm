@@ -128,13 +128,13 @@ export function App() {
     setError(null);
   }
 
-  async function openProject() {
+  async function openProject(options: { nextScreen?: Screen } = {}) {
     setError(null);
     setBusy(true);
     try {
       const path = await open({ directory: true, multiple: false });
       if (typeof path !== "string") return;
-      await openProjectPath(path);
+      await openProjectPath(path, { nextScreen: options.nextScreen });
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -142,9 +142,12 @@ export function App() {
     }
   }
 
-  async function openProjectPath(path: string, options: { preserveRecentPosition?: boolean } = {}) {
+  async function openProjectPath(
+    path: string,
+    options: { preserveRecentPosition?: boolean; nextScreen?: Screen } = {},
+  ) {
     const next = await api.openProject(path);
-    hydrateSnapshot(next);
+    hydrateSnapshot(next, options.nextScreen ?? "sessions");
     const nextRecents = upsertRecent(recents, next.project, {
       preserveExistingPosition: options.preserveRecentPosition,
     });
@@ -221,7 +224,7 @@ export function App() {
       navItems={navItems}
       activeScreen={screen}
       onNavigate={setScreen}
-      onOpenProject={openProject}
+      onOpenProject={() => void openProject()}
       recents={recents}
       activeProjectId={snapshot?.project.id ?? null}
       onSwitchProject={switchProject}
@@ -242,7 +245,7 @@ export function App() {
               snapshot={snapshot}
               selectedTaskId={selectedTaskId}
               onSelectTask={setSelectedTaskId}
-              onOpenProject={openProject}
+              onOpenProject={() => void openProject()}
               recents={recents}
               activeProjectId={snapshot?.project.id ?? null}
               onSwitchProject={switchProject}
@@ -268,7 +271,7 @@ export function App() {
             />
           ) : null}
           {screen === "git" ? (
-            <GitScreen snapshot={snapshot} onOpenProject={openProject} />
+            <GitScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
           ) : null}
           {terminalMounted ? (
             <div
@@ -278,7 +281,7 @@ export function App() {
               <TerminalScreen
                 snapshot={snapshot}
                 isActive={screen === "terminal"}
-                onOpenProject={openProject}
+                onOpenProject={() => void openProject({ nextScreen: "terminal" })}
                 recents={recents}
                 activeProjectId={snapshot?.project.id ?? null}
                 onSwitchProject={switchProject}
@@ -287,7 +290,7 @@ export function App() {
             </div>
           ) : null}
           {screen === "settings" ? (
-            <SettingsScreen snapshot={snapshot} onRefresh={refresh} onOpenProject={openProject} />
+            <SettingsScreen snapshot={snapshot} onRefresh={refresh} onOpenProject={() => void openProject()} />
           ) : null}
         </>
       )}
