@@ -5016,6 +5016,22 @@ textarea {
   font-size: 11.5px;
 }
 
+.git-file-list {
+  align-content: start;
+  min-height: 0;
+  overflow: auto;
+}
+
+.git-file-list li {
+  justify-content: flex-start;
+  min-height: 36px;
+  padding: 8px 16px;
+}
+
+.git-file-list li strong {
+  min-width: 0;
+}
+
 /* ============================================================
    Git layout - keifu-inspired genealogy workspace
    ============================================================ */
