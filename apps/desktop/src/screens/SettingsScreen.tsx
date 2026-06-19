@@ -760,10 +760,6 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     <div className="settings-layout">
       <div className="settings-body">
         <aside className="settings-nav">
-          <div className="settings-nav-meta">
-            <h3>설정</h3>
-            <p className="settings-nav-project">{snapshot ? snapshot.project.name : "전역 설정"}</p>
-          </div>
           <ul className="settings-nav-list">
             {visibleCategories.map((category) => {
               const isActive = category.id === activeCategory;

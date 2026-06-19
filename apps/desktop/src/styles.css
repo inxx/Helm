@@ -5589,30 +5589,10 @@ textarea {
   gap: 12px;
   border-right: 1px solid var(--border);
   background: var(--surface-2);
-  padding: 14px 12px;
+  padding: 12px;
   overflow-y: auto;
 }
 
-.settings-nav-meta {
-  display: grid;
-  gap: 2px;
-  padding: 2px 6px 6px;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.settings-nav-meta h3 {
-  margin: 0;
-}
-
-.settings-nav-project {
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: -0.005em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 .settings-nav-list {
   display: flex;
