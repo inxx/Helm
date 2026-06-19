@@ -794,12 +794,13 @@ export function TerminalScreen({
             </button>
             <label className="terminal-pane-path" title={pane.cwd}>
               <Folder size={12} aria-hidden="true" />
+              <span>작업 폴더</span>
               <select
                 onChange={(event) => void choosePaneCwd(pane, event.target.value)}
                 onFocus={() => void loadPaneDirectories(pane)}
                 onMouseDown={() => void loadPaneDirectories(pane)}
                 value={pane.cwd}
-                aria-label={`pane ${index + 1} 경로`}
+                aria-label={`pane ${index + 1} 작업 폴더`}
               >
                 {cwdOptions.map((directory) => (
                   <option key={directory.path} value={directory.path}>
