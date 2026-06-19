@@ -10,13 +10,15 @@ import {
   Loader2,
   Plug,
   RefreshCw,
+  Trash2,
   Workflow,
   Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
-import { useI18n, type AppLanguage } from "../lib/i18n";
+import { normalizeLanguage, useI18n, type AppLanguage, type MessageKey } from "../lib/i18n";
+import { shortenPath, type RecentProject } from "../lib/recents";
 import { roleLabel, runnerReadinessFor } from "../lib/runnerReadiness";
 import { checkForManualUpdate, type ManualUpdateInfo } from "../lib/updater";
 import type {
@@ -38,6 +40,12 @@ interface SettingsScreenProps {
   snapshot: ProjectSnapshot | null;
   onRefresh: () => Promise<void>;
   onOpenProject: () => void;
+  recents: RecentProject[];
+  activeProjectId: string | null;
+  onSwitchProject: (projectId: string) => void;
+  onForgetProject: (projectId: string) => void;
+  busy: boolean;
+  onLanguageChange: (language: AppLanguage) => void;
 }
 
 type SettingsCategory =
@@ -54,20 +62,20 @@ type SettingsCategory =
 
 const CATEGORIES: Array<{
   id: SettingsCategory;
-  label: string;
-  hint: string;
+  labelKey: MessageKey;
+  hintKey: MessageKey;
   icon: typeof Layers;
 }> = [
-  { id: "orchestrator", label: "오케스트레이터", hint: "모든 프로젝트에 적용되는 지휘자 AI", icon: BrainCircuit },
-  { id: "templates", label: "Runner Templates", hint: "역할 프리셋과 AI CLI 연결을 한 번에 적용", icon: Layers },
-  { id: "connections", label: "AI CLI 연결", hint: "Codex · Claude Code · Gemini · 기타 LLM 경로", icon: Plug },
-  { id: "assignments", label: "작업별 CLI 선택", hint: "계획 · 구현 · 검수 · 테스트 매핑", icon: Workflow },
-  { id: "policies", label: "역할 정책", hint: "Role별 기본 정책 MD", icon: FileText },
-  { id: "usage", label: "통계 및 사용량", hint: "Agent 실행, 작업 시간, provider 분포", icon: BarChart3 },
-  { id: "jira", label: "Jira", hint: "프로젝트 키와 기본 이슈 타입", icon: CheckCircle2 },
-  { id: "worktree", label: "Worktree", hint: "병렬 작업 디렉터리 위치", icon: FolderTree },
-  { id: "app", label: "앱", hint: "Helm 업데이트 확인", icon: Info },
-  { id: "advanced", label: "고급", hint: "Role presets JSON · 기존 runner 확인", icon: Wrench },
+  { id: "orchestrator", labelKey: "settings.category.orchestrator.label", hintKey: "settings.category.orchestrator.hint", icon: BrainCircuit },
+  { id: "templates", labelKey: "settings.category.templates.label", hintKey: "settings.category.templates.hint", icon: Layers },
+  { id: "connections", labelKey: "settings.category.connections.label", hintKey: "settings.category.connections.hint", icon: Plug },
+  { id: "assignments", labelKey: "settings.category.assignments.label", hintKey: "settings.category.assignments.hint", icon: Workflow },
+  { id: "policies", labelKey: "settings.category.policies.label", hintKey: "settings.category.policies.hint", icon: FileText },
+  { id: "usage", labelKey: "settings.category.usage.label", hintKey: "settings.category.usage.hint", icon: BarChart3 },
+  { id: "jira", labelKey: "settings.category.jira.label", hintKey: "settings.category.jira.hint", icon: CheckCircle2 },
+  { id: "worktree", labelKey: "settings.category.worktree.label", hintKey: "settings.category.worktree.hint", icon: FolderTree },
+  { id: "app", labelKey: "settings.category.app.label", hintKey: "settings.category.app.hint", icon: Info },
+  { id: "advanced", labelKey: "settings.category.advanced.label", hintKey: "settings.category.advanced.hint", icon: Wrench },
 ];
 
 const ROLE_DEFINITIONS: Array<{
@@ -86,7 +94,17 @@ const ROLE_DEFINITIONS: Array<{
 type MessageTone = "success" | "error" | "info";
 type ModelRefreshState = { busy: boolean; tone: MessageTone; message: string };
 
-export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsScreenProps) {
+export function SettingsScreen({
+  snapshot,
+  onRefresh,
+  onOpenProject,
+  recents,
+  activeProjectId,
+  onSwitchProject,
+  onForgetProject,
+  busy: appBusy,
+  onLanguageChange,
+}: SettingsScreenProps) {
   const { language, t } = useI18n();
   const { showToast } = useToast();
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>("orchestrator");
@@ -118,13 +136,28 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const [projectRuns, setProjectRuns] = useState<AgentRunSummary[]>([]);
   const [usageBusy, setUsageBusy] = useState(false);
 
+  function hydrateGlobalSettings(settings: AppSettings) {
+    setRolePresets(JSON.stringify(settings.rolePresets, null, 2));
+    setAiConnections(normalizeAiConnections(settings.aiConnections));
+    setRoleAssignments(normalizeRoleAssignments(settings.roleAssignments));
+    setRolePolicies(normalizeRolePolicies(settings.rolePolicies));
+    setConductorConfig(normalizeConductorConfig(settings.conductorConfig));
+    setJiraConfig(normalizeJiraConfig(settings.jiraConfig));
+    setObsidianVaultPath(settings.obsidianVaultPath ?? "");
+    setObsidianArtifactPath(settings.obsidianArtifactPath ?? "");
+    setWorktreeRoot(settings.worktreeRoot ?? "");
+    setWorktreeSetup(settings.worktreeSetup ? JSON.stringify(settings.worktreeSetup, null, 2) : "");
+  }
+
   useEffect(() => {
     let cancelled = false;
     async function loadAppSettings() {
       try {
         const settings = await api.getAppSettings();
         if (!cancelled) {
-          setAppSettings(normalizeAppSettings(settings));
+          const normalized = normalizeAppSettings(settings);
+          setAppSettings(normalized);
+          hydrateGlobalSettings(normalized);
         }
       } catch (error) {
         if (!cancelled) {
@@ -149,16 +182,6 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
 
   useEffect(() => {
     if (!snapshot) return;
-    setRolePresets(JSON.stringify(snapshot.settings.rolePresets, null, 2));
-    setAiConnections(normalizeAiConnections(snapshot.settings.aiConnections));
-    setRoleAssignments(normalizeRoleAssignments(snapshot.settings.roleAssignments));
-    setRolePolicies(normalizeRolePolicies(snapshot.settings.rolePolicies));
-    setConductorConfig(normalizeConductorConfig(snapshot.settings.conductorConfig));
-    setJiraConfig(normalizeJiraConfig(snapshot.settings.jiraConfig));
-    setObsidianVaultPath(snapshot.settings.obsidianVaultPath ?? "");
-    setObsidianArtifactPath(snapshot.settings.obsidianArtifactPath ?? "");
-    setWorktreeRoot(snapshot.settings.worktreeRoot ?? "");
-    setWorktreeSetup(snapshot.settings.worktreeSetup ? JSON.stringify(snapshot.settings.worktreeSetup, null, 2) : "");
     void api.listRunnerTemplates(snapshot.project.id).then(setTemplates);
     setRunnerChecks([]);
     setConnectionChecks({});
@@ -193,10 +216,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
     };
   }, [activeCategory, showToast, snapshot]);
 
-  const visibleCategories = useMemo(
-    () => (snapshot ? CATEGORIES : CATEGORIES.filter((category) => category.id === "orchestrator" || category.id === "app")),
-    [snapshot],
-  );
+  const visibleCategories = CATEGORIES;
 
   useEffect(() => {
     if (!visibleCategories.some((category) => category.id === activeCategory)) {
@@ -210,27 +230,25 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   );
   const parsedRolePresets = useMemo(() => parseRolePresets(rolePresets), [rolePresets]);
   const runnerOnboarding = useMemo(() => {
-    if (!snapshot) return [];
     const effectiveSettings = {
-      ...snapshot.settings,
-      rolePresets: parsedRolePresets ?? snapshot.settings.rolePresets,
+      rolePresets: parsedRolePresets ?? appSettings.rolePresets,
       aiConnections,
       roleAssignments: normalizeRoleAssignments(roleAssignments),
-    };
+    } as ProjectSnapshot["settings"];
     return ROLE_DEFINITIONS.map((role) => ({
       ...role,
       readiness: runnerReadinessFor(effectiveSettings, role.roleId),
     }));
-  }, [aiConnections, parsedRolePresets, roleAssignments, snapshot]);
+  }, [aiConnections, appSettings.rolePresets, parsedRolePresets, roleAssignments]);
   const readyRunnerCount = runnerOnboarding.filter((item) => item.readiness.ready).length;
 
   async function save() {
-    if (!snapshot) return;
     setBusy(true);
     try {
       const parsedRolePresets = JSON.parse(rolePresets);
       const parsedWorktreeSetup = worktreeSetup.trim() ? JSON.parse(worktreeSetup) : null;
-      await api.updateProjectSettings(snapshot.project.id, {
+      const nextSettings = normalizeAppSettings({
+        ...appSettings,
         rolePresets: parsedRolePresets,
         aiConnections,
         roleAssignments: normalizeRoleAssignments(roleAssignments),
@@ -241,11 +259,13 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         obsidianVaultPath: obsidianVaultPath.trim() ? obsidianVaultPath.trim() : null,
         obsidianArtifactPath: obsidianArtifactPath.trim() ? obsidianArtifactPath.trim() : null,
       });
+      const saved = await api.updateAppSettings(nextSettings);
+      setAppSettings(normalizeAppSettings(saved));
       await onRefresh();
       showToast({
         tone: "success",
-        title: "설정 저장 완료",
-        description: "변경한 설정이 저장되었습니다.",
+        title: "전역 설정 저장 완료",
+        description: "변경한 설정을 Helm 앱 전체 기본값으로 저장했습니다.",
       });
     } catch (error) {
       showToast({
@@ -273,6 +293,32 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         tone: "error",
         title: "전역 설정 저장 실패",
         description: errorMessage(error, "전역 설정 저장에 실패했습니다."),
+      });
+    } finally {
+      setAppSettingsBusy(false);
+    }
+  }
+
+  async function updateLanguage(nextLanguage: AppLanguage) {
+    const nextSettings = normalizeAppSettings({ ...appSettings, language: nextLanguage });
+    setAppSettings(nextSettings);
+    onLanguageChange(nextLanguage);
+    setAppSettingsBusy(true);
+    try {
+      const saved = await api.updateAppSettings(nextSettings);
+      const normalized = normalizeAppSettings(saved);
+      setAppSettings(normalized);
+      onLanguageChange(normalizeLanguage(normalized.language));
+      showToast({
+        tone: "success",
+        title: t("settings.toast.appSettingsSaved.title"),
+        description: t("settings.toast.appSettingsSaved.description"),
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: t("settings.toast.appSettingsFailed.title"),
+        description: errorMessage(error, "앱 설정 저장에 실패했습니다."),
       });
     } finally {
       setAppSettingsBusy(false);
@@ -314,13 +360,15 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   }
 
   async function refreshConnectionModels(connection: AiConnection, options: { silent?: boolean } = {}) {
-    if (!snapshot || !canRefreshModels(connection.provider)) return;
+    if (!canRefreshModels(connection.provider)) return;
     setModelRefreshes((current) => ({
       ...current,
       [connection.id]: { busy: true, tone: "info", message: "모델 목록 확인 중..." },
     }));
     try {
-      const result = await api.refreshAiConnectionModels(snapshot.project.id, connection);
+      const result = snapshot
+        ? await api.refreshAiConnectionModels(snapshot.project.id, connection)
+        : await api.refreshOrchestratorConnectionModels(connection);
       const models = result.availableModels ?? [];
       if (models.length) {
         setAiConnections((current) =>
@@ -397,11 +445,12 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   }
 
   async function checkConnection(connection: AiConnection) {
-    if (!snapshot) return;
     if (connectionCheckBusyId) return;
     setConnectionCheckBusyId(connection.id);
     try {
-      const result = await api.checkAiConnection(snapshot.project.id, connection);
+      const result = snapshot
+        ? await api.checkAiConnection(snapshot.project.id, connection)
+        : await api.checkOrchestratorConnection(connection);
       setConnectionChecks((current) => ({ ...current, [connection.id]: result }));
       if (result.availableModels?.length) {
         setAiConnections((current) =>
@@ -743,7 +792,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
 
   const activeMeta = visibleCategories.find((category) => category.id === activeCategory) ?? CATEGORIES[0];
   const activeSaveBusy = activeCategory === "orchestrator" ? appSettingsBusy : busy;
-  const canSaveActiveSettings = activeCategory === "orchestrator" || (Boolean(snapshot) && activeCategory !== "app");
+  const canSaveActiveSettings = activeCategory === "orchestrator" || activeCategory !== "app";
   const orchestrator = appSettings.orchestrator;
   const orchestratorConnection = orchestrator.connection;
   const orchestratorModelList = orchestratorConnection?.availableModels ?? [];
@@ -752,7 +801,6 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
   const conductorConnection =
     conductorConfig.connectionId ? aiConnections.find((connection) => connection.id === conductorConfig.connectionId) : null;
   const canImportLegacyConductor =
-    Boolean(snapshot) &&
     conductorConfig.enabled &&
     Boolean(conductorConnection) &&
     !orchestratorSettingsConfigured(orchestrator);
@@ -775,8 +823,8 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                   >
                     <Icon size={14} aria-hidden />
                     <span className="settings-nav-item-label">
-                      <strong>{category.label}</strong>
-                      <span>{category.hint}</span>
+                      <strong>{t(category.labelKey)}</strong>
+                      <span>{t(category.hintKey)}</span>
                     </span>
                   </button>
                 </li>
@@ -788,8 +836,8 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
         <section className="settings-canvas">
           <header className="settings-canvas-header">
             <div>
-              <h2>{activeMeta.label}</h2>
-              <p>{activeMeta.hint}</p>
+              <h2>{t(activeMeta.labelKey)}</h2>
+              <p>{t(activeMeta.hintKey)}</p>
             </div>
             <div className="settings-canvas-actions">
               {canSaveActiveSettings ? (
@@ -799,7 +847,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                   onClick={saveActiveSettings}
                   type="button"
                 >
-                  {activeSaveBusy ? "저장 중…" : activeCategory === "orchestrator" ? "전역 저장" : "저장"}
+                  {activeSaveBusy ? t("settings.save.saving") : activeCategory === "orchestrator" ? t("settings.save.global") : t("settings.save.default")}
                 </button>
               ) : null}
             </div>
@@ -1415,7 +1463,7 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
                 <div className="settings-section-head">
                   <h3>역할 정책 MD</h3>
                   <p className="muted">
-                    Context Pack에 함께 포함할 프로젝트 내부 Markdown 정책입니다. 경로는 repo-relative .md 파일만 허용합니다.
+                    Context Pack에 함께 포함할 역할별 Markdown 정책입니다. 경로는 각 repo 기준 상대 .md 파일만 허용합니다.
                   </p>
                 </div>
                 <div className="role-assignment-list">
@@ -1590,38 +1638,98 @@ export function SettingsScreen({ snapshot, onRefresh, onOpenProject }: SettingsS
             {activeCategory === "app" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
-                  <h3>앱 업데이트</h3>
-                  <p className="muted">자동 확인 대신 필요할 때 Helm updater를 수동으로 실행합니다.</p>
+                  <h3>{t("settings.app.language.title")}</h3>
+                  <p className="muted">{t("settings.app.language.description")}</p>
+                </div>
+                <label className="settings-field">
+                  <span>{t("settings.app.language.label")}</span>
+                  <select
+                    value={appSettings.language}
+                    disabled={!appSettingsLoaded || appSettingsBusy}
+                    onChange={(event) => void updateLanguage(event.target.value === "ko" ? "ko" : "en")}
+                  >
+                    <option value="en">{t("settings.app.language.english")}</option>
+                    <option value="ko">{t("settings.app.language.korean")}</option>
+                  </select>
+                  <small className="muted">{t("settings.app.language.note")}</small>
+                </label>
+
+                <div className="settings-section-head">
+                  <h3>{t("settings.app.projects.title")}</h3>
+                  <p className="muted">{t("settings.app.projects.description")}</p>
+                </div>
+                {recents.length === 0 ? (
+                  <div className="settings-empty">
+                    <strong>{t("shell.noProjects")}</strong>
+                    <button className="secondary-button" onClick={onOpenProject} type="button">
+                      {t("settings.app.openProject")}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="project-settings-list">
+                    {recents.map((project) => {
+                      const isActive = project.id === activeProjectId;
+                      return (
+                        <article className={isActive ? "project-settings-row active" : "project-settings-row"} key={project.id}>
+                          <button
+                            className="project-settings-main"
+                            disabled={appBusy && !isActive}
+                            onClick={() => onSwitchProject(project.id)}
+                            title={project.rootPath}
+                            type="button"
+                          >
+                            <strong>{project.name}</strong>
+                            <span>{shortenPath(project.rootPath)}</span>
+                          </button>
+                          <button
+                            aria-label={t("shell.removeProjectAria", { name: project.name })}
+                            className="secondary-button danger project-settings-delete"
+                            disabled={appBusy}
+                            onClick={() => onForgetProject(project.id)}
+                            title={t("shell.removeProjectTitle")}
+                            type="button"
+                          >
+                            <Trash2 size={14} aria-hidden />
+                          </button>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="settings-section-head">
+                  <h3>{t("settings.app.update.title")}</h3>
+                  <p className="muted">{t("settings.app.update.description")}</p>
                 </div>
                 {!snapshot ? (
                   <div className="settings-empty">
-                    <strong>프로젝트별 설정은 프로젝트를 연 뒤 표시됩니다.</strong>
-                    <span>전역 오케스트레이터와 앱 업데이트는 프로젝트 없이도 관리할 수 있습니다.</span>
+                    <strong>{t("settings.app.projectRequired.title")}</strong>
+                    <span>{t("settings.app.projectRequired.description")}</span>
                     <button className="secondary-button" onClick={onOpenProject} type="button">
-                      프로젝트 열기
+                      {t("settings.app.openProject")}
                     </button>
                   </div>
                 ) : null}
                 <div className="update-check-panel">
                   <div>
                     <strong>Helm</strong>
-                    <span>현재 버전 {currentVersion ?? "확인 전"}</span>
+                    <span>{t("settings.app.currentVersion", { version: currentVersion ?? t("settings.app.versionUnknown") })}</span>
                   </div>
                   <button className="secondary-button" disabled={updaterBusy} onClick={checkUpdates} type="button">
                     <RefreshCw size={14} aria-hidden />
-                    {updaterBusy ? "확인 중…" : "업데이트 확인"}
+                    {updaterBusy ? t("settings.app.checking") : t("settings.app.checkUpdates")}
                   </button>
                 </div>
                 {pendingUpdate ? (
                   <article className="update-card">
                     <div>
-                      <strong>새 버전 {pendingUpdate.version}</strong>
-                      <span>{pendingUpdate.date ? formatDate(pendingUpdate.date) : "배포일 정보 없음"}</span>
+                      <strong>{t("settings.app.newVersion", { version: pendingUpdate.version })}</strong>
+                      <span>{pendingUpdate.date ? formatDate(pendingUpdate.date) : t("settings.app.noReleaseDate")}</span>
                     </div>
                     {pendingUpdate.body ? <p>{pendingUpdate.body}</p> : null}
                     <button className="primary-button" disabled={updaterBusy} onClick={installUpdate} type="button">
                       <Download size={14} aria-hidden />
-                      다운로드 및 설치
+                      {t("settings.app.install")}
                     </button>
                   </article>
                 ) : null}
@@ -1868,7 +1976,20 @@ function ModelListSkeleton() {
 function emptyAppSettings(): AppSettings {
   return {
     version: 1,
+    language: "en",
     orchestrator: emptyOrchestratorSettings(),
+    rolePresets: defaultRolePresets(),
+    aiConnections: [],
+    roleAssignments: normalizeRoleAssignments([]),
+    rolePolicies: normalizeRolePolicies([]),
+    conductorConfig: emptyConductorConfig(),
+    worktreeRoot: null,
+    worktreeSetup: null,
+    jiraConfig: emptyJiraConfig(),
+    obsidianVaultPath: null,
+    obsidianArtifactPath: null,
+    tokenBudget: null,
+    artifactRetentionDays: 30,
   };
 }
 
@@ -1886,8 +2007,37 @@ function normalizeAppSettings(value: unknown): AppSettings {
   const record = value as Partial<AppSettings>;
   return {
     version: 1,
+    language: record.language === "ko" ? "ko" : "en",
     orchestrator: normalizeOrchestratorSettings(record.orchestrator),
+    rolePresets: Array.isArray(record.rolePresets) ? record.rolePresets : defaultRolePresets(),
+    aiConnections: normalizeAiConnections(record.aiConnections),
+    roleAssignments: normalizeRoleAssignments(record.roleAssignments),
+    rolePolicies: normalizeRolePolicies(record.rolePolicies),
+    conductorConfig: normalizeConductorConfig(record.conductorConfig),
+    worktreeRoot: typeof record.worktreeRoot === "string" && record.worktreeRoot.trim() ? record.worktreeRoot.trim() : null,
+    worktreeSetup: typeof record.worktreeSetup === "undefined" ? null : record.worktreeSetup,
+    jiraConfig: normalizeJiraConfig(record.jiraConfig),
+    obsidianVaultPath:
+      typeof record.obsidianVaultPath === "string" && record.obsidianVaultPath.trim()
+        ? record.obsidianVaultPath.trim()
+        : null,
+    obsidianArtifactPath:
+      typeof record.obsidianArtifactPath === "string" && record.obsidianArtifactPath.trim()
+        ? record.obsidianArtifactPath.trim()
+        : null,
+    tokenBudget: typeof record.tokenBudget === "number" ? record.tokenBudget : null,
+    artifactRetentionDays: typeof record.artifactRetentionDays === "number" ? record.artifactRetentionDays : 30,
   };
+}
+
+function defaultRolePresets() {
+  return [
+    { roleId: "planner", label: "설계자", provider: null },
+    { roleId: "coder", label: "구현자", provider: null },
+    { roleId: "plan_verifier", label: "계획 검토자", provider: null },
+    { roleId: "code_reviewer", label: "코드 리뷰어", provider: null },
+    { roleId: "tester", label: "테스트 담당자", provider: null },
+  ];
 }
 
 function normalizeOrchestratorSettings(value: unknown): OrchestratorSettings {

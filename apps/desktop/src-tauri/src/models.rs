@@ -82,7 +82,37 @@ pub struct EffectiveSettings {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub version: u32,
+    #[serde(default = "default_language")]
+    pub language: String,
     pub orchestrator: OrchestratorSettings,
+    #[serde(default)]
+    pub role_presets: Value,
+    #[serde(default)]
+    pub ai_connections: Value,
+    #[serde(default)]
+    pub role_assignments: Value,
+    #[serde(default)]
+    pub role_policies: Value,
+    #[serde(default)]
+    pub conductor_config: Option<Value>,
+    #[serde(default)]
+    pub worktree_root: Option<String>,
+    #[serde(default)]
+    pub worktree_setup: Option<Value>,
+    #[serde(default)]
+    pub jira_config: Option<Value>,
+    #[serde(default)]
+    pub obsidian_vault_path: Option<String>,
+    #[serde(default)]
+    pub obsidian_artifact_path: Option<String>,
+    #[serde(default)]
+    pub token_budget: Option<i64>,
+    #[serde(default)]
+    pub artifact_retention_days: Option<i64>,
+}
+
+fn default_language() -> String {
+    "en".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

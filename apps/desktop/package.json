@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "npm run build && node scripts/serve-dist.mjs",
+    "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && node scripts/vite-build.mjs",
     "test": "node --test --experimental-strip-types src/lib/*.test.ts",
     "typecheck": "tsc --noEmit",

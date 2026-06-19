@@ -5951,6 +5951,7 @@ textarea {
 }
 
 .settings-field input,
+.settings-field select,
 .settings-field textarea {
   width: 100%;
 }
@@ -6128,6 +6129,62 @@ textarea {
 .settings-section > div:first-child {
   display: grid;
   gap: 4px;
+}
+
+.project-settings-list {
+  display: grid;
+  gap: 8px;
+}
+
+.project-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 8px;
+}
+
+.project-settings-row.active {
+  border-color: var(--accent);
+}
+
+.project-settings-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-settings-main:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.project-settings-main strong,
+.project-settings-main span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-settings-main span {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.project-settings-delete {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
 }
 
 .template-grid {

@@ -4,6 +4,7 @@ import { Bot, FileText, GitMerge, GitPullRequest, MessageSquareWarning, Trash2, 
 import type {
   AgentRunSummary,
   ApprovalSummary,
+  ControlTowerProjectSummary,
   GitFileStatus,
   ProjectSnapshot,
   TaskSummary,
@@ -25,6 +26,7 @@ interface TasksScreenProps {
   onRefresh: () => Promise<void>;
   onGoGit: () => void;
   onGoSettings: () => void;
+  onFocusProjectTask: (projectId: string, taskId: string) => Promise<void>;
 }
 
 export function TasksScreen({
@@ -36,29 +38,30 @@ export function TasksScreen({
   onRefresh,
   onGoGit: _onGoGit,
   onGoSettings: _onGoSettings,
+  onFocusProjectTask,
 }: TasksScreenProps) {
   const { t } = useI18n();
   const [taskRuns, setTaskRuns] = useState<Record<string, AgentRunSummary[]>>({});
+  const [towerProjects, setTowerProjects] = useState<ControlTowerProjectSummary[]>([]);
+  const [towerLoadError, setTowerLoadError] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("all");
   const [runRefreshKey, setRunRefreshKey] = useState(0);
   const taskRunKey = useMemo(
     () => snapshot?.tasks.map((task) => task.id).join(":") ?? "",
     [snapshot?.tasks],
   );
-  const sessions = useMemo(
-    () => buildTaskSessions(snapshot?.tasks ?? [], taskRuns),
-    [snapshot?.tasks, taskRuns],
-  );
+  const combined = useMemo(() => buildCombinedTasks(towerProjects, snapshot, taskRuns), [snapshot, taskRuns, towerProjects]);
+  const sessions = useMemo(() => buildTaskSessions(combined.tasks, combined.taskRuns), [combined]);
   const activeSession = sessions.find((session) => session.id === selectedSessionId) ?? sessions[0];
   const visibleTasks = activeSession
-    ? snapshot?.tasks.filter((task) => activeSession.taskIds.has(task.id)) ?? []
-    : snapshot?.tasks ?? [];
+    ? combined.tasks.filter((task) => activeSession.taskIds.has(task.id)) ?? []
+    : combined.tasks;
   const visibleTaskRuns = useMemo(() => {
     const visibleIds = new Set(visibleTasks.map((task) => task.id));
     return Object.fromEntries(
-      Object.entries(taskRuns).filter(([taskId]) => visibleIds.has(taskId)),
+      Object.entries(combined.taskRuns).filter(([taskId]) => visibleIds.has(taskId)),
     ) as Record<string, AgentRunSummary[]>;
-  }, [taskRuns, visibleTasks]);
+  }, [combined.taskRuns, visibleTasks]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -112,6 +115,25 @@ export function TasksScreen({
     setSelectedSessionId("all");
   }, [snapshot?.project.id]);
 
+  useEffect(() => {
+    let disposed = false;
+    setTowerLoadError(null);
+    void api
+      .listControlTowerProjects(80)
+      .then((projects) => {
+        if (!disposed) setTowerProjects(projects);
+      })
+      .catch((error) => {
+        if (!disposed) {
+          setTowerProjects([]);
+          setTowerLoadError(messageFromError(error, "통합 태스크 목록을 불러오지 못했습니다."));
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [snapshot?.project.id, taskRunKey, runRefreshKey]);
+
   if (!snapshot) {
     return (
       <section className="empty-state">
@@ -124,12 +146,7 @@ export function TasksScreen({
     );
   }
 
-  const observerSummary = buildWorkspaceObserverSummary(
-    snapshot,
-    visibleTaskRuns,
-    activeSession?.title ?? t("tasks.board.allProjects"),
-    t,
-  );
+  const observerSummary = buildWorkspaceObserverSummary(snapshot, visibleTaskRuns, activeSession?.title ?? t("tasks.board.allProjects"), t);
 
   return (
     <div className={selectedTask ? "tasks-layout with-detail" : "tasks-layout"}>
@@ -142,6 +159,7 @@ export function TasksScreen({
         </div>
 
         <WorkspaceObserverStrip summary={observerSummary} />
+        {towerLoadError ? <div className="error-banner compact">{towerLoadError}</div> : null}
 
         <div className="task-observer-workspace">
           <TaskSessionRail
@@ -156,8 +174,20 @@ export function TasksScreen({
             <TaskBoard
               tasks={visibleTasks}
               taskRuns={visibleTaskRuns}
+              projectLabels={combined.projectLabels}
               selectedTaskId={selectedTaskId}
-              onSelectTask={onSelectTask}
+              onSelectTask={(taskId) => {
+                if (!taskId) {
+                  onSelectTask(null);
+                  return;
+                }
+                const projectId = combined.taskProject[taskId];
+                if (projectId && projectId !== snapshot.project.id) {
+                  void onFocusProjectTask(projectId, taskId);
+                  return;
+                }
+                onSelectTask(taskId);
+              }}
             />
           ) : (
             <TaskObserverEmptyState
@@ -173,7 +203,7 @@ export function TasksScreen({
         <TaskFocusDetail
           snapshot={snapshot}
           task={selectedTask}
-          runs={taskRuns[selectedTask.id] ?? []}
+          runs={combined.taskRuns[selectedTask.id] ?? taskRuns[selectedTask.id] ?? []}
           onClose={() => onSelectTask(null)}
           onRefresh={onRefresh}
           onDeleted={async () => {
@@ -645,6 +675,13 @@ interface TaskSessionSummary {
   attentionCount: number;
 }
 
+interface CombinedTasks {
+  tasks: TaskSummary[];
+  taskRuns: Record<string, AgentRunSummary[]>;
+  projectLabels: Record<string, string>;
+  taskProject: Record<string, string>;
+}
+
 function TaskSessionRail({
   onSelectSession,
   selectedSessionId,
@@ -755,6 +792,41 @@ function buildWorkspaceObserverSummary(
     sessionTitle,
     headline,
   };
+}
+
+function buildCombinedTasks(
+  projects: ControlTowerProjectSummary[],
+  fallbackSnapshot: ProjectSnapshot | null,
+  fallbackTaskRuns: Record<string, AgentRunSummary[]>,
+): CombinedTasks {
+  const tasks: TaskSummary[] = [];
+  const taskRuns: Record<string, AgentRunSummary[]> = {};
+  const projectLabels: Record<string, string> = {};
+  const taskProject: Record<string, string> = {};
+
+  for (const project of projects) {
+    const snapshot = project.snapshot;
+    if (!snapshot) continue;
+    projectLabels[snapshot.project.id] = snapshot.project.name;
+    for (const task of snapshot.tasks) {
+      tasks.push(task);
+      taskProject[task.id] = snapshot.project.id;
+    }
+    for (const run of project.runs) {
+      (taskRuns[run.taskId] ??= []).push(run);
+    }
+  }
+
+  if (tasks.length === 0 && fallbackSnapshot) {
+    projectLabels[fallbackSnapshot.project.id] = fallbackSnapshot.project.name;
+    for (const task of fallbackSnapshot.tasks) {
+      tasks.push(task);
+      taskProject[task.id] = fallbackSnapshot.project.id;
+      taskRuns[task.id] = fallbackTaskRuns[task.id] ?? [];
+    }
+  }
+
+  return { tasks, taskRuns, projectLabels, taskProject };
 }
 
 function buildTaskSessions(

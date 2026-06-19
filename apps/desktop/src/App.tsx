@@ -4,6 +4,7 @@ import { GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal } from "
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
+import { I18nProvider, normalizeLanguage, translate, type AppLanguage, type MessageKey } from "./lib/i18n";
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot, TaskSummary } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
@@ -15,12 +16,12 @@ import { TerminalScreen } from "./screens/TerminalScreen";
 type Screen = "sessions" | "tasks" | "git" | "terminal" | "settings";
 type BootStatus = "restoring" | "ready";
 
-const navItems = [
-  { id: "sessions" as const, label: "채팅", icon: MessageSquare },
-  { id: "tasks" as const, label: "태스크", icon: ListChecks },
-  { id: "git" as const, label: "깃", icon: GitBranch },
-  { id: "terminal" as const, label: "터미널", icon: SquareTerminal },
-  { id: "settings" as const, label: "설정", icon: Settings },
+const navItemDefinitions: Array<{ id: Screen; labelKey: MessageKey; icon: typeof MessageSquare }> = [
+  { id: "sessions", labelKey: "nav.chat", icon: MessageSquare },
+  { id: "tasks", labelKey: "nav.tasks", icon: ListChecks },
+  { id: "git", labelKey: "nav.git", icon: GitBranch },
+  { id: "terminal", labelKey: "nav.terminal", icon: SquareTerminal },
+  { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
 
 export function App() {
@@ -32,6 +33,16 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
   const [terminalMounted, setTerminalMounted] = useState(false);
+  const [language, setLanguage] = useState<AppLanguage>("en");
+  const navItems = useMemo(
+    () =>
+      navItemDefinitions.map((item) => ({
+        id: item.id,
+        label: translate(language, item.labelKey),
+        icon: item.icon,
+      })),
+    [language],
+  );
 
   const selectedTask = useMemo<TaskSummary | null>(() => {
     if (!snapshot || !selectedTaskId) return null;
@@ -44,9 +55,10 @@ export function App() {
     async function restoreLastProject() {
       setBusy(true);
       try {
-        const launch = await api.getLaunchState();
+        const [launch, settings] = await Promise.all([api.getLaunchState(), api.getAppSettings()]);
         if (cancelled) return;
 
+        setLanguage(normalizeLanguage(settings.language));
         setRecents(launch.recentProjects);
         saveRecents(launch.recentProjects);
 
@@ -173,6 +185,32 @@ export function App() {
     }
   }
 
+  async function focusProjectTask(projectId: string, taskId: string) {
+    setError(null);
+    setBusy(true);
+    try {
+      if (snapshot?.project.id === projectId) {
+        setSelectedTaskId(taskId);
+        setScreen("tasks");
+        return;
+      }
+      const next = await api.openProjectById(projectId, { reconcileStaleRuns: true });
+      setSnapshot(next);
+      setSelectedTaskId(taskId);
+      setScreen("tasks");
+      setError(null);
+      const nextRecents = upsertRecent(recents, next.project, {
+        preserveExistingPosition: true,
+      });
+      setRecents(nextRecents);
+      saveRecents(nextRecents);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function forgetProject(projectId: string) {
     const recent = recents.find((project) => project.id === projectId);
     if (!recent) return;
@@ -220,6 +258,7 @@ export function App() {
   }
 
   return (
+    <I18nProvider language={language}>
     <AppShell
       navItems={navItems}
       activeScreen={screen}
@@ -230,13 +269,13 @@ export function App() {
       onSwitchProject={switchProject}
       onForgetProject={forgetProject}
       busy={busy}
-      hideSidebar={screen === "sessions" || screen === "terminal"}
+      hideSidebar={screen === "sessions" || screen === "tasks" || screen === "terminal"}
     >
       {error ? <div className="error-banner">{error}</div> : null}
       {bootStatus === "restoring" ? (
         <section className="empty-state">
-          <h2>마지막 프로젝트 여는 중</h2>
-          <p>이전에 열었던 Helm 프로젝트와 실행 상태를 확인하고 있습니다.</p>
+          <h2>{translate(language, "app.restore.title")}</h2>
+          <p>{translate(language, "app.restore.description")}</p>
         </section>
       ) : (
         <>
@@ -268,6 +307,7 @@ export function App() {
               onRefresh={refresh}
               onGoGit={() => setScreen("git")}
               onGoSettings={() => setScreen("settings")}
+              onFocusProjectTask={focusProjectTask}
             />
           ) : null}
           {screen === "git" ? (
@@ -290,11 +330,22 @@ export function App() {
             </div>
           ) : null}
           {screen === "settings" ? (
-            <SettingsScreen snapshot={snapshot} onRefresh={refresh} onOpenProject={() => void openProject()} />
+            <SettingsScreen
+              snapshot={snapshot}
+              onRefresh={refresh}
+              onOpenProject={() => void openProject()}
+              recents={recents}
+              activeProjectId={snapshot?.project.id ?? null}
+              onSwitchProject={switchProject}
+              onForgetProject={forgetProject}
+              busy={busy}
+              onLanguageChange={setLanguage}
+            />
           ) : null}
         </>
       )}
     </AppShell>
+    </I18nProvider>
   );
 }
 

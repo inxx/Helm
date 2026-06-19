@@ -49,7 +49,20 @@ export interface ControlTowerProjectSummary {
 
 export interface AppSettings {
   version: number;
+  language: "en" | "ko" | string;
   orchestrator: OrchestratorSettings;
+  rolePresets: unknown;
+  aiConnections: AiConnection[];
+  roleAssignments: RoleAssignment[];
+  rolePolicies: RolePolicy[];
+  conductorConfig: ConductorConfig | null;
+  worktreeRoot: string | null;
+  worktreeSetup: unknown | null;
+  jiraConfig: JiraConfig | null;
+  obsidianVaultPath: string | null;
+  obsidianArtifactPath: string | null;
+  tokenBudget: number | null;
+  artifactRetentionDays: number | null;
 }
 
 export interface OrchestratorSettings {

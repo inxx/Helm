@@ -338,9 +338,14 @@ fn get_app_settings(app: AppHandle) -> CommandResult<AppSettings> {
 }
 
 #[tauri::command]
-fn update_app_settings(settings: AppSettings, app: AppHandle) -> CommandResult<AppSettings> {
+fn update_app_settings(
+    settings: AppSettings,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<AppSettings> {
     let settings = normalize_app_settings(settings);
     save_app_settings(&app, &settings)?;
+    sync_app_settings_to_recent_projects(&app, &state, &settings)?;
     Ok(settings)
 }
 
@@ -2642,17 +2647,34 @@ fn app_settings_cwd(app: &AppHandle) -> CommandResult<PathBuf> {
 fn default_app_settings() -> AppSettings {
     AppSettings {
         version: 1,
+        language: "en".to_string(),
         orchestrator: OrchestratorSettings {
             enabled: false,
             mode: "observe".to_string(),
             connection: None,
             model: None,
         },
+        role_presets: default_global_role_presets(),
+        ai_connections: json!([]),
+        role_assignments: default_global_role_assignments(),
+        role_policies: default_global_role_policies(),
+        conductor_config: None,
+        worktree_root: None,
+        worktree_setup: None,
+        jira_config: None,
+        obsidian_vault_path: default_global_obsidian_vault_path(),
+        obsidian_artifact_path: None,
+        token_budget: None,
+        artifact_retention_days: Some(30),
     }
 }
 
 fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
     settings.version = 1;
+    settings.language = match settings.language.as_str() {
+        "ko" => "ko".to_string(),
+        _ => "en".to_string(),
+    };
     settings.orchestrator.mode = match settings.orchestrator.mode.as_str() {
         "gate" => "gate".to_string(),
         _ => "observe".to_string(),
@@ -2661,7 +2683,149 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
         .orchestrator
         .model
         .and_then(|value| non_empty_string(&value));
+    if settings.role_presets.is_null() {
+        settings.role_presets = default_global_role_presets();
+    }
+    if settings.ai_connections.is_null() {
+        settings.ai_connections = json!([]);
+    }
+    if settings.role_assignments.is_null() {
+        settings.role_assignments = default_global_role_assignments();
+    }
+    if settings.role_policies.is_null() {
+        settings.role_policies = default_global_role_policies();
+    }
+    settings.worktree_root = settings
+        .worktree_root
+        .and_then(|value| non_empty_string(&value));
+    settings.obsidian_vault_path = settings
+        .obsidian_vault_path
+        .and_then(|value| non_empty_string(&value))
+        .or_else(default_global_obsidian_vault_path);
+    settings.obsidian_artifact_path = settings
+        .obsidian_artifact_path
+        .and_then(|value| non_empty_string(&value));
+    settings.artifact_retention_days = settings.artifact_retention_days.or(Some(30));
     settings
+}
+
+fn sync_app_settings_to_recent_projects(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    settings: &AppSettings,
+) -> CommandResult<()> {
+    let stored = load_stored_launch_state(app)?;
+    for recent in stored.recent_projects {
+        let Ok(snapshot) = open_project_from_path(Path::new(&recent.root_path), state, false)
+        else {
+            continue;
+        };
+        let Ok(context) = project_context(state, &snapshot.project.id) else {
+            continue;
+        };
+        let Ok(conn) = db::open_existing_db(&context.db_path) else {
+            continue;
+        };
+        let _ = db::update_settings(
+            &conn,
+            &snapshot.project.id,
+            project_settings_patch_from_app_settings(settings),
+        );
+    }
+    Ok(())
+}
+
+fn project_settings_patch_from_app_settings(settings: &AppSettings) -> ProjectSettingsPatch {
+    ProjectSettingsPatch {
+        role_presets: Some(settings.role_presets.clone()),
+        ai_connections: Some(settings.ai_connections.clone()),
+        role_assignments: Some(settings.role_assignments.clone()),
+        role_policies: Some(settings.role_policies.clone()),
+        conductor_config: Some(settings.conductor_config.clone()),
+        worktree_root: Some(settings.worktree_root.clone()),
+        worktree_setup: Some(settings.worktree_setup.clone()),
+        jira_config: Some(settings.jira_config.clone()),
+        obsidian_vault_path: Some(settings.obsidian_vault_path.clone()),
+        obsidian_artifact_path: Some(settings.obsidian_artifact_path.clone()),
+        token_budget: Some(settings.token_budget),
+        artifact_retention_days: Some(settings.artifact_retention_days),
+    }
+}
+
+fn default_global_role_presets() -> Value {
+    json!([
+        { "roleId": "planner", "label": "설계자", "provider": null },
+        { "roleId": "coder", "label": "구현자", "provider": null },
+        { "roleId": "plan_verifier", "label": "계획 검토자", "provider": null },
+        { "roleId": "code_reviewer", "label": "코드 리뷰어", "provider": null },
+        { "roleId": "tester", "label": "테스트 담당자", "provider": null }
+    ])
+}
+
+fn default_global_role_assignments() -> Value {
+    json!([
+        {
+            "roleId": "planner",
+            "selectionMode": "single",
+            "connectionIds": [],
+            "selections": [],
+            "aggregationPolicy": null
+        },
+        {
+            "roleId": "coder",
+            "selectionMode": "single",
+            "connectionIds": [],
+            "selections": [],
+            "aggregationPolicy": null
+        },
+        {
+            "roleId": "plan_verifier",
+            "selectionMode": "multiple",
+            "connectionIds": [],
+            "selections": [],
+            "aggregationPolicy": "all_pass"
+        },
+        {
+            "roleId": "code_reviewer",
+            "selectionMode": "multiple",
+            "connectionIds": [],
+            "selections": [],
+            "aggregationPolicy": "all_pass"
+        },
+        {
+            "roleId": "tester",
+            "selectionMode": "multiple",
+            "connectionIds": [],
+            "selections": [],
+            "aggregationPolicy": "all_pass"
+        }
+    ])
+}
+
+fn default_global_role_policies() -> Value {
+    json!([
+        "planner",
+        "coder",
+        "plan_verifier",
+        "code_reviewer",
+        "tester"
+    ]
+    .into_iter()
+    .map(|role_id| json!({
+        "roleId": role_id,
+        "path": format!(".helm/policies/{role_id}.md"),
+        "enabled": false
+    }))
+    .collect::<Vec<_>>())
+}
+
+fn default_global_obsidian_vault_path() -> Option<String> {
+    let home = env::var("HOME").ok()?;
+    let path = Path::new(&home)
+        .join("Documents")
+        .join("Obsidian Vault")
+        .join("Claude");
+    path.is_dir().then(|| path.to_string_lossy().to_string())
 }
 
 fn non_empty_string(value: &str) -> Option<String> {

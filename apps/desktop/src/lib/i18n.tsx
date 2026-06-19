@@ -2,7 +2,7 @@ import { createContext, useContext, type ReactNode } from "react";
 
 export type AppLanguage = "en" | "ko";
 
-type MessageKey =
+export type MessageKey =
   | "nav.chat"
   | "nav.tasks"
   | "nav.git"
@@ -47,6 +47,8 @@ type MessageKey =
   | "settings.app.language.english"
   | "settings.app.language.korean"
   | "settings.app.language.note"
+  | "settings.app.projects.title"
+  | "settings.app.projects.description"
   | "settings.app.update.title"
   | "settings.app.update.description"
   | "settings.app.projectRequired.title"
@@ -227,10 +229,12 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "settings.app.language.english": "English",
     "settings.app.language.korean": "Korean",
     "settings.app.language.note": "English is the default. The setting is saved globally for this app.",
+    "settings.app.projects.title": "Projects",
+    "settings.app.projects.description": "Open recent projects or remove them from the list.",
     "settings.app.update.title": "App Updates",
     "settings.app.update.description": "Run the Helm updater manually when needed instead of automatic checks.",
-    "settings.app.projectRequired.title": "Project settings appear after opening a project.",
-    "settings.app.projectRequired.description": "Global orchestrator and app updates can be managed without a project.",
+    "settings.app.projectRequired.title": "Settings are saved globally.",
+    "settings.app.projectRequired.description": "Run history, Git, and terminal features become available after opening a project.",
     "settings.app.openProject": "Open project",
     "settings.app.currentVersion": "Current version {version}",
     "settings.app.versionUnknown": "not checked",
@@ -406,10 +410,12 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "settings.app.language.english": "영어",
     "settings.app.language.korean": "한국어",
     "settings.app.language.note": "기본값은 영어입니다. 이 설정은 앱 전역으로 저장됩니다.",
+    "settings.app.projects.title": "프로젝트",
+    "settings.app.projects.description": "최근 프로젝트 목록을 열거나 목록에서 제거합니다.",
     "settings.app.update.title": "앱 업데이트",
     "settings.app.update.description": "자동 확인 대신 필요할 때 Helm updater를 수동으로 실행합니다.",
-    "settings.app.projectRequired.title": "프로젝트별 설정은 프로젝트를 연 뒤 표시됩니다.",
-    "settings.app.projectRequired.description": "전역 오케스트레이터와 앱 업데이트는 프로젝트 없이도 관리할 수 있습니다.",
+    "settings.app.projectRequired.title": "설정은 전역으로 저장됩니다.",
+    "settings.app.projectRequired.description": "실행 기록, Git, 터미널 기능은 프로젝트를 열면 사용할 수 있습니다.",
     "settings.app.openProject": "프로젝트 열기",
     "settings.app.currentVersion": "현재 버전 {version}",
     "settings.app.versionUnknown": "확인 전",
