@@ -1,6 +1,6 @@
 use crate::models::{
-    CommandError, CommandResult, GitBranchSummary, GitCommitSummary, GitFileStatus, GitGraphCell,
-    GitRepositoryState,
+    CommandError, CommandResult, GitBranchSummary, GitCommitSummary, GitFileDiff, GitFileStatus,
+    GitGraphCell, GitRepositoryState,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -284,6 +284,67 @@ pub fn changed_files(root: &Path) -> CommandResult<Vec<GitFileStatus>> {
     }
 
     Ok(files)
+}
+
+pub fn file_diff(root: &Path, path: &str, mode: &str) -> CommandResult<GitFileDiff> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(CommandError::validation("diff를 볼 파일을 선택해주세요."));
+    }
+    if path.starts_with('/') || path.split('/').any(|part| part == "..") {
+        return Err(CommandError::validation("저장소 내부 파일만 diff를 볼 수 있습니다."));
+    }
+
+    let mode = match mode {
+        "staged" => "staged",
+        "worktree" | "" => "worktree",
+        _ => return Err(CommandError::validation("지원하지 않는 diff 모드입니다.")),
+    };
+
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root);
+    if mode == "staged" {
+        command.args(["diff", "--no-color", "--cached", "--"]).arg(path);
+    } else if !root.join(path).exists() {
+        command.args(["diff", "--no-color", "--"]).arg(path);
+    } else {
+        let status = changed_files(root)?
+            .into_iter()
+            .find(|file| file.path == path)
+            .map(|file| file.status)
+            .unwrap_or_else(|| "modified".to_string());
+        if status == "untracked" {
+            command
+                .args(["diff", "--no-color", "--no-index", "--"])
+                .arg("/dev/null")
+                .arg(path);
+        } else {
+            command.args(["diff", "--no-color", "--"]).arg(path);
+        }
+    }
+
+    let output = command
+        .output()
+        .map_err(|err| CommandError::io("Git diff를 만들지 못했습니다.", err))?;
+
+    let acceptable_status = if mode == "worktree" {
+        output.status.success() || output.status.code() == Some(1)
+    } else {
+        output.status.success()
+    };
+    if !acceptable_status {
+        return Err(CommandError::with_details(
+            "GitCommandFailed",
+            "Git diff 실행에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    Ok(GitFileDiff {
+        path: path.to_string(),
+        mode: mode.to_string(),
+        diff: String::from_utf8_lossy(&output.stdout).to_string(),
+    })
 }
 
 pub fn local_branches(root: &Path) -> CommandResult<Vec<GitBranchSummary>> {

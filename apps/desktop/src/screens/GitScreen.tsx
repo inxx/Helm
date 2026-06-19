@@ -7,6 +7,8 @@ import { shortHash } from "../lib/status";
 import type {
   GitBranchSummary,
   GitCommitSummary,
+  GitDiffMode,
+  GitFileDiff,
   GitFileStatus,
   GitGraphCell,
   ProjectSnapshot,
@@ -561,29 +563,127 @@ function SelectedGitDetail({
 }
 
 function ChangesView({ files, snapshot }: { files: GitFileStatus[]; snapshot: ProjectSnapshot }) {
+  const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
+  const [diffMode, setDiffMode] = useState<GitDiffMode>("worktree");
+  const [fileDiff, setFileDiff] = useState<GitFileDiff | null>(null);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [loadingDiff, setLoadingDiff] = useState(false);
+
+  useEffect(() => {
+    if (files.length === 0) {
+      setSelectedFileKey(null);
+      return;
+    }
+    if (!selectedFileKey || !files.some((file) => fileKey(file) === selectedFileKey)) {
+      setSelectedFileKey(fileKey(files[0]));
+    }
+  }, [files, selectedFileKey]);
+
+  const selectedFile = files.find((file) => fileKey(file) === selectedFileKey) ?? files[0] ?? null;
+
+  useEffect(() => {
+    setDiffMode(selectedFile?.staged ? "staged" : "worktree");
+  }, [selectedFileKey, selectedFile?.staged]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!selectedFile) {
+      setFileDiff(null);
+      setDiffError(null);
+      setLoadingDiff(false);
+      return;
+    }
+
+    setLoadingDiff(true);
+    setDiffError(null);
+
+    void api
+      .getFileDiff(snapshot.project.id, selectedFile.path, diffMode)
+      .then((nextDiff) => {
+        if (cancelled) return;
+        setFileDiff(nextDiff);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setFileDiff(null);
+        setDiffError(messageFromError(error));
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoadingDiff(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [diffMode, selectedFile, snapshot.project.id]);
+
   return (
     <div className="git-changes-view">
-      <section className="git-panel">
-        <div className="git-panel-title">
-          <span>상태</span>
-          <strong>{snapshot.repository.dirtyCount}</strong>
-        </div>
-        <div className="git-status-breakdown">
-          <GitMetric label="staged" value={snapshot.repository.stagedCount} />
-          <GitMetric label="unstaged" value={snapshot.repository.unstagedCount} />
-          <GitMetric label="untracked" value={snapshot.repository.untrackedCount} />
-          <GitMetric
-            label="user"
-            value={snapshot.repository.userName ?? snapshot.repository.userEmail ?? "unset"}
+      <div className="git-changes-sidebar">
+        <section className="git-panel">
+          <div className="git-panel-title">
+            <span>상태</span>
+            <strong>{snapshot.repository.dirtyCount}</strong>
+          </div>
+          <div className="git-status-breakdown">
+            <GitMetric label="staged" value={snapshot.repository.stagedCount} />
+            <GitMetric label="unstaged" value={snapshot.repository.unstagedCount} />
+            <GitMetric label="untracked" value={snapshot.repository.untrackedCount} />
+            <GitMetric
+              label="user"
+              value={snapshot.repository.userName ?? snapshot.repository.userEmail ?? "unset"}
+            />
+          </div>
+        </section>
+        <section className="git-panel">
+          <div className="git-panel-title">
+            <span>변경 파일</span>
+            <strong>{files.length}</strong>
+          </div>
+          <FilesList
+            files={files}
+            selectedFileKey={selectedFileKey}
+            onSelectFile={setSelectedFileKey}
           />
-        </div>
-      </section>
-      <section className="git-panel">
+        </section>
+      </div>
+      <section className="git-panel git-diff-panel">
         <div className="git-panel-title">
-          <span>변경 파일</span>
-          <strong>{files.length}</strong>
+          <span>Diff</span>
+          <strong>{selectedFile ? selectedFile.path : "none"}</strong>
         </div>
-        <FilesList files={files} />
+        <div className="git-diff-body">
+          {selectedFile ? (
+            <div className="git-diff-toolbar">
+              <div className="git-diff-file-meta">
+                <span className={fileCodeClass(selectedFile.status)}>
+                  {fileStatusCode(selectedFile.status)}
+                </span>
+                <strong title={selectedFile.path}>{selectedFile.path}</strong>
+              </div>
+              <div className="git-diff-mode-toggle" role="group" aria-label="Diff 모드">
+                <button
+                  className={diffMode === "worktree" ? "active" : ""}
+                  onClick={() => setDiffMode("worktree")}
+                  type="button"
+                >
+                  Worktree
+                </button>
+                <button
+                  className={diffMode === "staged" ? "active" : ""}
+                  disabled={!selectedFile.staged}
+                  onClick={() => setDiffMode("staged")}
+                  type="button"
+                >
+                  Staged
+                </button>
+              </div>
+            </div>
+          ) : null}
+          <DiffContent diff={fileDiff?.diff ?? ""} error={diffError} loading={loadingDiff} />
+        </div>
       </section>
     </div>
   );
@@ -618,22 +718,79 @@ function BranchesView({ branches }: { branches: GitBranchSummary[] }) {
   );
 }
 
-function FilesList({ files }: { files: GitFileStatus[] }) {
+function FilesList({
+  files,
+  selectedFileKey,
+  onSelectFile,
+}: {
+  files: GitFileStatus[];
+  selectedFileKey?: string | null;
+  onSelectFile?: (key: string) => void;
+}) {
   if (files.length === 0) {
     return <p className="muted git-empty-copy">변경 파일 없음</p>;
   }
 
   return (
     <ul className="file-list git-file-list">
-      {files.map((file) => (
-        <li key={`${file.status}:${file.path}:${file.renamedFrom ?? ""}`}>
-          <span className={fileCodeClass(file.status)}>{fileStatusCode(file.status)}</span>
-          <strong title={file.path}>{file.path}</strong>
-          {file.renamedFrom ? <span title={file.renamedFrom}>R</span> : null}
-        </li>
-      ))}
+      {files.map((file) => {
+        const key = fileKey(file);
+        return (
+          <li className={selectedFileKey === key ? "selected" : ""} key={key}>
+            <button disabled={!onSelectFile} onClick={() => onSelectFile?.(key)} type="button">
+              <span className={fileCodeClass(file.status)}>{fileStatusCode(file.status)}</span>
+              <strong title={file.path}>{file.path}</strong>
+              {file.staged ? <span title="staged">S</span> : null}
+              {file.renamedFrom ? <span title={file.renamedFrom}>R</span> : null}
+            </button>
+          </li>
+        );
+      })}
     </ul>
   );
+}
+
+function DiffContent({
+  diff,
+  error,
+  loading,
+}: {
+  diff: string;
+  error: string | null;
+  loading: boolean;
+}) {
+  if (loading) {
+    return <div className="empty-inline">diff 불러오는 중</div>;
+  }
+  if (error) {
+    return <div className="git-inline-error">{error}</div>;
+  }
+  if (!diff.trim()) {
+    return <div className="empty-inline">표시할 diff 없음</div>;
+  }
+
+  return (
+    <pre className="git-diff-code" aria-label="파일 diff">
+      {diff.split("\n").map((line, index) => (
+        <span className={diffLineClass(line)} key={`${index}:${line}`}>
+          {line || " "}
+        </span>
+      ))}
+    </pre>
+  );
+}
+
+function diffLineClass(line: string): string {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("diff --git") || line.startsWith("index ")) return "meta";
+  if (line.startsWith("+++") || line.startsWith("---")) return "file";
+  if (line.startsWith("+")) return "added";
+  if (line.startsWith("-")) return "deleted";
+  return "";
+}
+
+function fileKey(file: GitFileStatus): string {
+  return `${file.status}:${file.path}:${file.renamedFrom ?? ""}`;
 }
 
 function buildGraphRows(

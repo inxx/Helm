@@ -333,6 +333,14 @@ pub struct GitFileStatus {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitFileDiff {
+    pub path: String,
+    pub mode: String,
+    pub diff: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskCompletionGitSummary {
     pub task: TaskSummary,
     pub branch_name: String,

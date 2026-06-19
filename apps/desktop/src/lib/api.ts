@@ -15,6 +15,8 @@ import type {
   EpicSummary,
   GitBranchSummary,
   GitCommitSummary,
+  GitDiffMode,
+  GitFileDiff,
   GitFileStatus,
   EffectiveSettings,
   LaunchState,
@@ -229,6 +231,9 @@ export const api = {
   },
   getChangedFiles(projectId: string) {
     return invoke<GitFileStatus[]>("get_changed_files", { projectId });
+  },
+  getFileDiff(projectId: string, path: string, mode: GitDiffMode = "worktree") {
+    return invoke<GitFileDiff>("get_file_diff", { projectId, path, mode });
   },
   getTaskWorktreeChangedFiles(projectId: string, taskId: string) {
     return invoke<GitFileStatus[]>("get_task_worktree_changed_files", { projectId, taskId });

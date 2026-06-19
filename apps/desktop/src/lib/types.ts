@@ -438,6 +438,14 @@ export interface GitFileStatus {
   renamedFrom: string | null;
 }
 
+export type GitDiffMode = "worktree" | "staged";
+
+export interface GitFileDiff {
+  path: string;
+  mode: GitDiffMode;
+  diff: string;
+}
+
 export interface NodeRuntimeSummary {
   id: string;
   label: string;

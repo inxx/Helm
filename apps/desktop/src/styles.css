@@ -5213,6 +5213,15 @@ textarea {
   background: var(--line);
 }
 
+.git-changes-sidebar {
+  display: grid;
+  grid-template-rows: minmax(180px, 0.36fr) minmax(0, 1fr);
+  gap: 1px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .git-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -5498,6 +5507,207 @@ textarea {
 
 .git-file-list li {
   min-height: 34px;
+  padding: 0;
+}
+
+.git-file-list li.selected {
+  background: var(--brand-weak);
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+
+.git-file-list button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 8px 16px;
+  text-align: left;
+}
+
+.git-file-list button:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.git-file-list button:disabled {
+  cursor: default;
+}
+
+.git-file-list button > span:first-child,
+.git-diff-file-meta > span:first-child {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 18px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.git-file-list button > span.code-added,
+.git-diff-file-meta > span.code-added {
+  background: var(--green-weak);
+  color: var(--green);
+}
+
+.git-file-list button > span.code-modified,
+.git-diff-file-meta > span.code-modified {
+  background: var(--amber-weak);
+  color: var(--amber);
+}
+
+.git-file-list button > span.code-deleted,
+.git-diff-file-meta > span.code-deleted {
+  background: var(--red-weak);
+  color: var(--red);
+}
+
+.git-file-list button strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-file-list button > span:not(:first-child) {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.git-diff-panel {
+  min-width: 0;
+}
+
+.git-diff-body {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.git-diff-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 12px;
+}
+
+.git-diff-file-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.git-diff-file-meta strong {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-diff-mode-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.git-diff-mode-toggle button {
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-muted);
+  padding: 5px 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.git-diff-mode-toggle button:first-child {
+  border-left: 0;
+}
+
+.git-diff-mode-toggle button:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.git-diff-mode-toggle button.active {
+  background: var(--brand-weak);
+  color: var(--brand);
+}
+
+.git-diff-mode-toggle button:disabled {
+  color: var(--text-muted);
+  opacity: 0.45;
+}
+
+.git-diff-code {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.git-diff-code span {
+  display: block;
+  min-width: max-content;
+  padding: 0 14px;
+  white-space: pre;
+}
+
+.git-diff-code span.meta,
+.git-diff-code span.file {
+  color: var(--text-muted);
+}
+
+.git-diff-code span.hunk {
+  background: var(--brand-weak);
+  color: var(--brand);
+}
+
+.git-diff-code span.added {
+  background: var(--green-weak);
+  color: var(--green);
+}
+
+.git-diff-code span.deleted {
+  background: var(--red-weak);
+  color: var(--red);
+}
+
+.git-diff-body .git-inline-error {
+  grid-row: auto;
+  border-bottom: 1px solid var(--red);
+  padding: 10px 14px;
 }
 
 .git-empty-copy {

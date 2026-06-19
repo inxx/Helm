@@ -6,7 +6,7 @@ use crate::models::{
     AgentRunSummary, AgentSessionSummary, AiConnectionCheckResult, AiModelRefreshResult,
     AppSettings, ApprovalSummary, CommandError, CommandResult, CoordinationExportSummary,
     CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput, DecidePlanDraftInput,
-    EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary, GitFileStatus,
+    EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary, GitFileDiff, GitFileStatus,
     GitRepositoryState, NodeRuntimeSummary, OrchestratorSettings, PlannerConversationInput,
     PlannerConversationResult, PlanningMaterializationSummary, PlanningSessionDetail,
     PlanningSessionSummary, ProjectContext, ProjectSettingsPatch, ProjectSnapshot, ProjectSummary,
@@ -1088,6 +1088,17 @@ fn get_changed_files(
 ) -> CommandResult<Vec<GitFileStatus>> {
     let context = project_context(&state, &project_id)?;
     git::changed_files(&context.root_path)
+}
+
+#[tauri::command]
+fn get_file_diff(
+    project_id: String,
+    path: String,
+    mode: String,
+    state: State<'_, AppState>,
+) -> CommandResult<GitFileDiff> {
+    let context = project_context(&state, &project_id)?;
+    git::file_diff(&context.root_path, &path, &mode)
 }
 
 #[tauri::command]
@@ -6020,6 +6031,7 @@ fn main() {
             get_local_branches,
             get_recent_commits,
             get_changed_files,
+            get_file_diff,
             get_task_worktree_changed_files,
             switch_git_branch,
             list_node_runtimes,
