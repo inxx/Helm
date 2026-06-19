@@ -1658,6 +1658,7 @@ export function SettingsScreen({
                 <label className="settings-field">
                   <span>{t("settings.app.language.label")}</span>
                   <select
+                    className="settings-language-select"
                     value={appSettings.language}
                     disabled={!appSettingsLoaded || appSettingsBusy}
                     onChange={(event) => void updateLanguage(event.target.value === "ko" ? "ko" : "en")}

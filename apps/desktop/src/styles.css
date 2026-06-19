@@ -422,11 +422,23 @@ h3 {
 }
 
 .sidebar-project-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
   color: var(--muted-foreground);
+  line-height: 1;
 }
 
 .sidebar-project-delete:hover {
   color: var(--destructive);
+}
+
+.sidebar-project-delete svg {
+  display: block;
+  margin: 0;
 }
 
 .sidebar-add-project {
@@ -908,7 +920,7 @@ h3 {
 
 .session-orchestrator-composer textarea {
   min-height: 72px;
-  resize: vertical;
+  resize: none;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--background);
@@ -925,8 +937,8 @@ h3 {
 }
 
 .session-orchestrator-composer button {
-  align-self: end;
-  min-height: 40px;
+  align-self: stretch;
+  min-height: 72px;
 }
 
 .session-message {
@@ -5979,6 +5991,12 @@ textarea {
   width: 100%;
 }
 
+.settings-field select.settings-language-select {
+  width: min(100%, 280px);
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
 .settings-field textarea {
   min-height: 220px;
   font-family: var(--mono);
@@ -6205,9 +6223,19 @@ textarea {
 }
 
 .project-settings-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 32px;
+  height: 32px;
   min-width: 32px;
   padding: 0;
+  line-height: 1;
+}
+
+.project-settings-delete svg {
+  display: block;
+  margin: 0;
 }
 
 .template-grid {
