@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Bot, Check, FileText, Folder, GitBranch, Loader2, MessageSquare, MoreHorizontal, Pencil, Plus, Send, Square, SquareTerminal, Trash2, User, X } from "lucide-react";
+import { Bot, Check, FileText, Folder, Loader2, MessageSquare, MoreHorizontal, Pencil, Plus, Send, Square, Trash2, User, X } from "lucide-react";
 import { ApprovalInbox } from "../components/ApprovalInbox";
 import { api } from "../lib/api";
 import { useI18n, type AppLanguage } from "../lib/i18n";
@@ -438,18 +438,6 @@ export function SessionsScreen({
                   {activeSession?.provider ?? t("sessions.providerUnknown")}
                   {activeSession?.model ? ` · ${activeSession.model}` : ""}
                 </p>
-              </div>
-              <div className="session-header-actions">
-                {activeSession?.branch ? (
-                  <span className="session-meta-pill">
-                    <GitBranch size={13} />
-                    {activeSession.branch}
-                  </span>
-                ) : null}
-                <button className="secondary-button" onClick={onGoTerminal} type="button">
-                  <SquareTerminal size={14} />
-                  <span>{t("sessions.terminal")}</span>
-                </button>
               </div>
             </header>
             <div className="session-chat-scroll" ref={chatScrollRef}>

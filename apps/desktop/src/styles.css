@@ -879,31 +879,6 @@ h3 {
   min-width: 0;
 }
 
-.session-header-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.session-meta-pill {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 1 240px;
-  gap: 5px;
-  max-width: 240px;
-  height: 28px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  color: var(--soft);
-  padding: 0 9px;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .session-chat-scroll {
   display: flex;
   min-height: 0;
