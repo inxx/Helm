@@ -580,9 +580,8 @@ export function SessionsScreen({
             <ApprovalInbox compact snapshot={snapshot} onRefresh={onRefresh} />
           </div>
         ) : null}
-        <ContextRow label="Project" value={snapshot.project.name} />
-        <ContextRow label="Branch" value={activeSession?.branch ?? snapshot.repository.currentBranch ?? "-"} />
-        <ContextRow label="Worktree" value={activeSession?.worktreePath ?? "-"} />
+        <ContextRow className="full-value" label="Branch" value={activeSession?.branch ?? snapshot.repository.currentBranch ?? "-"} />
+        <ContextRow className="full-value" label="Worktree" value={activeSession?.worktreePath ?? "-"} />
         <ContextRow label="Changed files" value={changedFileCountLabel(changedFiles, activeSession)} />
         <ContextRow label="Events" value={activeSession?.eventCount?.toString() ?? "0"} />
         <ContextRow

@@ -1118,7 +1118,8 @@ h3 {
   font-weight: 600;
 }
 
-.session-context-row strong.path-value {
+.session-context-row strong.path-value,
+.session-context-row strong.full-value {
   overflow: visible;
   overflow-wrap: anywhere;
   text-overflow: clip;
