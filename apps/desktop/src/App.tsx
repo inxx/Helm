@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal } from "lucide-react";
+import { GitBranch, GitPullRequest, ListChecks, MessageSquare, Settings, SquareTerminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
@@ -8,18 +8,20 @@ import { I18nProvider, normalizeLanguage, translate, type AppLanguage, type Mess
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
+import { IssuesScreen } from "./screens/IssuesScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { SessionsScreen } from "./screens/SessionsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
 
-type Screen = "sessions" | "tasks" | "git" | "terminal" | "settings";
+type Screen = "sessions" | "tasks" | "git" | "issues" | "terminal" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItemDefinitions: Array<{ id: Screen; labelKey: MessageKey; icon: typeof MessageSquare }> = [
   { id: "sessions", labelKey: "nav.chat", icon: MessageSquare },
   { id: "tasks", labelKey: "nav.tasks", icon: ListChecks },
   { id: "git", labelKey: "nav.git", icon: GitBranch },
+  { id: "issues", labelKey: "nav.issues", icon: GitPullRequest },
   { id: "terminal", labelKey: "nav.terminal", icon: SquareTerminal },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
@@ -305,6 +307,9 @@ export function App() {
           ) : null}
           {screen === "git" ? (
             <GitScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
+          ) : null}
+          {screen === "issues" ? (
+            <IssuesScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
           ) : null}
           {terminalMounted ? (
             <div

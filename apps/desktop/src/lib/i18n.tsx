@@ -6,6 +6,7 @@ export type MessageKey =
   | "nav.chat"
   | "nav.tasks"
   | "nav.git"
+  | "nav.issues"
   | "nav.terminal"
   | "nav.settings"
   | "shell.domainTabs"
@@ -188,6 +189,7 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "nav.chat": "Chat",
     "nav.tasks": "Tasks",
     "nav.git": "Git",
+    "nav.issues": "Issues",
     "nav.terminal": "Terminal",
     "nav.settings": "Settings",
     "shell.domainTabs": "Domain tabs",
@@ -369,6 +371,7 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "nav.chat": "채팅",
     "nav.tasks": "태스크",
     "nav.git": "깃",
+    "nav.issues": "이슈",
     "nav.terminal": "터미널",
     "nav.settings": "설정",
     "shell.domainTabs": "도메인 탭",
