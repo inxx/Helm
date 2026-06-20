@@ -67,6 +67,8 @@ export function SessionsScreen({
   const [composingNewSession, setComposingNewSession] = useState(false);
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const chatScrollFrameRef = useRef<number | null>(null);
   const taskById = useMemo(
     () => new Map(snapshot?.tasks.map((task) => [task.id, task]) ?? []),
     [snapshot?.tasks],
@@ -138,6 +140,25 @@ export function SessionsScreen({
     setEditingStageAi(false);
     setDraftRoleAssignments(null);
   }, [snapshot?.project.id]);
+
+  useEffect(() => {
+    scrollChatToBottom();
+  }, [
+    activeApprovalCount,
+    activeSession?.id,
+    activeTask?.id,
+    events.length,
+    orchestratorMessages.length,
+    summaryText,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      if (chatScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(chatScrollFrameRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!snapshot || !activeSession?.sourceRunId || !activeSession.taskId) {
@@ -285,6 +306,18 @@ export function SessionsScreen({
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
 
+  function scrollChatToBottom() {
+    if (chatScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(chatScrollFrameRef.current);
+    }
+    chatScrollFrameRef.current = window.requestAnimationFrame(() => {
+      chatScrollFrameRef.current = null;
+      const scrollNode = chatScrollRef.current;
+      if (!scrollNode) return;
+      scrollNode.scrollTop = scrollNode.scrollHeight;
+    });
+  }
+
   return (
     <div className="sessions-layout">
       <aside className="sessions-rail" aria-label={t("sessions.listAria")}>
@@ -419,7 +452,7 @@ export function SessionsScreen({
                 </button>
               </div>
             </header>
-            <div className="session-chat-scroll">
+            <div className="session-chat-scroll" ref={chatScrollRef}>
               <SessionMessage role="assistant" icon="bot" title={t("sessions.assistantTitle")} timestamp={activeSession?.lastSignalAt ?? null} language={language}>
                 <p>{t("sessions.introMessage")}</p>
               </SessionMessage>
