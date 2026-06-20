@@ -875,15 +875,22 @@ h3 {
   padding: 13px 18px;
 }
 
+.session-chat-header > div:first-child {
+  min-width: 0;
+}
+
 .session-header-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .session-meta-pill {
   display: inline-flex;
   align-items: center;
+  flex: 0 1 240px;
   gap: 5px;
   max-width: 240px;
   height: 28px;
@@ -1541,6 +1548,7 @@ h3 {
 .artifact-actions button,
 .approval-actions button {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 6px;
   height: 28px;
@@ -1550,6 +1558,7 @@ h3 {
   color: var(--text);
   padding: 0 10px;
   font-size: 12.5px;
+  white-space: nowrap;
 }
 
 .secondary-button:hover:not(:disabled),
