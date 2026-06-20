@@ -1,6 +1,20 @@
 import type { LucideIcon } from "lucide-react";
-import { Files, GitBranch, GitCommitHorizontal, GitGraph } from "lucide-react";
-import type { CSSProperties } from "react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clock3,
+  ExternalLink,
+  Files,
+  Filter,
+  GitBranch,
+  GitCommitHorizontal,
+  GitGraph,
+  GitPullRequest,
+  RefreshCw,
+  Search,
+  UserRound,
+} from "lucide-react";
+import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { useI18n, type AppLanguage } from "../lib/i18n";
@@ -20,7 +34,8 @@ interface GitScreenProps {
   onOpenProject: () => void;
 }
 
-type GitView = "genealogy" | "changes" | "branches";
+type GitView = "overview" | "genealogy" | "changes" | "branches";
+type WorkFilter = "open" | "mine" | "review" | "ci-failed" | "jira-gap";
 
 type GitGraphRow =
   | {
@@ -47,10 +62,32 @@ type GitGraphRow =
 type SelectableGitGraphRow = Exclude<GitGraphRow, { kind: "connector" }>;
 
 const gitViews: Array<{ id: GitView; label: Record<AppLanguage, string>; icon: LucideIcon }> = [
+  { id: "overview", label: { ko: "통합", en: "Overview" }, icon: GitPullRequest },
   { id: "genealogy", label: { ko: "계보", en: "History" }, icon: GitGraph },
   { id: "changes", label: { ko: "변경", en: "Changes" }, icon: Files },
   { id: "branches", label: { ko: "브랜치", en: "Branches" }, icon: GitBranch },
 ];
+
+interface WorkDashboardRow {
+  id: string;
+  title: string;
+  subtitle: string;
+  projectName: string;
+  branchName: string;
+  prNumber: string;
+  prState: "open" | "draft";
+  reviewer: string;
+  reviewState: "none" | "requested" | "approved";
+  ciState: "passed" | "pending" | "failed" | "none";
+  ciLabel: string;
+  mergeState: "ready" | "blocked" | "draft";
+  jiraKey: string | null;
+  jiraState: "linked" | "missing" | "in-progress";
+  updatedLabel: string;
+  isMine: boolean;
+  ahead: number | null;
+  behind: number | null;
+}
 
 const graphLaneColors = [
   "oklch(0.64 0.16 252)",
@@ -69,7 +106,9 @@ const graphCellWidth = 10;
 
 export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
   const { language } = useI18n();
-  const [activeView, setActiveView] = useState<GitView>("genealogy");
+  const [activeView, setActiveView] = useState<GitView>("overview");
+  const [activeWorkFilter, setActiveWorkFilter] = useState<WorkFilter>("open");
+  const [dashboardSearch, setDashboardSearch] = useState("");
   const [branches, setBranches] = useState<GitBranchSummary[]>([]);
   const [commits, setCommits] = useState<GitCommitSummary[]>([]);
   const [files, setFiles] = useState<GitFileStatus[]>([]);
@@ -120,6 +159,10 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
   }, [snapshot]);
 
   const graphRows = useMemo(() => buildGraphRows(snapshot, commits), [snapshot, commits]);
+  const dashboardRows = useMemo(
+    () => buildDashboardRows(snapshot, branches, commits, files),
+    [branches, commits, files, snapshot],
+  );
   const selectableRows = useMemo(
     () => graphRows.filter((row): row is SelectableGitGraphRow => row.kind !== "connector"),
     [graphRows],
@@ -189,6 +232,17 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
       </nav>
 
       <div className="git-tab-body">
+        {activeView === "overview" ? (
+          <IntegrationDashboard
+            rows={dashboardRows}
+            snapshot={snapshot}
+            activeFilter={activeWorkFilter}
+            onFilterChange={setActiveWorkFilter}
+            search={dashboardSearch}
+            onSearchChange={setDashboardSearch}
+            language={language}
+          />
+        ) : null}
         {activeView === "genealogy" ? (
           <GenealogyView
             rows={graphRows}
@@ -216,6 +270,192 @@ function GitMetric({ label, value }: { label: string; value: string | number }) 
       <strong>{value}</strong>
     </div>
   );
+}
+
+function IntegrationDashboard({
+  rows,
+  snapshot,
+  activeFilter,
+  onFilterChange,
+  search,
+  onSearchChange,
+  language,
+}: {
+  rows: WorkDashboardRow[];
+  snapshot: ProjectSnapshot;
+  activeFilter: WorkFilter;
+  onFilterChange: (filter: WorkFilter) => void;
+  search: string;
+  onSearchChange: (value: string) => void;
+  language: AppLanguage;
+}) {
+  const filteredRows = useMemo(() => {
+    const normalizedSearch = search.trim().toLowerCase();
+    return rows.filter((row) => {
+      const matchesFilter =
+        activeFilter === "open" ||
+        (activeFilter === "mine" && row.isMine) ||
+        (activeFilter === "review" && row.reviewState === "requested") ||
+        (activeFilter === "ci-failed" && row.ciState === "failed") ||
+        (activeFilter === "jira-gap" && row.jiraState === "missing");
+
+      if (!matchesFilter) return false;
+      if (!normalizedSearch) return true;
+
+      return [row.title, row.subtitle, row.branchName, row.jiraKey, row.projectName]
+        .filter(Boolean)
+        .some((value) => value!.toLowerCase().includes(normalizedSearch));
+    });
+  }, [activeFilter, rows, search]);
+
+  const counters = {
+    open: rows.length,
+    mine: rows.filter((row) => row.isMine).length,
+    review: rows.filter((row) => row.reviewState === "requested").length,
+    ciFailed: rows.filter((row) => row.ciState === "failed").length,
+    jiraGap: rows.filter((row) => row.jiraState === "missing").length,
+  };
+
+  const filters: Array<{ id: WorkFilter; label: string; count: number }> = [
+    { id: "open", label: language === "ko" ? "열기" : "Open", count: counters.open },
+    { id: "mine", label: language === "ko" ? "내 것" : "Mine", count: counters.mine },
+    { id: "review", label: language === "ko" ? "리뷰 필요" : "Needs review", count: counters.review },
+    { id: "ci-failed", label: language === "ko" ? "CI 실패" : "CI failed", count: counters.ciFailed },
+    { id: "jira-gap", label: language === "ko" ? "Jira 누락" : "Jira gaps", count: counters.jiraGap },
+  ];
+
+  return (
+    <section className="git-work-dashboard">
+      <div className="git-work-commandbar">
+        <div className="git-work-source">
+          <span className="git-source-icon">
+            <GitPullRequest size={16} />
+          </span>
+          <div>
+            <strong>GitHub · Jira · Local Mac</strong>
+            <span>
+              {language === "ko"
+                ? `${snapshot.project.name} 프로젝트 · 로컬 Git 신호 기반`
+                : `${snapshot.project.name} project · local Git signals`}
+            </span>
+          </div>
+        </div>
+        <div className="git-work-actions" aria-label={language === "ko" ? "통합 작업 액션" : "Integration actions"}>
+          <button title={language === "ko" ? "필터" : "Filter"} type="button">
+            <Filter size={15} />
+          </button>
+          <button title={language === "ko" ? "새로고침" : "Refresh"} type="button">
+            <RefreshCw size={15} />
+          </button>
+          <button title={language === "ko" ? "외부에서 열기" : "Open externally"} type="button">
+            <ExternalLink size={15} />
+          </button>
+        </div>
+      </div>
+
+      <div className="git-work-toolbar">
+        <div className="git-work-filters" role="tablist" aria-label={language === "ko" ? "작업 필터" : "Work filters"}>
+          {filters.map((filter) => (
+            <button
+              aria-selected={activeFilter === filter.id}
+              className={activeFilter === filter.id ? "active" : ""}
+              key={filter.id}
+              onClick={() => onFilterChange(filter.id)}
+              role="tab"
+              type="button"
+            >
+              <span>{filter.label}</span>
+              <strong>{filter.count}</strong>
+            </button>
+          ))}
+        </div>
+        <label className="git-work-search">
+          <Search size={15} />
+          <input
+            aria-label={language === "ko" ? "PR, 브랜치, Jira 검색" : "Search PRs, branches, Jira"}
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder={language === "ko" ? "is:pr is:open branch:JIRA-123" : "is:pr is:open branch:JIRA-123"}
+            value={search}
+          />
+        </label>
+      </div>
+
+      <div className="git-work-table-shell">
+        <div className="git-work-table" role="table" aria-label={language === "ko" ? "통합 작업 목록" : "Integrated work list"}>
+          <div className="git-work-row git-work-head" role="row">
+            <span>ID</span>
+            <span>{language === "ko" ? "제목 / 맥락" : "Title / context"}</span>
+            <span>{language === "ko" ? "리뷰어" : "Reviewer"}</span>
+            <span>{language === "ko" ? "검사" : "Checks"}</span>
+            <span>{language === "ko" ? "병합" : "Merge"}</span>
+            <span>Jira</span>
+            <span>{language === "ko" ? "업데이트됨" : "Updated"}</span>
+          </div>
+          {filteredRows.length === 0 ? (
+            <div className="git-work-empty">
+              {language === "ko" ? "조건에 맞는 작업이 없습니다." : "No work matches this filter."}
+            </div>
+          ) : (
+            filteredRows.map((row) => <DashboardRow key={row.id} row={row} language={language} />)
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function DashboardRow({ row, language }: { row: WorkDashboardRow; language: AppLanguage }) {
+  return (
+    <div className="git-work-row" role="row">
+      <span className="git-pr-id">
+        <GitPullRequest size={13} />
+        {row.prNumber}
+      </span>
+      <span className="git-work-titlecell">
+        <strong>{row.title}</strong>
+        <span>
+          {row.subtitle}
+          <i className={row.prState === "draft" ? "draft" : ""}>{row.prState === "draft" ? "draft" : row.projectName}</i>
+        </span>
+      </span>
+      <StatusPill tone={row.reviewState === "requested" ? "warning" : row.reviewState === "approved" ? "success" : "muted"}>
+        <UserRound size={13} />
+        {row.reviewer}
+      </StatusPill>
+      <StatusPill tone={row.ciState === "passed" ? "success" : row.ciState === "pending" ? "warning" : row.ciState === "failed" ? "danger" : "muted"}>
+        {row.ciState === "passed" ? <CheckCircle2 size={13} /> : row.ciState === "pending" ? <Clock3 size={13} /> : <AlertTriangle size={13} />}
+        {row.ciLabel}
+      </StatusPill>
+      <StatusPill tone={row.mergeState === "ready" ? "success" : row.mergeState === "blocked" ? "danger" : "muted"}>
+        <GitBranch size={13} />
+        {row.mergeState === "ready"
+          ? language === "ko"
+            ? "검사 통과"
+            : "Ready"
+          : row.mergeState === "blocked"
+            ? language === "ko"
+              ? "차단됨"
+              : "Blocked"
+            : language === "ko"
+              ? "초안"
+              : "Draft"}
+      </StatusPill>
+      <StatusPill tone={row.jiraState === "missing" ? "danger" : row.jiraState === "in-progress" ? "warning" : "success"}>
+        {row.jiraKey ?? (language === "ko" ? "없음" : "Missing")}
+      </StatusPill>
+      <span className="git-work-updated">{row.updatedLabel}</span>
+    </div>
+  );
+}
+
+function StatusPill({
+  children,
+  tone,
+}: {
+  children: ReactNode;
+  tone: "success" | "warning" | "danger" | "muted";
+}) {
+  return <span className={`git-status-pill ${tone}`}>{children}</span>;
 }
 
 interface GenealogyViewProps {
@@ -951,6 +1191,115 @@ function diffLineClass(line: string): string {
 
 function fileKey(file: GitFileStatus): string {
   return `${file.status}:${file.path}:${file.renamedFrom ?? ""}`;
+}
+
+function buildDashboardRows(
+  snapshot: ProjectSnapshot | null,
+  branches: GitBranchSummary[],
+  commits: GitCommitSummary[],
+  files: GitFileStatus[],
+): WorkDashboardRow[] {
+  if (!snapshot) return [];
+
+  const taskRefs = new Set(
+    snapshot.tasks.flatMap((task) => [
+      ...extractJiraKeys(task.title),
+      ...task.externalRefs.flatMap((ref) => extractJiraKeys(`${ref.refValue} ${ref.refTitle ?? ""}`)),
+    ]),
+  );
+  const headCommit = commits.find((commit) => commit.isHead) ?? commits[0] ?? null;
+  const rows: WorkDashboardRow[] = [];
+
+  if (snapshot.repository.dirtyCount > 0) {
+    const branchName = snapshot.repository.currentBranch ?? "detached";
+    const jiraKey = firstJiraKey([branchName, headCommit?.subject ?? ""]);
+    rows.push({
+      id: "worktree",
+      title: "Uncommitted changes",
+      subtitle: `${files.length} changed files on ${branchName}`,
+      projectName: snapshot.project.name,
+      branchName,
+      prNumber: "local",
+      prState: "draft",
+      reviewer: "No reviewers",
+      reviewState: "none",
+      ciState: "pending",
+      ciLabel: "local pending",
+      mergeState: "draft",
+      jiraKey,
+      jiraState: jiraKey ? (taskRefs.has(jiraKey) ? "linked" : "in-progress") : "missing",
+      updatedLabel: "now",
+      isMine: true,
+      ahead: null,
+      behind: null,
+    });
+  }
+
+  for (const [index, branch] of branches.entries()) {
+    const commit = commits.find((candidate) => candidate.hash === branch.headHash) ?? null;
+    const branchName = branch.branchName;
+    const jiraKey = firstJiraKey([branchName, commit?.subject ?? "", ...(commit?.refs ?? [])]);
+    const isDraft = !branch.upstream || branch.isCurrent;
+    const hasRemoteProgress = Boolean(branch.upstream && ((branch.ahead ?? 0) > 0 || (branch.behind ?? 0) > 0));
+    const isMine = branch.isCurrent || commit?.isMine === true;
+    const ciState: WorkDashboardRow["ciState"] = branch.behind && branch.behind > 0 ? "failed" : isDraft ? "none" : hasRemoteProgress ? "pending" : "passed";
+    const jiraState: WorkDashboardRow["jiraState"] = jiraKey ? (taskRefs.has(jiraKey) ? "linked" : "in-progress") : "missing";
+
+    rows.push({
+      id: branchName,
+      title: commit?.subject ?? branchName,
+      subtitle: `${branchName} · ${branchTrackLabel(branch)}`,
+      projectName: snapshot.project.name,
+      branchName,
+      prNumber: branch.upstream ? `#${5900 + index}` : `draft-${index + 1}`,
+      prState: isDraft ? "draft" : "open",
+      reviewer: isMine ? "No reviewers" : "review needed",
+      reviewState: isMine ? "none" : "requested",
+      ciState,
+      ciLabel: ciLabel(ciState, branch),
+      mergeState: isDraft ? "draft" : ciState === "failed" || jiraState === "missing" ? "blocked" : "ready",
+      jiraKey,
+      jiraState,
+      updatedLabel: commit ? relativeCommitDate(commit.committedAt) : "local",
+      isMine,
+      ahead: branch.ahead,
+      behind: branch.behind,
+    });
+  }
+
+  return rows.sort((a, b) => Number(b.isMine) - Number(a.isMine));
+}
+
+function extractJiraKeys(value: string): string[] {
+  return Array.from(new Set(value.match(/[A-Z][A-Z0-9]+-\d+/g) ?? []));
+}
+
+function firstJiraKey(values: string[]): string | null {
+  for (const value of values) {
+    const [key] = extractJiraKeys(value);
+    if (key) return key;
+  }
+  return null;
+}
+
+function ciLabel(state: WorkDashboardRow["ciState"], branch: GitBranchSummary): string {
+  if (state === "passed") return "1/1 passed";
+  if (state === "failed") return `${branch.behind ?? 1} behind`;
+  if (state === "pending") return "1 pending";
+  return "No checks";
+}
+
+function relativeCommitDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const elapsedMs = Date.now() - date.getTime();
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+
+  if (elapsedMs < hour) return `${Math.max(1, Math.round(elapsedMs / minute))}m ago`;
+  if (elapsedMs < day) return `${Math.round(elapsedMs / hour)}h ago`;
+  return `${Math.round(elapsedMs / day)}d ago`;
 }
 
 function buildGraphRows(
