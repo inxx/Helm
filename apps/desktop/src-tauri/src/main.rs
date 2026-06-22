@@ -3,6 +3,7 @@ mod git;
 mod models;
 
 use crate::models::{
+    AppendTaskInstructionInput,
     AgentRunSummary, AgentSessionSummary, AiConnectionCheckResult, AiModelRefreshResult,
     AppSettings, ApprovalSummary, CommandError, CommandResult, CoordinationExportSummary,
     CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput, DecidePlanDraftInput,
@@ -900,6 +901,18 @@ fn create_task(
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
     db::create_task(&mut conn, &project_id, input)
+}
+
+#[tauri::command]
+fn append_task_instruction(
+    project_id: String,
+    task_id: String,
+    input: AppendTaskInstructionInput,
+    state: State<'_, AppState>,
+) -> CommandResult<TaskSummary> {
+    let context = project_context(&state, &project_id)?;
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    db::append_task_instruction(&mut conn, &project_id, &task_id, &input.message)
 }
 
 #[tauri::command]
@@ -3076,6 +3089,8 @@ fn claude_role_presets() -> Value {
             "provider": "claude",
             "commandArgs": [
                 "claude",
+                "--permission-mode",
+                "bypassPermissions",
                 "-p",
                 "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
@@ -3092,6 +3107,8 @@ fn claude_ai_connections() -> Value {
             "provider": "claude",
             "commandArgs": [
                 "claude",
+                "--permission-mode",
+                "bypassPermissions",
                 "-p",
                 "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
@@ -6329,6 +6346,7 @@ fn main() {
             create_epic,
             list_tasks,
             create_task,
+            append_task_instruction,
             update_task_status,
             approve_task_completion_with_git,
             delete_task,

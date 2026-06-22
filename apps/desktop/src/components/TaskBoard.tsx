@@ -276,7 +276,7 @@ function columnToneForTasks(
   tasks: TaskSummary[],
   taskRuns: Record<string, AgentRunSummary[]>,
 ): "attention" | "active" | "idle" {
-  if (tasks.some((task) => (taskRuns[task.id] ?? []).some(isRunAttentionState) || task.status === "Blocked")) {
+  if (tasks.some((task) => isVisibleTaskAttention(task, taskRuns[task.id] ?? []))) {
     return "attention";
   }
   if (tasks.some((task) => (taskRuns[task.id] ?? []).some(isRunActiveState))) {
@@ -293,11 +293,17 @@ function focusStatusForBoard(
   const selectedTask = selectedTaskId ? tasks.find((task) => task.id === selectedTaskId) : null;
   if (selectedTask) return selectedTask.status;
 
-  const attentionTask = tasks.find((task) => (taskRuns[task.id] ?? []).some(isRunAttentionState) || task.status === "Blocked");
+  const attentionTask = tasks.find((task) => isVisibleTaskAttention(task, taskRuns[task.id] ?? []));
   if (attentionTask) return attentionTask.status;
 
   const activeTask = tasks.find((task) => (taskRuns[task.id] ?? []).some(isRunActiveState));
   return activeTask?.status ?? null;
+}
+
+function isVisibleTaskAttention(task: TaskSummary, runs: AgentRunSummary[]): boolean {
+  if (task.status === "Blocked") return true;
+  const visibleRun = selectVisibleRun(runs);
+  return visibleRun ? isRunAttentionState(visibleRun) : false;
 }
 
 function groupTasksByStatus(tasks: TaskSummary[]): Record<TaskStatus, TaskSummary[]> {

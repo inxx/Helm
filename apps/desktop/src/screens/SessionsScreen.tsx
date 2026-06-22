@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
@@ -63,6 +64,7 @@ export function SessionsScreen({
   const [editingStageAi, setEditingStageAi] = useState(false);
   const [draftRoleAssignments, setDraftRoleAssignments] = useState<RoleAssignment[] | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [activityRefreshKey, setActivityRefreshKey] = useState(0);
   const [stoppingTerminalId, setStoppingTerminalId] = useState<string | null>(null);
   const [composingNewSession, setComposingNewSession] = useState(false);
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
@@ -96,6 +98,8 @@ export function SessionsScreen({
         ).length ?? 0
       : 0;
   const pendingApprovalCount = snapshot?.approvals.filter((approval) => approval.status === "Pending").length ?? 0;
+  const activeRunWorking = Boolean(activeSession && isSessionWorking(activeSession));
+  const latestActivity = events.at(-1) ?? null;
 
   useEffect(() => {
     if (!snapshot) {
@@ -115,14 +119,15 @@ export function SessionsScreen({
     ])
       .then(([items, ptys, files]) => {
         if (disposed) return;
-        setSessions(items);
+        const mergedItems = mergeTaskBackedSessions(items, snapshot.tasks);
+        setSessions(mergedItems);
         setTerminalPtys(ptys);
         setChangedFiles(files);
         if (composingNewSession) return;
         if (selectedTaskId) {
-          setActiveSessionId(items.find((session) => session.taskId === selectedTaskId)?.id ?? items[0]?.id ?? null);
+          setActiveSessionId(mergedItems.find((session) => session.taskId === selectedTaskId)?.id ?? mergedItems[0]?.id ?? null);
         } else {
-          setActiveSessionId((current) => (current && items.some((session) => session.id === current) ? current : items[0]?.id ?? null));
+          setActiveSessionId((current) => (current && mergedItems.some((session) => session.id === current) ? current : mergedItems[0]?.id ?? null));
         }
       })
       .catch((error) => {
@@ -134,7 +139,7 @@ export function SessionsScreen({
     return () => {
       disposed = true;
     };
-  }, [snapshot?.project.id, composingNewSession, selectedTaskId, reloadKey]);
+  }, [snapshot?.project.id, snapshot?.tasks, composingNewSession, selectedTaskId, reloadKey]);
 
   useEffect(() => {
     setEditingStageAi(false);
@@ -167,8 +172,6 @@ export function SessionsScreen({
       return;
     }
     let disposed = false;
-    setEvents([]);
-    setSummaryText(null);
     void Promise.all([
       api.listRunEvents(snapshot.project.id, activeSession.sourceRunId).catch(() => []),
       api.readRunArtifact(snapshot.project.id, activeSession.sourceRunId, "summary.md").catch(() => null),
@@ -180,7 +183,54 @@ export function SessionsScreen({
     return () => {
       disposed = true;
     };
-  }, [activeSession?.sourceRunId, activeSession?.taskId, snapshot?.project.id]);
+  }, [activeSession?.sourceRunId, activeSession?.taskId, activityRefreshKey, snapshot?.project.id]);
+
+  useEffect(() => {
+    if (!snapshot || !activeSession?.sourceRunId) return;
+    const projectId = snapshot.project.id;
+    const runId = activeSession.sourceRunId;
+    let disposed = false;
+    let cleanupEvent: (() => void) | null = null;
+    let cleanupUpdated: (() => void) | null = null;
+
+    void listen<RunEventSummary>("agent-run://event", (event) => {
+      if (disposed || event.payload.projectId !== projectId || event.payload.runId !== runId) return;
+      setActivityRefreshKey((value) => value + 1);
+      setReloadKey((value) => value + 1);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanupEvent = unlisten;
+      }
+    });
+
+    void listen<{ projectId?: string; runId?: string }>("agent-run://updated", (event) => {
+      if (disposed || event.payload.projectId !== projectId || event.payload.runId !== runId) return;
+      setActivityRefreshKey((value) => value + 1);
+      setReloadKey((value) => value + 1);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanupUpdated = unlisten;
+      }
+    });
+
+    const timer = window.setInterval(() => {
+      if (activeRunWorking) {
+        setActivityRefreshKey((value) => value + 1);
+        setReloadKey((value) => value + 1);
+      }
+    }, 3_000);
+
+    return () => {
+      disposed = true;
+      cleanupEvent?.();
+      cleanupUpdated?.();
+      window.clearInterval(timer);
+    };
+  }, [activeRunWorking, activeSession?.sourceRunId, snapshot?.project.id]);
 
   if (!snapshot) {
     return (
@@ -203,10 +253,97 @@ export function SessionsScreen({
     try {
       setOrchestratorInput("");
       setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "user", content: goalText }]);
-      const created = await api.createPlanningSession(projectId, {
-        goalText,
+      if (activeTask && !composingNewSession) {
+        await api.appendTaskInstruction(projectId, activeTask.id, goalText);
+        if (activeRunWorking) {
+          setOrchestratorMessages((items) => [
+            ...items,
+            {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content:
+                language === "ko"
+                  ? `"${activeTask.title}"에 후속 지시를 남겼습니다. 현재 실행 중이라 새 실행은 추가로 만들지 않고 진행 상황을 갱신합니다.`
+                  : `Added the follow-up instruction to "${activeTask.title}". It is already running, so I will refresh the current run instead of creating another one.`,
+            },
+          ]);
+          await onRefresh();
+          setActivityRefreshKey((value) => value + 1);
+          setReloadKey((value) => value + 1);
+          return;
+        }
+        try {
+          await api.startNextRoleRun(projectId, activeTask.id);
+          setOrchestratorMessages((items) => [
+            ...items,
+            {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content:
+                language === "ko"
+                  ? `"${activeTask.title}"에 후속 지시를 남기고 다음 실행을 시작했습니다. 진행 상황은 이 채팅과 태스크 탭에서 확인합니다.`
+                  : `Added the follow-up instruction to "${activeTask.title}" and started the next run. Follow progress here and in Tasks.`,
+            },
+          ]);
+        } catch (error) {
+          setOrchestratorMessages((items) => [
+            ...items,
+            {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content: messageFromError(
+                error,
+                language === "ko" ? "다음 실행을 시작하지 못했습니다." : "Failed to start the next run.",
+              ),
+            },
+          ]);
+        }
+        await onRefresh();
+        setReloadKey((value) => value + 1);
+        return;
+      }
+      const existingTask = findExistingTaskForGoal(snapshot.tasks, goalText);
+      if (existingTask) {
+        setComposingNewSession(false);
+        setActiveSessionId(null);
+        onSelectTask(existingTask.id);
+        setOrchestratorMessages((items) => [
+          ...items,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content:
+              language === "ko"
+                ? `"${existingTask.title}"와 같은 요청이 이미 있어 새 Task를 만들지 않고 기존 세션을 열었습니다.`
+                : `A matching request already exists as "${existingTask.title}", so I opened the existing session instead of creating a duplicate.`,
+          },
+        ]);
+        await onRefresh();
+        setReloadKey((value) => value + 1);
+        return;
+      }
+      const task = await api.createTask(projectId, {
         title: titleFromGoal(goalText),
+        description: goalText,
+        externalRefs: [
+          {
+            refType: "PlainText",
+            refValue: goalText,
+            refTitle: language === "ko" ? "오케스트레이터 요청" : "Orchestrator request",
+          },
+        ],
       });
+      let runStarted = true;
+      let runStartMessage: string | null = null;
+      try {
+        await api.startNextRoleRun(projectId, task.id);
+      } catch (error) {
+        runStarted = false;
+        runStartMessage = messageFromError(
+          error,
+          language === "ko" ? "첫 실행을 시작하지 못했습니다." : "Failed to start the first run.",
+        );
+      }
       setOrchestratorMessages((items) => [
         ...items,
         {
@@ -214,10 +351,17 @@ export function SessionsScreen({
           role: "assistant",
           content:
             language === "ko"
-              ? `요청을 오케스트레이터 세션으로 받았습니다. "${created.session.title}" 기준으로 Task 후보와 실행 상태는 태스크 탭에서 확인합니다.`
-              : `Received this request as an orchestrator session. Check task candidates and run state in Tasks for "${created.session.title}".`,
+              ? runStarted
+                ? `"${task.title}" 태스크를 만들고 첫 실행을 시작했습니다. 진행 상황은 이 채팅과 태스크 탭에서 확인합니다.`
+                : `"${task.title}" 태스크를 만들었지만 첫 실행은 시작하지 못했습니다. ${runStartMessage}`
+              : runStarted
+                ? `Created "${task.title}" and started the first run. Follow progress here and in Tasks.`
+                : `Created "${task.title}", but could not start the first run. ${runStartMessage}`,
         },
       ]);
+      setComposingNewSession(false);
+      setActiveSessionId(null);
+      onSelectTask(task.id);
       await onRefresh();
       setReloadKey((value) => value + 1);
     } catch (error) {
@@ -491,6 +635,15 @@ export function SessionsScreen({
                   <p>{event.message}</p>
                 </SessionMessage>
               ))}
+              {activeRunWorking ? (
+                <SessionMessage icon="bot" role="assistant" timestamp={activeSession?.lastSignalAt ?? null} title={language === "ko" ? "진행 중" : "Working"} language={language}>
+                  <SessionWorkingIndicator
+                    language={language}
+                    latestActivity={latestActivity}
+                    session={activeSession}
+                  />
+                </SessionMessage>
+              ) : null}
               {summaryText && activeSession ? (
                 <SessionMessage icon="file" role="assistant" timestamp={activeSession.updatedAt} title={t("sessions.summaryTitle")} language={language}>
                   <div className="session-markdown">
@@ -817,6 +970,32 @@ function SessionMessage(props: {
   );
 }
 
+function SessionWorkingIndicator({
+  language,
+  latestActivity,
+  session,
+}: {
+  language: AppLanguage;
+  latestActivity: RunEventSummary | null;
+  session: AgentSessionSummary | null;
+}) {
+  const statusLabel = sessionWorkingLabel(session, language);
+  const activityLabel = latestActivity
+    ? `${latestActivity.kind}: ${latestActivity.message}`
+    : language === "ko"
+      ? "아직 새 이벤트가 없습니다."
+      : "No new event yet.";
+  return (
+    <div className="session-working-indicator">
+      <span className="session-working-spinner" aria-hidden="true" />
+      <div>
+        <strong>{statusLabel}</strong>
+        <p>{activityLabel}</p>
+      </div>
+    </div>
+  );
+}
+
 function ContextRow({
   className,
   displayValue,
@@ -855,6 +1034,22 @@ function sessionStatusCopy(session: AgentSessionSummary, language: AppLanguage):
   return "세션 상세를 확인합니다.";
 }
 
+function isSessionWorking(session: AgentSessionSummary): boolean {
+  return session.nextAction === "start" || session.nextAction === "watch" || session.nextAction === "approval";
+}
+
+function sessionWorkingLabel(session: AgentSessionSummary | null, language: AppLanguage): string {
+  if (!session) return language === "ko" ? "작업 상태 확인 중" : "Checking work status";
+  if (language === "en") {
+    if (session.nextAction === "approval") return "Waiting for approval";
+    if (session.nextAction === "start") return "Preparing the next role";
+    return "Agent is working";
+  }
+  if (session.nextAction === "approval") return "승인 대기 중";
+  if (session.nextAction === "start") return "다음 역할 실행 준비 중";
+  return "에이전트가 작업 중입니다";
+}
+
 function currentAiLabel(session: AgentSessionSummary, language: AppLanguage = "ko"): string {
   const role = session.roleId ? roleLabel(session.roleId, language) : language === "ko" ? "역할 미정" : "No role";
   const runner = session.model ?? session.provider ?? session.connectionId ?? (language === "ko" ? "AI 미정" : "No AI");
@@ -864,6 +1059,63 @@ function currentAiLabel(session: AgentSessionSummary, language: AppLanguage = "k
 function changedFileCountLabel(files: GitFileStatus[], session: AgentSessionSummary | null): string {
   if (files.length > 0) return files.length.toString();
   return session?.changedFileCount?.toString() ?? "-";
+}
+
+function findExistingTaskForGoal(tasks: TaskSummary[], goalText: string): TaskSummary | null {
+  const normalizedGoal = normalizeTaskText(goalText);
+  if (!normalizedGoal) return null;
+  return (
+    tasks.find((task) => normalizeTaskText(task.description) === normalizedGoal) ??
+    tasks.find((task) => normalizeTaskText(task.title) === normalizeTaskText(titleFromGoal(goalText))) ??
+    null
+  );
+}
+
+function normalizeTaskText(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function mergeTaskBackedSessions(
+  sessions: AgentSessionSummary[],
+  tasks: TaskSummary[],
+): AgentSessionSummary[] {
+  const sessionTaskIds = new Set(sessions.map((session) => session.taskId).filter(Boolean));
+  const taskSessions = tasks
+    .filter((task) => !sessionTaskIds.has(task.id))
+    .map(taskBackedSession);
+  return [...sessions, ...taskSessions].sort(
+    (left, right) => timestampValue(right.lastSignalAt ?? right.updatedAt) - timestampValue(left.lastSignalAt ?? left.updatedAt),
+  );
+}
+
+function taskBackedSession(task: TaskSummary): AgentSessionSummary {
+  return {
+    id: `task:${task.id}`,
+    projectId: task.projectId,
+    taskId: task.id,
+    sourceRunId: null,
+    title: task.title,
+    status: task.status,
+    provider: null,
+    connectionId: null,
+    model: null,
+    roleId: null,
+    taskStatus: task.status,
+    branch: null,
+    worktreePath: null,
+    lastSignalAt: task.updatedAt,
+    nextAction: "start",
+    changedFileCount: null,
+    eventCount: 0,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+  };
+}
+
+function timestampValue(value: string | null): number {
+  if (!value) return 0;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function titleFromGoal(goalText: string): string {

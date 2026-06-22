@@ -696,7 +696,10 @@ function buildWorkspaceObserverSummary(
 ): WorkspaceObserverSummary {
   const runs = Object.values(taskRuns).flat();
   const activeRuns = runs.filter((run) => ["Queued", "Running"].includes(run.status)).length;
-  const attentionRuns = runs.filter(isRunAttentionState).length;
+  const attentionRuns = Object.values(taskRuns).filter((runsForTask) => {
+    const visibleRun = selectVisibleRun(runsForTask);
+    return visibleRun ? isRunAttentionState(visibleRun) : false;
+  }).length;
   const pendingApprovals = snapshot.approvals.filter((approval) => approval.status === "Pending").length;
   const dirtyFiles = snapshot.repository.dirtyCount;
   const headline =

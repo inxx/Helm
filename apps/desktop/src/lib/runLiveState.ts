@@ -147,7 +147,12 @@ export function deriveRunLiveState(run: AgentRunSummary, now = Date.now()): RunL
 export function selectVisibleRun(runs: AgentRunSummary[]): AgentRunSummary | null {
   const scored = runs
     .map((run, index) => ({ run, state: deriveRunLiveState(run), index }))
-    .sort((left, right) => visibleRunPriority(left.state.state) - visibleRunPriority(right.state.state) || left.index - right.index);
+    .sort(
+      (left, right) =>
+        visibleRunPriority(left.state.state) - visibleRunPriority(right.state.state) ||
+        runSignalTime(right.run) - runSignalTime(left.run) ||
+        left.index - right.index,
+    );
   return scored[0]?.run ?? null;
 }
 
@@ -185,11 +190,17 @@ function terminalSummary(run: AgentRunSummary, fallback: string): string {
 function visibleRunPriority(state: RunLiveState): number {
   if (state === "approval_pending") return 0;
   if (state === "stalled_candidate") return 1;
-  if (state === "orphaned_after_restart" || state === "needs_inspection" || state === "timed_out" || state === "failed") return 2;
-  if (state === "running" || state === "quiet" || state === "starting") return 3;
-  if (state === "queued") return 4;
+  if (state === "running" || state === "quiet" || state === "starting") return 2;
+  if (state === "queued") return 3;
+  if (state === "orphaned_after_restart" || state === "needs_inspection" || state === "timed_out" || state === "failed") return 4;
   if (state === "canceled") return 5;
   return 6;
+}
+
+function runSignalTime(run: AgentRunSummary): number {
+  const value = run.latestEventAt ?? run.heartbeatAt ?? run.startedAt ?? run.claimedAt ?? run.updatedAt ?? run.createdAt;
+  const time = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(time) ? time : 0;
 }
 
 function ageFromNow(value: string | null | undefined, now: number): number {

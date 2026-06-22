@@ -449,6 +449,12 @@ pub struct CreateTaskInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppendTaskInstructionInput {
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreatePlanningSessionInput {
     pub title: Option<String>,
     pub goal_text: String,

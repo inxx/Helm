@@ -996,6 +996,33 @@ h3 {
   font-size: 12px;
 }
 
+.session-working-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.session-working-indicator strong {
+  display: block;
+  font-size: 13px;
+}
+
+.session-working-indicator p {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.session-working-spinner {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in oklch, var(--brand) 22%, var(--line));
+  border-top-color: var(--brand);
+  border-radius: 999px;
+  animation: loading-spin 760ms linear infinite;
+}
+
 .session-message-content p + p {
   margin-top: 8px;
 }

@@ -2551,6 +2551,8 @@ function claudeConnection(cliPath = "claude"): AiConnection {
     provider: "claude",
     commandArgs: [
       cliPath,
+      "--permission-mode",
+      "bypassPermissions",
       "-p",
       "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}.",
     ],

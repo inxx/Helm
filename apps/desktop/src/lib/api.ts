@@ -84,6 +84,9 @@ export const api = {
   createTask(projectId: string, input: CreateTaskInput) {
     return invoke<TaskSummary>("create_task", { projectId, input });
   },
+  appendTaskInstruction(projectId: string, taskId: string, message: string) {
+    return invoke<TaskSummary>("append_task_instruction", { projectId, taskId, input: { message } });
+  },
   updateProjectSettings(projectId: string, patch: ProjectSettingsPatch) {
     return invoke<EffectiveSettings>("update_project_settings", { projectId, patch });
   },

@@ -938,6 +938,52 @@ pub fn create_task(
     get_task(conn, &id)
 }
 
+pub fn append_task_instruction(
+    conn: &mut Connection,
+    project_id: &str,
+    task_id: &str,
+    message: &str,
+) -> CommandResult<TaskSummary> {
+    let task = get_task(conn, task_id)?;
+    if task.project_id != project_id {
+        return Err(CommandError::validation("대상 태스크를 찾을 수 없습니다."));
+    }
+    let instruction = required_text(message, "후속 지시를 입력해주세요.")?;
+    let timestamp = now();
+    let tx = conn
+        .transaction()
+        .map_err(|err| CommandError::database("후속 지시를 저장하지 못했습니다.", err))?;
+    tx.execute(
+        "INSERT INTO task_external_refs (id, project_id, task_id, ref_type, ref_value, ref_title, created_at)
+         VALUES (?1, ?2, ?3, 'PlainText', ?4, ?5, ?6)",
+        params![
+            new_id(),
+            project_id,
+            task_id,
+            instruction.as_str(),
+            "후속 사용자 지시",
+            timestamp
+        ],
+    )
+    .map_err(|err| CommandError::database("후속 지시를 저장하지 못했습니다.", err))?;
+    tx.execute(
+        "UPDATE tasks SET updated_at = ?1 WHERE id = ?2 AND project_id = ?3",
+        params![timestamp, task_id, project_id],
+    )
+    .map_err(|err| CommandError::database("태스크 갱신 시간을 저장하지 못했습니다.", err))?;
+    insert_audit(
+        &tx,
+        project_id,
+        "Task",
+        Some(task_id),
+        "task.instruction.appended",
+        json!({ "message": instruction }),
+    )?;
+    tx.commit()
+        .map_err(|err| CommandError::database("후속 지시를 저장하지 못했습니다.", err))?;
+    get_task(conn, task_id)
+}
+
 pub fn create_planning_session(
     conn: &mut Connection,
     project_id: &str,
@@ -2000,14 +2046,20 @@ pub fn prepare_role_context(
     let tx = conn
         .transaction()
         .map_err(|err| CommandError::database("실행 컨텍스트를 저장하지 못했습니다.", err))?;
-    tx.execute(
+    let inserted = tx.execute(
         "INSERT INTO agent_runs (
            id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
            stdout_log_path, stderr_log_path, exit_code, result_status, started_at, finished_at,
            lifecycle_phase, attempt, created_at, updated_at
          )
-         VALUES (?1, ?2, ?3, ?4, 'Queued', ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL, NULL,
-                 'queued', 1, ?10, ?10)",
+         SELECT ?1, ?2, ?3, ?4, 'Queued', ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL, NULL,
+                'queued', 1, ?10, ?10
+          WHERE NOT EXISTS (
+            SELECT 1 FROM agent_runs
+             WHERE project_id = ?2
+               AND task_id = ?3
+               AND status IN ('Queued', 'Running')
+          )",
         params![
             run_id,
             project_id,
@@ -2022,6 +2074,11 @@ pub fn prepare_role_context(
         ],
     )
     .map_err(|err| CommandError::database("실행 컨텍스트를 저장하지 못했습니다.", err))?;
+    if inserted == 0 {
+        return Err(CommandError::validation(
+            "이미 준비 중이거나 실행 중인 role run이 있습니다.",
+        ));
+    }
     append_run_event(
         &tx,
         project_id,
@@ -7341,7 +7398,8 @@ fn inject_provider_options(
     effort: Option<&str>,
     placeholders: &HashMap<String, String>,
 ) -> Vec<String> {
-    let with_model = match (provider, model) {
+    let normalized_model = model.map(|value| normalized_provider_model(provider, value));
+    let with_model = match (provider, normalized_model.as_deref()) {
         (Some("codex"), Some(model)) if !has_arg(&args, &["-m", "--model"]) => {
             insert_after_command(args, "exec", ["-m".to_string(), model.to_string()])
         }
@@ -7361,19 +7419,36 @@ fn inject_provider_options(
         _ => with_model,
     };
 
-    match (provider, placeholders.get("artifactDir")) {
-        (Some("claude"), Some(artifact_dir)) if !has_arg(&with_effort, &["--add-dir"]) => {
+    let with_permissions = match provider {
+        Some("claude")
+            if !has_arg(&with_effort, &["--permission-mode"])
+                && !has_arg(&with_effort, &["--dangerously-skip-permissions"]) =>
+        {
             insert_after_index(
                 with_effort,
+                0,
+                [
+                    "--permission-mode".to_string(),
+                    "bypassPermissions".to_string(),
+                ],
+            )
+        }
+        _ => with_effort,
+    };
+
+    match (provider, placeholders.get("artifactDir")) {
+        (Some("claude"), Some(artifact_dir)) if !has_arg(&with_permissions, &["--add-dir"]) => {
+            insert_after_index(
+                with_permissions,
                 0,
                 ["--add-dir".to_string(), artifact_dir.to_string()],
             )
         }
         (Some("gemini"), Some(artifact_dir))
-            if !has_arg(&with_effort, &["--include-directories"]) =>
+            if !has_arg(&with_permissions, &["--include-directories"]) =>
         {
             insert_after_index(
-                with_effort,
+                with_permissions,
                 0,
                 [
                     "--include-directories".to_string(),
@@ -7381,7 +7456,18 @@ fn inject_provider_options(
                 ],
             )
         }
-        _ => with_effort,
+        _ => with_permissions,
+    }
+}
+
+fn normalized_provider_model(provider: Option<&str>, model: &str) -> String {
+    if provider != Some("claude") {
+        return model.to_string();
+    }
+    match model {
+        "claude-sonnet-4.6" => "claude-sonnet-4-6".to_string(),
+        "claude-opus-4.8" => "claude-opus-4-8".to_string(),
+        _ => model.to_string(),
     }
 }
 
