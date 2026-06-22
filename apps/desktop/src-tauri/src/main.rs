@@ -747,6 +747,18 @@ fn check_connection_with_cwd(
 
     match check {
         Ok(output) if output.exit_code == 0 && !output.timed_out => {
+            if is_antigravity_chat_command(&command) {
+                return Ok(AiConnectionCheckResult {
+                    connection_id,
+                    available: true,
+                    command,
+                    message: "Antigravity CLI chat command를 실행할 수 있습니다.".to_string(),
+                    available_models: None,
+                    model_refresh_message: Some(
+                        "Antigravity CLI는 응답을 stdout이 아니라 IDE chat 세션에서 처리합니다.".to_string(),
+                    ),
+                });
+            }
             if !smoke_output_contains_sentinel(&output) {
                 let message = command_output_message(&output);
                 return Ok(AiConnectionCheckResult {
@@ -3115,13 +3127,10 @@ fn gemini_role_presets() -> Value {
             "label": label,
             "provider": "gemini",
             "commandArgs": [
-                "gemini",
-                "--skip-trust",
-                "--approval-mode",
-                "yolo",
-                "--include-directories",
-                "{artifactDir}",
-                "--prompt",
+                "/Users/mediquitous/.local/bin/antigravity",
+                "chat",
+                "--mode",
+                "agent",
                 "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
             "timeoutSeconds": 1800
@@ -3133,34 +3142,30 @@ fn gemini_ai_connections() -> Value {
     json!([
         {
             "id": "gemini-local",
-            "label": "Gemini CLI",
+            "label": "Gemini (Antigravity CLI)",
             "provider": "gemini",
             "commandArgs": [
-                "gemini",
-                "--skip-trust",
-                "--approval-mode",
-                "yolo",
-                "--include-directories",
-                "{artifactDir}",
-                "--prompt",
+                "/Users/mediquitous/.local/bin/antigravity",
+                "chat",
+                "--mode",
+                "agent",
                 "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
             "planningCommandArgs": [
-                "gemini",
-                "--skip-trust",
-                "--approval-mode",
-                "plan",
-                "--prompt",
+                "/Users/mediquitous/.local/bin/antigravity",
+                "chat",
+                "--mode",
+                "ask",
                 "{planPrompt}"
             ],
             "planningMode": "native_plan",
-            "healthCheckArgs": ["gemini", "--version"],
+            "healthCheckArgs": ["/Users/mediquitous/.local/bin/antigravity", "--version"],
             "timeoutSeconds": 1800,
             "planningTimeoutSeconds": 600,
             "planningModel": null,
             "enabled": true,
-            "defaultModel": "gemini-2.5-pro",
-            "availableModels": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
+            "defaultModel": null,
+            "availableModels": [],
             "defaultEffort": null
         }
     ])
@@ -3861,6 +3866,18 @@ fn command_output_message(output: &ShellOutput) -> String {
 
 fn smoke_output_contains_sentinel(output: &ShellOutput) -> bool {
     output.stdout.contains(AI_CLI_SMOKE_SENTINEL) || output.stderr.contains(AI_CLI_SMOKE_SENTINEL)
+}
+
+fn is_antigravity_chat_command(command: &[String]) -> bool {
+    let Some(program) = command.first() else {
+        return false;
+    };
+    let program_name = Path::new(program)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+    matches!(program_name, "antigravity" | "agy" | "antigravity-ide")
+        && command.iter().any(|arg| arg == "chat")
 }
 
 fn ai_cli_failure_hint(provider: Option<&str>, raw_message: &str) -> String {

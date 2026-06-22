@@ -2404,7 +2404,7 @@ function runnerTemplateDescription(template: RunnerTemplateSummary, language: Ap
 function cliPathPlaceholder(provider: string): string {
   if (provider === "codex") return "codex 또는 /path/to/codex";
   if (provider === "claude") return "claude 또는 /path/to/claude";
-  if (provider === "gemini") return "gemini 또는 /path/to/gemini";
+  if (provider === "gemini") return "antigravity 또는 /path/to/antigravity";
   return "/path/to/llm";
 }
 
@@ -2450,7 +2450,7 @@ function firstNonEmpty(values: Array<string | null | undefined>): string | null 
 function defaultCliPath(provider: string): string {
   if (provider === "codex") return "codex";
   if (provider === "claude") return "claude";
-  if (provider === "gemini") return "gemini";
+  if (provider === "gemini") return "/Users/mediquitous/.local/bin/antigravity";
   if (provider === "fixture") return "node";
   return "llm";
 }
@@ -2567,27 +2567,23 @@ function claudeConnection(cliPath = "claude"): AiConnection {
   };
 }
 
-function geminiConnection(cliPath = "gemini"): AiConnection {
+function geminiConnection(cliPath = "/Users/mediquitous/.local/bin/antigravity"): AiConnection {
   return {
     id: "gemini-local",
-    label: "Gemini CLI",
+    label: "Gemini (Antigravity CLI)",
     provider: "gemini",
     commandArgs: [
       cliPath,
-      "--skip-trust",
-      "--approval-mode",
-      "yolo",
-      "--include-directories",
-      "{artifactDir}",
-      "--prompt",
+      "chat",
+      "--mode",
+      "agent",
       "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}.",
     ],
     planningCommandArgs: [
       cliPath,
-      "--skip-trust",
-      "--approval-mode",
-      "plan",
-      "--prompt",
+      "chat",
+      "--mode",
+      "ask",
       "{planPrompt}",
     ],
     planningMode: "native_plan",
@@ -2597,8 +2593,8 @@ function geminiConnection(cliPath = "gemini"): AiConnection {
     timeoutSeconds: 1800,
     planningTimeoutSeconds: 600,
     enabled: true,
-    defaultModel: "gemini-2.5-pro",
-    availableModels: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
+    defaultModel: null,
+    availableModels: [],
   };
 }
 
