@@ -3096,8 +3096,8 @@ fn claude_ai_connections() -> Value {
             "planningTimeoutSeconds": 600,
             "planningModel": null,
             "enabled": true,
-            "defaultModel": "claude-sonnet-4-6",
-            "availableModels": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
+            "defaultModel": "sonnet",
+            "availableModels": ["sonnet", "opus", "claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
             "defaultEffort": null
         }
     ])
@@ -3159,7 +3159,7 @@ fn gemini_ai_connections() -> Value {
             "planningTimeoutSeconds": 600,
             "planningModel": null,
             "enabled": true,
-            "defaultModel": null,
+            "defaultModel": "gemini-2.5-pro",
             "availableModels": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
             "defaultEffort": null
         }
@@ -3875,8 +3875,22 @@ fn ai_cli_failure_hint(provider: Option<&str>, raw_message: &str) -> String {
         return "Claude CLI는 설치되어 있지만 로그인 상태가 아닙니다. 터미널에서 claude를 열고 /login을 실행한 뒤 다시 확인하세요.".to_string();
     }
 
+    if provider == Some("claude")
+        && (normalized.contains("401") || normalized.contains("invalid authentication credentials"))
+    {
+        return "Claude CLI 인증 토큰이 유효하지 않습니다. 터미널에서 `claude auth logout` 후 `claude auth login`으로 다시 로그인하거나, 연결 환경 변수에 ANTHROPIC_API_KEY를 등록한 뒤 다시 확인하세요.".to_string();
+    }
+
     if provider == Some("claude") && normalized.contains("organization does not have access") {
         return "Claude CLI는 설치되어 있지만 현재 로그인된 조직에 Claude Code 접근 권한이 없습니다. 올바른 조직으로 다시 로그인하거나 관리자에게 권한을 요청해야 합니다.".to_string();
+    }
+
+    if provider == Some("gemini")
+        && (normalized.contains("unsupported_client")
+            || normalized.contains("ineligibletiererror")
+            || normalized.contains("no longer supported for gemini code assist"))
+    {
+        return "현재 Gemini CLI 로그인 티어는 이 클라이언트를 지원하지 않습니다. 연결 환경 변수에 GEMINI_API_KEY를 등록하거나 지원되는 Google 계정/프로젝트로 다시 인증해야 합니다.".to_string();
     }
 
     if provider == Some("gemini")
@@ -5124,22 +5138,74 @@ fn apply_command_env(command: &mut Command, env_overrides: &[(String, String)]) 
 }
 
 fn connection_env(connection: &Value) -> Vec<(String, String)> {
-    let Some(env) = connection.get("env").and_then(Value::as_object) else {
-        return Vec::new();
-    };
-    let mut entries = env
-        .iter()
-        .filter_map(|(key, value)| {
-            let key = key.trim();
-            let value = value.as_str()?;
-            if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
-                return None;
-            }
-            Some((key.to_string(), value.to_string()))
+    let mut entries = connection
+        .get("env")
+        .and_then(Value::as_object)
+        .map(|env| {
+            env.iter()
+                .filter_map(|(key, value)| {
+                    let key = key.trim();
+                    let value = value.as_str()?;
+                    if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+                        return None;
+                    }
+                    Some((key.to_string(), value.to_string()))
+                })
+                .collect::<Vec<_>>()
         })
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
+    add_provider_env_defaults(connection.get("provider").and_then(Value::as_str), &mut entries);
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     entries
+}
+
+fn add_provider_env_defaults(provider: Option<&str>, entries: &mut Vec<(String, String)>) {
+    for key in provider_env_keys(provider) {
+        if entries.iter().any(|(entry_key, _)| entry_key == key) {
+            continue;
+        }
+        if let Some(value) = env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| login_shell_env_value(key))
+        {
+            entries.push((key.to_string(), value));
+        }
+    }
+}
+
+fn provider_env_keys(provider: Option<&str>) -> &'static [&'static str] {
+    match provider {
+        Some("claude") => &["ANTHROPIC_API_KEY"],
+        Some("gemini") => &[
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+        ],
+        _ => &[],
+    }
+}
+
+fn login_shell_env_value(key: &str) -> Option<String> {
+    if !key.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_') {
+        return None;
+    }
+    let output = Command::new("/bin/zsh")
+        .args(["-lc", "printenv \"$HELM_ENV_KEY\""])
+        .env("HELM_ENV_KEY", key)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn connection_env_value(env_overrides: &[(String, String)], key: &str) -> Option<String> {

@@ -7242,22 +7242,74 @@ fn optional_connection_string(connection: &Value, key: &str) -> Option<String> {
 }
 
 fn connection_env(connection: &Value) -> Vec<(String, String)> {
-    let Some(env) = connection.get("env").and_then(Value::as_object) else {
-        return Vec::new();
-    };
-    let mut entries = env
-        .iter()
-        .filter_map(|(key, value)| {
-            let key = key.trim();
-            let value = value.as_str()?;
-            if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
-                return None;
-            }
-            Some((key.to_string(), value.to_string()))
+    let mut entries = connection
+        .get("env")
+        .and_then(Value::as_object)
+        .map(|env| {
+            env.iter()
+                .filter_map(|(key, value)| {
+                    let key = key.trim();
+                    let value = value.as_str()?;
+                    if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+                        return None;
+                    }
+                    Some((key.to_string(), value.to_string()))
+                })
+                .collect::<Vec<_>>()
         })
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
+    add_provider_env_defaults(connection.get("provider").and_then(Value::as_str), &mut entries);
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     entries
+}
+
+fn add_provider_env_defaults(provider: Option<&str>, entries: &mut Vec<(String, String)>) {
+    for key in provider_env_keys(provider) {
+        if entries.iter().any(|(entry_key, _)| entry_key == key) {
+            continue;
+        }
+        if let Some(value) = env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| login_shell_env_value(key))
+        {
+            entries.push((key.to_string(), value));
+        }
+    }
+}
+
+fn provider_env_keys(provider: Option<&str>) -> &'static [&'static str] {
+    match provider {
+        Some("claude") => &["ANTHROPIC_API_KEY"],
+        Some("gemini") => &[
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+        ],
+        _ => &[],
+    }
+}
+
+fn login_shell_env_value(key: &str) -> Option<String> {
+    if !key.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_') {
+        return None;
+    }
+    let output = Command::new("/bin/zsh")
+        .args(["-lc", "printenv \"$HELM_ENV_KEY\""])
+        .env("HELM_ENV_KEY", key)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn apply_connection_env(command: &mut Command, env_overrides: &[(String, String)]) {

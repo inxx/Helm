@@ -2410,6 +2410,7 @@ function cliPathPlaceholder(provider: string): string {
 
 function envPlaceholder(provider: string): string {
   if (provider === "codex") return "CODEX_HOME=/path/to/.codex";
+  if (provider === "claude") return "ANTHROPIC_API_KEY=...";
   if (provider === "gemini") return "GEMINI_API_KEY=...";
   return "KEY=value";
 }
@@ -2536,6 +2537,8 @@ function normalizeCliArgs(provider: string, args: string[]): string[] {
 }
 
 const CLAUDE_MODELS = [
+  "sonnet",
+  "opus",
   "claude-sonnet-4-6",
   "claude-opus-4-8",
   "claude-haiku-4-5-20251001",
@@ -2559,7 +2562,7 @@ function claudeConnection(cliPath = "claude"): AiConnection {
     timeoutSeconds: 1800,
     planningTimeoutSeconds: 600,
     enabled: true,
-    defaultModel: "claude-sonnet-4-6",
+    defaultModel: "sonnet",
     availableModels: [...CLAUDE_MODELS],
   };
 }
@@ -2594,7 +2597,7 @@ function geminiConnection(cliPath = "gemini"): AiConnection {
     timeoutSeconds: 1800,
     planningTimeoutSeconds: 600,
     enabled: true,
-    defaultModel: null,
+    defaultModel: "gemini-2.5-pro",
     availableModels: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
   };
 }
