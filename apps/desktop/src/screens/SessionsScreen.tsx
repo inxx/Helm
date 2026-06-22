@@ -115,14 +115,12 @@ export function SessionsScreen({
     void Promise.all([
       api.listAgentSessions(snapshot.project.id, 200),
       api.listTerminalPtys(snapshot.project.id).catch(() => []),
-      api.getChangedFiles(snapshot.project.id).catch(() => []),
     ])
-      .then(([items, ptys, files]) => {
+      .then(([items, ptys]) => {
         if (disposed) return;
         const mergedItems = mergeTaskBackedSessions(items, snapshot.tasks);
         setSessions(mergedItems);
         setTerminalPtys(ptys);
-        setChangedFiles(files);
         if (composingNewSession) return;
         if (selectedTaskId) {
           setActiveSessionId(mergedItems.find((session) => session.taskId === selectedTaskId)?.id ?? mergedItems[0]?.id ?? null);
@@ -140,6 +138,27 @@ export function SessionsScreen({
       disposed = true;
     };
   }, [snapshot?.project.id, snapshot?.tasks, composingNewSession, selectedTaskId, reloadKey]);
+
+  useEffect(() => {
+    if (!snapshot) {
+      setChangedFiles([]);
+      return;
+    }
+    let disposed = false;
+    const loadFiles = activeTask
+      ? api.getTaskWorktreeChangedFiles(snapshot.project.id, activeTask.id)
+      : api.getChangedFiles(snapshot.project.id);
+    void loadFiles
+      .then((files) => {
+        if (!disposed) setChangedFiles(files);
+      })
+      .catch(() => {
+        if (!disposed) setChangedFiles([]);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [activeTask?.id, snapshot?.project.id, reloadKey]);
 
   useEffect(() => {
     setEditingStageAi(false);
