@@ -11955,7 +11955,7 @@ mod tests {
                     "commandArgs": ["codex", "exec", "--cd", "{worktreePath}", "--", "run {roleId}"],
                     "timeoutSeconds": 120,
                     "enabled": true,
-                    "defaultModel": "gpt-5.2",
+                    "defaultModel": "gpt-5.5",
                     "env": { "CODEX_HOME": "/tmp/codex-alt" },
                     "runnerAdapter": "codex_app_server",
                     "approvalPolicy": "on-request",

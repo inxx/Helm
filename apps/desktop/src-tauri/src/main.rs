@@ -3042,8 +3042,8 @@ fn codex_ai_connections() -> Value {
             "planningTimeoutSeconds": 600,
             "planningModel": null,
             "enabled": true,
-            "defaultModel": "gpt-5.2",
-            "availableModels": ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"],
+            "defaultModel": "gpt-5.5",
+            "availableModels": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
             "runnerAdapter": "codex_app_server",
             "approvalPolicy": "on-request",
             "sandbox": "workspace-write"

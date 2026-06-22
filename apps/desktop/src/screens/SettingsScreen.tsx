@@ -2310,6 +2310,9 @@ function normalizeModelList(provider: string, models: string[]): string[] {
 
 function normalizeModelName(provider: string, model: string): string {
   const trimmed = model.trim();
+  if (provider === "codex" && trimmed.toLowerCase() === "gpt-5.2") {
+    return "gpt-5.5";
+  }
   if (provider === "codex" || provider === "claude" || provider === "gemini") {
     return trimmed.toLowerCase();
   }
@@ -2345,7 +2348,7 @@ function canRefreshModels(provider: string): boolean {
 }
 
 function defaultModelPlaceholder(provider: string, language: AppLanguage): string {
-  if (provider === "codex") return language === "ko" ? "예: gpt-5.2" : "Ex: gpt-5.2";
+  if (provider === "codex") return language === "ko" ? "예: gpt-5.5" : "Ex: gpt-5.5";
   if (provider === "claude") return language === "ko" ? "예: claude-sonnet-4-6" : "Ex: claude-sonnet-4-6";
   if (provider === "gemini") return language === "ko" ? "예: gemini-2.5-pro" : "Ex: gemini-2.5-pro";
   return language === "ko" ? "선택 사항" : "Optional";
@@ -2507,8 +2510,8 @@ function codexConnection(cliPath = "codex"): AiConnection {
     timeoutSeconds: 1800,
     planningTimeoutSeconds: 600,
     enabled: true,
-    defaultModel: "gpt-5.2",
-    availableModels: ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini"],
+    defaultModel: "gpt-5.5",
+    availableModels: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
     runnerAdapter: "codex_app_server",
     approvalPolicy: "on-request",
     sandbox: "workspace-write",
