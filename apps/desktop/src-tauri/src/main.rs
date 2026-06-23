@@ -1,5 +1,6 @@
 mod db;
 mod git;
+mod hermes;
 mod models;
 
 use crate::models::{
@@ -2505,6 +2506,38 @@ fn list_agent_sessions(
     let context = project_context(&state, &project_id)?;
     let conn = db::open_existing_db(&context.db_path)?;
     db::list_agent_sessions(&conn, &project_id, limit.unwrap_or(120))
+}
+
+#[tauri::command]
+fn list_hermes_board(limit: Option<i64>) -> CommandResult<Vec<hermes::HermesBoardCard>> {
+    hermes::list_board(limit.unwrap_or(120))
+}
+
+#[tauri::command]
+fn get_hermes_task_tree(task_id: String) -> CommandResult<Vec<hermes::HermesSessionNode>> {
+    hermes::get_task_tree(task_id)
+}
+
+#[tauri::command]
+fn create_hermes_stage_chain(
+    goal: String,
+    stages: Vec<hermes::HermesStageInput>,
+) -> CommandResult<Vec<String>> {
+    hermes::create_stage_chain(goal, stages)
+}
+
+#[tauri::command]
+fn list_hermes_profiles() -> CommandResult<Vec<hermes::HermesProfile>> {
+    hermes::list_profiles()
+}
+
+#[tauri::command]
+fn hermes_kanban_action(
+    action: String,
+    task_id: String,
+    reason: Option<String>,
+) -> CommandResult<()> {
+    hermes::kanban_action(action, task_id, reason)
 }
 
 #[tauri::command]
@@ -6392,6 +6425,11 @@ fn main() {
             list_agent_runs,
             list_project_runs,
             list_agent_sessions,
+            list_hermes_board,
+            get_hermes_task_tree,
+            create_hermes_stage_chain,
+            list_hermes_profiles,
+            hermes_kanban_action,
             list_task_timeline,
             list_run_events,
             get_agent_run,

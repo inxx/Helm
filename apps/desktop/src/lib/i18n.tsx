@@ -8,6 +8,7 @@ export type MessageKey =
   | "nav.git"
   | "nav.issues"
   | "nav.terminal"
+  | "nav.hermes"
   | "nav.settings"
   | "shell.domainTabs"
   | "shell.projects"
@@ -191,6 +192,7 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "nav.git": "Git",
     "nav.issues": "Issues",
     "nav.terminal": "Terminal",
+    "nav.hermes": "Hermes",
     "nav.settings": "Settings",
     "shell.domainTabs": "Domain tabs",
     "shell.projects": "Projects",
@@ -373,6 +375,7 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "nav.git": "깃",
     "nav.issues": "이슈",
     "nav.terminal": "터미널",
+    "nav.hermes": "Hermes",
     "nav.settings": "설정",
     "shell.domainTabs": "도메인 탭",
     "shell.projects": "프로젝트",

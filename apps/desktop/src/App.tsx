@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { GitBranch, GitPullRequest, ListChecks, MessageSquare, Settings, SquareTerminal } from "lucide-react";
+import { Bot, GitBranch, GitPullRequest, ListChecks, MessageSquare, Settings, SquareTerminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
@@ -9,12 +9,13 @@ import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./li
 import type { CommandError, ProjectSnapshot } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
 import { IssuesScreen } from "./screens/IssuesScreen";
+import { HermesScreen } from "./screens/HermesScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { SessionsScreen } from "./screens/SessionsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
 
-type Screen = "sessions" | "tasks" | "git" | "issues" | "terminal" | "settings";
+type Screen = "sessions" | "tasks" | "git" | "issues" | "terminal" | "hermes" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItemDefinitions: Array<{ id: Screen; labelKey: MessageKey; icon: typeof MessageSquare }> = [
@@ -23,6 +24,7 @@ const navItemDefinitions: Array<{ id: Screen; labelKey: MessageKey; icon: typeof
   { id: "git", labelKey: "nav.git", icon: GitBranch },
   { id: "issues", labelKey: "nav.issues", icon: GitPullRequest },
   { id: "terminal", labelKey: "nav.terminal", icon: SquareTerminal },
+  { id: "hermes", labelKey: "nav.hermes", icon: Bot },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
 
@@ -266,7 +268,7 @@ export function App() {
       onSwitchProject={switchProject}
       onForgetProject={forgetProject}
       busy={busy}
-      hideSidebar={screen === "sessions" || screen === "tasks" || screen === "terminal"}
+      hideSidebar={screen === "sessions" || screen === "tasks" || screen === "terminal" || screen === "hermes"}
     >
       {error ? <div className="error-banner">{error}</div> : null}
       {bootStatus === "restoring" ? (
@@ -327,6 +329,7 @@ export function App() {
               />
             </div>
           ) : null}
+          {screen === "hermes" ? <HermesScreen /> : null}
           {screen === "settings" ? (
             <SettingsScreen
               snapshot={snapshot}

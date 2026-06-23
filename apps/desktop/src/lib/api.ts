@@ -2,6 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentRunSummary,
   AgentSessionSummary,
+  HermesBoardCard,
+  HermesKanbanAction,
+  HermesProfile,
+  HermesSessionNode,
+  HermesStageInput,
   AppSettings,
   AiConnection,
   AiConnectionCheckResult,
@@ -204,6 +209,21 @@ export const api = {
   },
   listAgentSessions(projectId: string, limit = 120) {
     return invoke<AgentSessionSummary[]>("list_agent_sessions", { projectId, limit });
+  },
+  listHermesBoard(limit = 120) {
+    return invoke<HermesBoardCard[]>("list_hermes_board", { limit });
+  },
+  getHermesTaskTree(taskId: string) {
+    return invoke<HermesSessionNode[]>("get_hermes_task_tree", { taskId });
+  },
+  createHermesStageChain(goal: string, stages: HermesStageInput[]) {
+    return invoke<string[]>("create_hermes_stage_chain", { goal, stages });
+  },
+  listHermesProfiles() {
+    return invoke<HermesProfile[]>("list_hermes_profiles");
+  },
+  hermesKanbanAction(action: HermesKanbanAction, taskId: string, reason?: string) {
+    return invoke<void>("hermes_kanban_action", { action, taskId, reason: reason ?? null });
   },
   listTaskTimeline(projectId: string, taskId: string) {
     return invoke<TaskTimelineEntry[]>("list_task_timeline", { projectId, taskId });
