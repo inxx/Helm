@@ -2527,6 +2527,11 @@ fn create_hermes_stage_chain(
 }
 
 #[tauri::command]
+fn get_hermes_task_diff(task_id: String) -> CommandResult<Vec<GitFileDiff>> {
+    hermes::get_task_diff(task_id)
+}
+
+#[tauri::command]
 fn list_hermes_profiles() -> CommandResult<Vec<hermes::HermesProfile>> {
     hermes::list_profiles()
 }
@@ -6427,6 +6432,7 @@ fn main() {
             list_agent_sessions,
             list_hermes_board,
             get_hermes_task_tree,
+            get_hermes_task_diff,
             create_hermes_stage_chain,
             list_hermes_profiles,
             hermes_kanban_action,

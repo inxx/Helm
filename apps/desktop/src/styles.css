@@ -10139,3 +10139,43 @@ textarea {
 .hermes-session-head small {
   font-variant-numeric: tabular-nums;
 }
+
+/* Hermes worktree diff review */
+.hermes-file-diff {
+  margin-bottom: 6px;
+}
+.hermes-file-diff > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 0;
+}
+.hermes-file-diff > summary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+.hermes-file-diff-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+}
+.hermes-file-diff-stat {
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.hermes-file-diff-stat .added {
+  color: var(--primary);
+}
+.hermes-file-diff-stat .deleted {
+  color: var(--red);
+}
+.hermes-file-diff .git-diff-code {
+  max-height: 280px;
+  overflow: auto;
+  font-size: 10px;
+}

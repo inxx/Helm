@@ -23,6 +23,7 @@ import {
   isGated,
 } from "../lib/hermesBoard";
 import type {
+  GitFileDiff,
   HermesBoardCard,
   HermesKanbanAction,
   HermesProfile,
@@ -52,6 +53,7 @@ export function HermesScreen() {
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tree, setTree] = useState<HermesSessionNode[]>([]);
+  const [diff, setDiff] = useState<GitFileDiff[]>([]);
   const stagesInitialized = useRef(false);
 
   const loadBoard = useCallback(async () => {
@@ -87,10 +89,11 @@ export function HermesScreen() {
     return () => window.clearInterval(timer);
   }, [loadBoard]);
 
-  // evidence for the selected card.
+  // evidence (session tree + worktree diff) for the selected card.
   useEffect(() => {
     if (!selectedId) {
       setTree([]);
+      setDiff([]);
       return;
     }
     let disposed = false;
@@ -98,6 +101,10 @@ export function HermesScreen() {
       .getHermesTaskTree(selectedId)
       .then((nodes) => !disposed && setTree(nodes))
       .catch(() => !disposed && setTree([]));
+    void api
+      .getHermesTaskDiff(selectedId)
+      .then((files) => !disposed && setDiff(files))
+      .catch(() => !disposed && setDiff([]));
     return () => {
       disposed = true;
     };
@@ -210,7 +217,7 @@ export function HermesScreen() {
         </div>
       </section>
 
-      <EvidencePanel card={selected} tree={tree} />
+      <EvidencePanel card={selected} tree={tree} diff={diff} />
     </div>
   );
 }
@@ -387,7 +394,15 @@ function BoardCard({
   );
 }
 
-function EvidencePanel({ card, tree }: { card: HermesBoardCard | null; tree: HermesSessionNode[] }) {
+function EvidencePanel({
+  card,
+  tree,
+  diff,
+}: {
+  card: HermesBoardCard | null;
+  tree: HermesSessionNode[];
+  diff: GitFileDiff[];
+}) {
   const totalCost = tree.reduce((sum, node) => sum + (node.actualCostUsd ?? 0), 0);
   return (
     <aside className="session-context-panel" aria-label="evidence">
@@ -416,10 +431,65 @@ function EvidencePanel({ card, tree }: { card: HermesBoardCard | null; tree: Her
               tree.map((node) => <SessionNode key={node.id} node={node} />)
             )}
           </div>
+          <div className="session-context-section">
+            <div className="session-context-section-title">
+              <span>Changes</span>
+              <strong>{diff.length}</strong>
+            </div>
+            {diff.length === 0 ? (
+              <p className="session-context-empty">worktree 변경이 없습니다.</p>
+            ) : (
+              diff.map((file) => <FileDiff key={file.path} file={file} />)
+            )}
+          </div>
         </>
       )}
     </aside>
   );
+}
+
+function FileDiff({ file }: { file: GitFileDiff }) {
+  const { added, removed } = countDiffLines(file.diff);
+  return (
+    <details className="hermes-file-diff">
+      <summary>
+        <ChevronDown size={11} aria-hidden />
+        <span className="hermes-file-diff-path" title={file.path}>
+          {file.path}
+        </span>
+        <span className="hermes-file-diff-stat">
+          <span className="added">+{added}</span> <span className="deleted">−{removed}</span>
+        </span>
+      </summary>
+      <pre className="git-diff-code" aria-label={`${file.path} diff`}>
+        {file.diff.split("\n").map((line, index) => (
+          <span className={diffLineClass(line)} key={`${index}:${line}`}>
+            {line || " "}
+            {"\n"}
+          </span>
+        ))}
+      </pre>
+    </details>
+  );
+}
+
+function diffLineClass(line: string): string {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("diff --git") || line.startsWith("index ")) return "meta";
+  if (line.startsWith("+++") || line.startsWith("---")) return "file";
+  if (line.startsWith("+")) return "added";
+  if (line.startsWith("-")) return "deleted";
+  return "";
+}
+
+function countDiffLines(diff: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++")) added += 1;
+    else if (line.startsWith("-") && !line.startsWith("---")) removed += 1;
+  }
+  return { added, removed };
 }
 
 function SessionNode({ node }: { node: HermesSessionNode }) {

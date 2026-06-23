@@ -216,6 +216,9 @@ export const api = {
   getHermesTaskTree(taskId: string) {
     return invoke<HermesSessionNode[]>("get_hermes_task_tree", { taskId });
   },
+  getHermesTaskDiff(taskId: string) {
+    return invoke<GitFileDiff[]>("get_hermes_task_diff", { taskId });
+  },
   createHermesStageChain(goal: string, stages: HermesStageInput[]) {
     return invoke<string[]>("create_hermes_stage_chain", { goal, stages });
   },

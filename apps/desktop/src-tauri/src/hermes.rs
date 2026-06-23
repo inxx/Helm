@@ -3,7 +3,8 @@
 // ~/.hermes/{kanban.db,state.db}; writes shell out to the CLI (the stable interface).
 // ponytail: couples to Hermes' SQLite schema for reads — guarded by schema presence,
 // upgrade path is the `hermes kanban`/`hermes sessions` CLIs if the schema shifts.
-use crate::models::{CommandError, CommandResult};
+use crate::git;
+use crate::models::{CommandError, CommandResult, GitFileDiff};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -381,6 +382,41 @@ pub fn get_task_tree(task_id: String) -> CommandResult<Vec<HermesSessionNode>> {
         nodes.push(node);
     }
     Ok(nodes)
+}
+
+// ---------- Worktree diff (review surface) ----------
+
+/// Unified diffs for every changed file in a task's worktree. Read-only review surface;
+/// reuses the git helpers against the task's `workspace_path`. Returns empty when the task
+/// is not a worktree task or its path no longer exists. Capped to keep the payload bounded.
+pub fn get_task_diff(task_id: String) -> CommandResult<Vec<GitFileDiff>> {
+    let kanban = open_readonly(hermes_dir()?.join("kanban.db"))?;
+    let workspace: Option<String> = kanban
+        .query_row(
+            "SELECT workspace_path FROM tasks WHERE id = ?1",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| CommandError::database("Hermes 작업을 읽지 못했습니다.", err))?
+        .flatten();
+
+    let Some(workspace) = workspace.filter(|w| !w.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let root = std::path::Path::new(&workspace);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let files = git::changed_files(root)?;
+    let mut diffs = Vec::new();
+    for file in files.into_iter().take(50) {
+        if let Ok(diff) = git::file_diff(root, &file.path, "worktree") {
+            diffs.push(diff);
+        }
+    }
+    Ok(diffs)
 }
 
 // ---------- Write: staged task chain ----------
