@@ -52,7 +52,9 @@ export function TasksScreen({
   // merge them with Helm's own tasks (disjoint id namespaces, so no collision).
   const boardTasks = useMemo<TaskSummary[]>(() => {
     if (!snapshot) return combined.tasks;
-    const mapped = hermesCards.map((card) => hermesCardToTask(card, snapshot.project.id));
+    const mapped = hermesCards
+      .filter((card) => (card.status || "").toLowerCase() !== "archived") // archived는 보드에서 제외
+      .map((card) => hermesCardToTask(card, snapshot.project.id));
     return [...combined.tasks, ...mapped];
   }, [combined.tasks, hermesCards, snapshot?.project.id]);
 
