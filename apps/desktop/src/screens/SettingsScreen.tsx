@@ -80,6 +80,7 @@ const ROLE_DEFINITIONS: Array<{
   { roleId: "coder", selectionMode: "single" },
   { roleId: "plan_verifier", selectionMode: "multiple" },
   { roleId: "code_reviewer", selectionMode: "multiple" },
+  { roleId: "arbiter", selectionMode: "single" },
   { roleId: "tester", selectionMode: "multiple" },
 ];
 
@@ -1890,6 +1891,7 @@ function defaultRolePresets() {
     { roleId: "coder", label: "구현자", provider: null },
     { roleId: "plan_verifier", label: "계획 검토자", provider: null },
     { roleId: "code_reviewer", label: "코드 리뷰어", provider: null },
+    { roleId: "arbiter", label: "중재자", provider: null },
     { roleId: "tester", label: "테스트 담당자", provider: null },
   ];
 }
@@ -2206,6 +2208,8 @@ function roleGroupLabel(roleId: RoleAssignment["roleId"], language: AppLanguage)
     case "plan_verifier":
     case "code_reviewer":
       return language === "ko" ? "검수" : "Review";
+    case "arbiter":
+      return language === "ko" ? "중재자" : "Arbiter";
     case "tester":
       return language === "ko" ? "테스트" : "Testing";
     default:

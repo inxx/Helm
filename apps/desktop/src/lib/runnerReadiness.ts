@@ -17,6 +17,7 @@ const ROLE_LABELS: Record<AppLanguage, Record<RoleId, string>> = {
     coder: "Coder",
     plan_verifier: "Plan Reviewer",
     code_reviewer: "Code Reviewer",
+    arbiter: "Arbiter",
     tester: "Tester",
   },
   ko: {
@@ -24,6 +25,7 @@ const ROLE_LABELS: Record<AppLanguage, Record<RoleId, string>> = {
     coder: "구현자",
     plan_verifier: "계획 검토자",
     code_reviewer: "코드 리뷰어",
+    arbiter: "중재자",
     tester: "테스트 담당자",
   },
 };

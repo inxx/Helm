@@ -115,7 +115,7 @@ export interface RoleRunnerSelection {
 }
 
 export interface RoleAssignment {
-  roleId: "planner" | "coder" | "plan_verifier" | "code_reviewer" | "tester";
+  roleId: "planner" | "coder" | "plan_verifier" | "code_reviewer" | "arbiter" | "tester";
   selectionMode: "single" | "multiple";
   selections: RoleRunnerSelection[];
   /** Legacy shape retained for older persisted project settings. */

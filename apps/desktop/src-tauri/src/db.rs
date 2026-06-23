@@ -1978,7 +1978,7 @@ pub fn prepare_role_context(
     fs::create_dir_all(&artifact_path)
         .map_err(|err| CommandError::io("실행 산출물 폴더를 만들지 못했습니다.", err))?;
 
-    let context_pack = build_context_pack_markdown(
+    let mut context_pack = build_context_pack_markdown(
         root,
         &task,
         &worktree,
@@ -1986,6 +1986,12 @@ pub fn prepare_role_context(
         worktree_setup.as_ref(),
         Some(&role_policy),
     )?;
+    // 중재자는 리뷰어 판정을 종합해야 하므로 Context Pack에 리뷰어 판정 요약을 덧붙인다.
+    if role_id == "arbiter" {
+        context_pack.push_str(&build_reviewer_verdicts_markdown(
+            conn, root, project_id, task_id,
+        ));
+    }
     let context_manifest = build_context_manifest(
         root,
         &task,
@@ -2162,9 +2168,14 @@ pub fn prepare_next_role_context(
     if task.project_id != project_id {
         return Err(CommandError::validation("대상 태스크를 찾을 수 없습니다."));
     }
-    let role_id = next_role_for_task_status(&task.status).ok_or_else(|| {
-        CommandError::validation("현재 태스크 상태에서 자동으로 실행할 role이 없습니다.")
-    })?;
+    let role_id = if task.status == "CodeReview" {
+        let settings = effective_settings(conn, project_id)?;
+        resolve_code_review_role(conn, &settings, project_id, &task)?
+    } else {
+        next_role_for_task_status(&task.status).ok_or_else(|| {
+            CommandError::validation("현재 태스크 상태에서 자동으로 실행할 role이 없습니다.")
+        })?
+    };
     ensure_task_worktree(conn, root, project_id, task_id)?;
     prepare_role_context(conn, root, project_id, task_id, role_id)
 }
@@ -6793,6 +6804,7 @@ fn gate_for_role(role_id: &str) -> Option<&'static str> {
     match role_id {
         "plan_verifier" => Some("plan_verification"),
         "code_reviewer" => Some("code_review"),
+        "arbiter" => Some("code_review"),
         "tester" => Some("test"),
         _ => None,
     }
@@ -6948,19 +6960,20 @@ fn validate_task_status(status: &str) -> CommandResult<()> {
 fn validate_role_id(role_id: &str) -> CommandResult<()> {
     if matches!(
         role_id,
-        "planner" | "coder" | "plan_verifier" | "code_reviewer" | "tester"
+        "planner" | "coder" | "plan_verifier" | "code_reviewer" | "arbiter" | "tester"
     ) {
         return Ok(());
     }
     Err(CommandError::validation("지원하지 않는 역할입니다."))
 }
 
-fn role_policy_role_ids() -> [&'static str; 5] {
+fn role_policy_role_ids() -> [&'static str; 6] {
     [
         "planner",
         "coder",
         "plan_verifier",
         "code_reviewer",
+        "arbiter",
         "tester",
     ]
 }
@@ -7510,6 +7523,29 @@ fn count_passed_role_connections(
         )
         .map_err(|err| CommandError::database("리뷰어 통과 수를 확인하지 못했습니다.", err))?;
     Ok(count as usize)
+}
+
+/// CodeReview 단계에서 다음에 실행할 role을 고른다.
+/// 아직 실행되지 않은 리뷰어가 있으면 code_reviewer, 모든 리뷰어가 끝났고 중재자가
+/// 배정되어 있으며 아직 통과하지 않았으면 arbiter, 그 외에는 code_reviewer로 폴백한다.
+/// arbiter가 배정되지 않으면 항상 code_reviewer를 반환해 기존 동작을 그대로 유지한다(opt-in).
+fn resolve_code_review_role(
+    conn: &Connection,
+    settings: &EffectiveSettings,
+    project_id: &str,
+    task: &TaskSummary,
+) -> CommandResult<&'static str> {
+    if pick_pending_role_connection(conn, project_id, &task.id, "code_reviewer", settings)?
+        .is_some()
+    {
+        return Ok("code_reviewer");
+    }
+    if !role_connection_ids(settings, "arbiter").is_empty()
+        && count_passed_role_connections(conn, project_id, &task.id, "arbiter")? == 0
+    {
+        return Ok("arbiter");
+    }
+    Ok("code_reviewer")
 }
 
 fn inject_provider_options(
@@ -8812,6 +8848,26 @@ fn apply_successful_role_result(
                 return Ok(());
             }
         }
+        // 모든 리뷰어가 통과했어도 중재자(arbiter)가 배정되어 있고 아직 통과하지 않았다면
+        // 상태 전이를 보류한다. CodeReview에 머무르면 auto-handoff가 arbiter run을 큐잉한다.
+        // 중재자가 배정되지 않은 경우 이 분기를 건너뛰어 기존 all_pass → Testing 동작을 유지한다(opt-in).
+        if !role_connection_ids(&settings, "arbiter").is_empty()
+            && count_passed_role_connections(conn, project_id, &task.id, "arbiter")? == 0
+        {
+            insert_audit(
+                conn,
+                project_id,
+                "Task",
+                Some(&task.id),
+                "code_review.arbiter_pending",
+                json!({
+                    "taskId": task.id,
+                    "runId": run_id,
+                    "policy": "arbiter_signoff"
+                }),
+            )?;
+            return Ok(());
+        }
     }
 
     if let Some(next_status) = next_status_for_role(role_id) {
@@ -8956,6 +9012,28 @@ fn role_context_contract(role_id: &str) -> RoleContextContract {
             ],
             forbidden: &[
                 "리뷰 중 직접 수정하지 않는다.",
+                "스타일 취향만으로 blocking을 만들지 않는다.",
+            ],
+            gate: Some("code_review"),
+        },
+        "arbiter" => RoleContextContract {
+            objective: "여러 리뷰어의 판정(verdict)을 종합·중재해 단일 최종 판정을 내린다.",
+            focus: &[
+                "리뷰어 간 중복·상충·거짓양성을 정리하고 핵심 blocker만 남긴다.",
+                "리뷰어 dossier와 diff를 함께 보고 실제 머지 가능 여부를 판단한다.",
+                "차단 이슈는 gateResult.blocking=true로 남긴다.",
+            ],
+            pass_conditions: &[
+                "모든 리뷰어 우려가 해소되었거나 기각 사유와 함께 정리되었다.",
+                "남은 위험이 있으면 non-blocking risk로 구분되어 있다.",
+                "머지 가능하면 gateResult.status=pass를 남긴다.",
+            ],
+            blocking_conditions: &[
+                "해소되지 않은 실제 blocker가 남아 있다.",
+                "리뷰어 판정만으로 머지 가능 여부를 확정할 수 없다.",
+            ],
+            forbidden: &[
+                "중재 중 직접 코드를 수정하지 않는다.",
                 "스타일 취향만으로 blocking을 만들지 않는다.",
             ],
             gate: Some("code_review"),
@@ -9159,6 +9237,92 @@ fn read_run_summary_for_context(root: &Path, run: &AgentRunSummary) -> String {
     fs::read_to_string(path)
         .map(|summary| truncate_for_context(&summary, 4000))
         .unwrap_or_else(|_| "summary.md를 읽지 못했습니다.".to_string())
+}
+
+/// 중재자(arbiter) Context Pack에 붙일 "리뷰어 판정 요약" 섹션을 만든다.
+/// 각 code_reviewer run의 structured-result.json을 best-effort로 읽어 connection/provider,
+/// 판정(status), summary, blockers를 요약한다. 파일이 없거나 깨져도 안전하게 건너뛴다.
+fn build_reviewer_verdicts_markdown(
+    conn: &Connection,
+    root: &Path,
+    project_id: &str,
+    task_id: &str,
+) -> String {
+    let mut stmt = match conn.prepare(
+        "SELECT connection_id, provider, result_status, artifact_dir, result_path
+           FROM agent_runs
+          WHERE project_id = ?1 AND task_id = ?2 AND role_id = 'code_reviewer'
+            AND status = 'Succeeded'
+          ORDER BY finished_at ASC, created_at ASC",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return String::new(),
+    };
+    let rows = stmt.query_map(params![project_id, task_id], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    });
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(_) => return String::new(),
+    };
+
+    let mut entries: Vec<String> = Vec::new();
+    for row in rows.flatten() {
+        let (connection_id, provider, result_status, artifact_dir, result_path) = row;
+        let reviewer = match (connection_id.as_deref(), provider.as_deref()) {
+            (Some(connection), Some(provider)) => format!("{connection} ({provider})"),
+            (Some(connection), None) => connection.to_string(),
+            (None, Some(provider)) => provider.to_string(),
+            (None, None) => "알 수 없는 리뷰어".to_string(),
+        };
+        let status = result_status.as_deref().unwrap_or("미상");
+
+        let result_file = root.join(&artifact_dir).join(&result_path);
+        let parsed = fs::read_to_string(&result_file)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let (summary, blockers) = match parsed.as_ref() {
+            Some(value) => {
+                let summary = value
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(|item| truncate_for_context(item, 600))
+                    .unwrap_or_else(|| "요약 없음".to_string());
+                let blockers = value
+                    .get("gateResult")
+                    .and_then(|gate| gate.get("blockers"))
+                    .map(|item| string_list_from_json(item))
+                    .unwrap_or_default();
+                (summary, blockers)
+            }
+            None => ("structured-result.json을 읽지 못했습니다.".to_string(), Vec::new()),
+        };
+        let blockers_md = if blockers.is_empty() {
+            "  - blockers: 없음".to_string()
+        } else {
+            blockers
+                .iter()
+                .map(|item| format!("  - blocker: {item}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        entries.push(format!(
+            "- {reviewer} · status={status}\n  - summary: {summary}\n{blockers_md}"
+        ));
+    }
+
+    if entries.is_empty() {
+        return String::new();
+    }
+    format!("\n\n## 리뷰어 판정 요약\n\n{}\n", entries.join("\n"))
 }
 
 fn repair_allowed_scope(affected_files: &Value) -> String {
@@ -9650,6 +9814,7 @@ fn validate_role_run_state(
         "coder" => task.status == "Ready",
         "plan_verifier" => task.status == "PlanVerification",
         "code_reviewer" => task.status == "CodeReview",
+        "arbiter" => task.status == "CodeReview",
         "tester" => task.status == "Testing",
         _ => false,
     };
@@ -9704,6 +9869,7 @@ fn next_status_for_role(role_id: &str) -> Option<&'static str> {
         "coder" => Some("PlanVerification"),
         "plan_verifier" => Some("CodeReview"),
         "code_reviewer" => Some("Testing"),
+        "arbiter" => Some("Testing"),
         "tester" => Some("MergeWaiting"),
         _ => None,
     }
@@ -9952,6 +10118,7 @@ fn default_role_presets() -> Value {
         { "roleId": "coder", "label": "구현자", "provider": null },
         { "roleId": "plan_verifier", "label": "계획 검토자", "provider": null },
         { "roleId": "code_reviewer", "label": "코드 리뷰어", "provider": null },
+        { "roleId": "arbiter", "label": "중재자", "provider": null },
         { "roleId": "tester", "label": "테스트 담당자", "provider": null }
     ])
 }
@@ -9989,6 +10156,13 @@ fn default_role_assignments() -> Value {
             "connectionIds": [],
             "selections": [],
             "aggregationPolicy": "all_pass"
+        },
+        {
+            "roleId": "arbiter",
+            "selectionMode": "single",
+            "connectionIds": [],
+            "selections": [],
+            "aggregationPolicy": null
         },
         {
             "roleId": "tester",
@@ -12298,6 +12472,79 @@ mod tests {
         .expect("pinned reviewer");
         assert_eq!(pinned.connection_id.as_deref(), Some("claude-b"));
         assert!(pinned.args.contains(&"review-b".to_string()));
+    }
+
+    #[test]
+    fn arbiter_is_opt_in_when_unassigned() {
+        // 중재자(arbiter)가 배정되지 않은 기본 상태에서는 arbiter connection 목록이 비어 있어야 한다.
+        // 이때 CodeReview 핸드오프는 기존처럼 code_reviewer만 사용해 zero-regression을 보장한다.
+        let settings = EffectiveSettings {
+            role_presets: default_role_presets(),
+            ai_connections: json!([
+                {
+                    "id": "claude-a",
+                    "label": "Reviewer A",
+                    "provider": "claude",
+                    "commandArgs": ["claude", "--", "review-a"],
+                    "timeoutSeconds": 120,
+                    "enabled": true
+                }
+            ]),
+            role_assignments: json!([
+                {
+                    "roleId": "code_reviewer",
+                    "selectionMode": "multiple",
+                    "connectionIds": ["claude-a"],
+                    "selections": [{ "connectionId": "claude-a" }],
+                    "aggregationPolicy": "all_pass"
+                }
+            ]),
+            role_policies: default_role_policies(),
+            conductor_config: None,
+            worktree_root: None,
+            worktree_setup: None,
+            jira_config: None,
+            obsidian_vault_path: None,
+            obsidian_artifact_path: None,
+            token_budget: None,
+            artifact_retention_days: Some(30),
+        };
+
+        // 중재자 미배정 → arbiter 목록은 비어 있다(opt-in 게이트).
+        assert!(role_connection_ids(&settings, "arbiter").is_empty());
+
+        // 기본 role assignment 묶음에는 arbiter가 single/빈 목록으로 포함된다.
+        let defaults = default_role_assignments();
+        let arbiter = defaults
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("roleId").and_then(Value::as_str) == Some("arbiter"))
+            })
+            .expect("default arbiter assignment");
+        assert_eq!(
+            arbiter.get("selectionMode").and_then(Value::as_str),
+            Some("single")
+        );
+        assert!(role_connection_ids(
+            &EffectiveSettings {
+                role_presets: default_role_presets(),
+                ai_connections: json!([]),
+                role_assignments: defaults.clone(),
+                role_policies: default_role_policies(),
+                conductor_config: None,
+                worktree_root: None,
+                worktree_setup: None,
+                jira_config: None,
+                obsidian_vault_path: None,
+                obsidian_artifact_path: None,
+                token_budget: None,
+                artifact_retention_days: Some(30),
+            },
+            "arbiter"
+        )
+        .is_empty());
     }
 
     #[test]
