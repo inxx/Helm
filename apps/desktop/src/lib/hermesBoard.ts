@@ -1,20 +1,11 @@
-import type { HermesBoardCard, HermesKanbanAction } from "./types";
+import type { HermesBoardCard, TaskStatus, TaskSummary } from "./types";
 
-// Pure board logic (status → column, attention, available human actions). Kept separate
-// from the screen so it is unit-testable. Hermes task status: todo | ready | running |
-// blocked | done | archived; task_runs status adds crashed | failed | timed_out.
-export type HermesColumn = "blocked" | "queued" | "running" | "done";
+// Map a Hermes board card onto the Helm TaskBoard. Kept separate from the screen so it is
+// unit-testable. Hermes task status: todo | ready | running | blocked | done | archived;
+// task_runs status adds crashed | failed | timed_out.
+type HermesColumn = "blocked" | "queued" | "running" | "done";
 
-export const HERMES_COLUMNS: HermesColumn[] = ["blocked", "queued", "running", "done"];
-
-export const COLUMN_LABELS: Record<HermesColumn, string> = {
-  blocked: "Blocked",
-  queued: "Queued",
-  running: "Running",
-  done: "Done",
-};
-
-export function cardColumn(card: HermesBoardCard): HermesColumn {
+function cardColumn(card: HermesBoardCard): HermesColumn {
   const status = (card.status || "").toLowerCase();
   const run = (card.runStatus || "").toLowerCase();
   if (status.includes("block") || run === "crashed" || run === "failed" || run === "timed_out") {
@@ -25,49 +16,48 @@ export function cardColumn(card: HermesBoardCard): HermesColumn {
   return "queued"; // todo (gated) + ready
 }
 
-/** A blocked card needs a human decision; pull it to the user's eye. */
-export function attentionNeeded(card: HermesBoardCard): boolean {
-  return cardColumn(card) === "blocked";
-}
-
-/** True when the card is gated behind unfinished dependencies (todo with parents). */
-export function isGated(card: HermesBoardCard): boolean {
-  return card.status.toLowerCase() === "todo" && card.parents.length > 0;
-}
-
-export function groupByStatus(cards: HermesBoardCard[]): Record<HermesColumn, HermesBoardCard[]> {
-  const groups: Record<HermesColumn, HermesBoardCard[]> = {
-    blocked: [],
-    queued: [],
-    running: [],
-    done: [],
-  };
-  for (const card of cards) {
-    groups[cardColumn(card)].push(card);
-  }
-  return groups;
-}
-
-/** Human gate actions offered per card, by column. */
-export function availableActions(card: HermesBoardCard): HermesKanbanAction[] {
-  switch (cardColumn(card)) {
-    case "blocked":
-      return ["unblock", "complete", "archive"];
-    case "queued":
-      return isGated(card) ? ["promote", "archive"] : ["archive"];
-    case "running":
-      return ["block", "archive"];
-    case "done":
-      return ["archive"];
-    default:
-      return ["archive"];
-  }
-}
-
-export const ACTION_LABELS: Record<HermesKanbanAction, string> = {
-  unblock: "재개",
-  promote: "지금 실행",
-  complete: "완료 처리",
-  block: "중단",
-  archive: "보관",
+// Adapter: render Hermes board cards through Helm's native TaskBoard by mapping a card to
+// a TaskSummary. The board is unified on the Helm UI; Hermes' 4 columns collapse into the
+// Helm 10-status set (only these 4 land), so empty Helm-only columns stay empty.
+const COLUMN_TO_STATUS: Record<HermesColumn, TaskStatus> = {
+  blocked: "Blocked",
+  queued: "Ready",
+  running: "Coding",
+  done: "Done",
 };
+
+// Hermes timestamps are epoch seconds (or null); TaskSummary wants ISO. Null → epoch 0.
+function hermesTimeToIso(seconds: number | null | undefined): string {
+  return new Date((seconds ?? 0) * 1000).toISOString();
+}
+
+export function hermesCardToTask(card: HermesBoardCard, projectId: string): TaskSummary {
+  const createdAt = hermesTimeToIso(card.createdAt);
+  const transitionAt = hermesTimeToIso(card.completedAt ?? card.startedAt ?? card.createdAt);
+  return {
+    id: card.id,
+    projectId,
+    epicId: null,
+    title: card.title,
+    description: card.runSummary ?? "",
+    status: COLUMN_TO_STATUS[cardColumn(card)],
+    statusReason: card.runOutcome ?? null,
+    sortOrder: -card.priority, // higher Hermes priority → earlier in the column
+    externalRefs: card.branchName
+      ? [
+          {
+            id: `${card.id}-branch`,
+            projectId,
+            taskId: card.id,
+            refType: "branch",
+            refValue: card.branchName,
+            refTitle: card.assignee ?? null,
+            createdAt,
+          },
+        ]
+      : [],
+    createdAt,
+    updatedAt: transitionAt,
+    lastTransitionAt: transitionAt,
+  };
+}

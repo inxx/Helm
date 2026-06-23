@@ -22,14 +22,10 @@ export type MessageKey =
   | "app.error.unknown"
   | "settings.category.orchestrator.label"
   | "settings.category.orchestrator.hint"
-  | "settings.category.templates.label"
-  | "settings.category.templates.hint"
   | "settings.category.connections.label"
   | "settings.category.connections.hint"
   | "settings.category.assignments.label"
   | "settings.category.assignments.hint"
-  | "settings.category.policies.label"
-  | "settings.category.policies.hint"
   | "settings.category.usage.label"
   | "settings.category.usage.hint"
   | "settings.category.jira.label"
@@ -206,14 +202,10 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "app.error.unknown": "An unknown error occurred.",
     "settings.category.orchestrator.label": "Orchestrator",
     "settings.category.orchestrator.hint": "Global conductor AI applied to every project",
-    "settings.category.templates.label": "Runner Templates",
-    "settings.category.templates.hint": "Apply role presets and AI CLI connections together",
     "settings.category.connections.label": "AI CLI Connections",
     "settings.category.connections.hint": "Codex, Claude Code, Gemini, and other LLM paths",
     "settings.category.assignments.label": "Role CLI Selection",
     "settings.category.assignments.hint": "Planner, coder, reviewer, and tester mappings",
-    "settings.category.policies.label": "Role Policies",
-    "settings.category.policies.hint": "Default policy Markdown per role",
     "settings.category.usage.label": "Stats & Usage",
     "settings.category.usage.hint": "Agent runs, work time, and provider mix",
     "settings.category.jira.label": "Jira",
@@ -389,14 +381,10 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "app.error.unknown": "알 수 없는 오류가 발생했습니다.",
     "settings.category.orchestrator.label": "오케스트레이터",
     "settings.category.orchestrator.hint": "모든 프로젝트에 적용되는 지휘자 AI",
-    "settings.category.templates.label": "Runner Templates",
-    "settings.category.templates.hint": "역할 프리셋과 AI CLI 연결을 한 번에 적용",
     "settings.category.connections.label": "AI CLI 연결",
     "settings.category.connections.hint": "Codex · Claude Code · Gemini · 기타 LLM 경로",
     "settings.category.assignments.label": "작업별 CLI 선택",
     "settings.category.assignments.hint": "계획 · 구현 · 검수 · 테스트 매핑",
-    "settings.category.policies.label": "역할 정책",
-    "settings.category.policies.hint": "Role별 기본 정책 MD",
     "settings.category.usage.label": "통계 및 사용량",
     "settings.category.usage.hint": "Agent 실행, 작업 시간, provider 분포",
     "settings.category.jira.label": "Jira",

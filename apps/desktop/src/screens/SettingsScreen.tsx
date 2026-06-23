@@ -3,7 +3,6 @@ import {
   BrainCircuit,
   CheckCircle2,
   Download,
-  FileText,
   FolderTree,
   Info,
   Layers,
@@ -19,7 +18,7 @@ import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
 import { normalizeLanguage, useI18n, type AppLanguage, type MessageKey } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
-import { roleLabel, runnerReadinessFor } from "../lib/runnerReadiness";
+import { roleLabel } from "../lib/runnerReadiness";
 import { checkForManualUpdate, type ManualUpdateInfo } from "../lib/updater";
 import type {
   AiConnection,
@@ -33,7 +32,6 @@ import type {
   RolePolicy,
   AgentRunSummary,
   RunnerCheckResult,
-  RunnerTemplateSummary,
 } from "../lib/types";
 
 interface SettingsScreenProps {
@@ -50,10 +48,8 @@ interface SettingsScreenProps {
 
 type SettingsCategory =
   | "orchestrator"
-  | "templates"
   | "connections"
   | "assignments"
-  | "policies"
   | "usage"
   | "jira"
   | "worktree"
@@ -67,10 +63,8 @@ const CATEGORIES: Array<{
   icon: typeof Layers;
 }> = [
   { id: "orchestrator", labelKey: "settings.category.orchestrator.label", hintKey: "settings.category.orchestrator.hint", icon: BrainCircuit },
-  { id: "templates", labelKey: "settings.category.templates.label", hintKey: "settings.category.templates.hint", icon: Layers },
   { id: "connections", labelKey: "settings.category.connections.label", hintKey: "settings.category.connections.hint", icon: Plug },
   { id: "assignments", labelKey: "settings.category.assignments.label", hintKey: "settings.category.assignments.hint", icon: Workflow },
-  { id: "policies", labelKey: "settings.category.policies.label", hintKey: "settings.category.policies.hint", icon: FileText },
   { id: "usage", labelKey: "settings.category.usage.label", hintKey: "settings.category.usage.hint", icon: BarChart3 },
   { id: "jira", labelKey: "settings.category.jira.label", hintKey: "settings.category.jira.hint", icon: CheckCircle2 },
   { id: "worktree", labelKey: "settings.category.worktree.label", hintKey: "settings.category.worktree.hint", icon: FolderTree },
@@ -115,7 +109,6 @@ export function SettingsScreen({
   const [rolePresets, setRolePresets] = useState("");
   const [worktreeRoot, setWorktreeRoot] = useState("");
   const [worktreeSetup, setWorktreeSetup] = useState("");
-  const [templates, setTemplates] = useState<RunnerTemplateSummary[]>([]);
   const [runnerChecks, setRunnerChecks] = useState<RunnerCheckResult[]>([]);
   const [connectionChecks, setConnectionChecks] = useState<Record<string, AiConnectionCheckResult>>({});
   const [connectionCheckBusyId, setConnectionCheckBusyId] = useState<string | null>(null);
@@ -180,7 +173,6 @@ export function SettingsScreen({
 
   useEffect(() => {
     if (!snapshot) return;
-    void api.listRunnerTemplates(snapshot.project.id).then(setTemplates);
     setRunnerChecks([]);
     setConnectionChecks({});
     setConnectionCheckBusyId(null);
@@ -226,20 +218,6 @@ export function SettingsScreen({
     () => aiConnections.filter((connection) => connection.enabled),
     [aiConnections],
   );
-  const parsedRolePresets = useMemo(() => parseRolePresets(rolePresets), [rolePresets]);
-  const runnerOnboarding = useMemo(() => {
-    const effectiveSettings = {
-      rolePresets: parsedRolePresets ?? appSettings.rolePresets,
-      aiConnections,
-      roleAssignments: normalizeRoleAssignments(roleAssignments),
-    } as ProjectSnapshot["settings"];
-    return ROLE_DEFINITIONS.map((role) => ({
-      ...role,
-      label: roleLabel(role.roleId, language),
-      readiness: runnerReadinessFor(effectiveSettings, role.roleId, language),
-    }));
-  }, [aiConnections, appSettings.rolePresets, language, parsedRolePresets, roleAssignments]);
-  const readyRunnerCount = runnerOnboarding.filter((item) => item.readiness.ready).length;
 
   async function save() {
     setBusy(true);
@@ -330,32 +308,6 @@ export function SettingsScreen({
       return;
     }
     await save();
-  }
-
-  async function applyTemplate(templateId: string) {
-    if (!snapshot) return;
-    setBusy(true);
-    try {
-      const settings = await api.applyRunnerTemplate(snapshot.project.id, templateId);
-      setRolePresets(JSON.stringify(settings.rolePresets, null, 2));
-      setAiConnections(normalizeAiConnections(settings.aiConnections));
-      setRoleAssignments(normalizeRoleAssignments(settings.roleAssignments));
-      setConductorConfig(normalizeConductorConfig(settings.conductorConfig));
-      await onRefresh();
-      showToast({
-        tone: "success",
-        title: "Runner Template 적용 완료",
-        description: "역할 프리셋과 AI CLI 기본값을 반영했습니다.",
-      });
-    } catch (error) {
-      showToast({
-        tone: "error",
-        title: "Runner Template 적용 실패",
-        description: errorMessage(error, "runner template 적용에 실패했습니다."),
-      });
-    } finally {
-      setBusy(false);
-    }
   }
 
   async function refreshConnectionModels(connection: AiConnection, options: { silent?: boolean } = {}) {
@@ -777,14 +729,6 @@ export function SettingsScreen({
     );
   }
 
-  function updateRolePolicy(roleId: RoleAssignment["roleId"], patch: Partial<RolePolicy>) {
-    setRolePolicies((current) =>
-      normalizeRolePolicies(current).map((policy) =>
-        policy.roleId === roleId ? { ...policy, ...patch } : policy,
-      ),
-    );
-  }
-
   function updateJiraConfig(patch: Partial<JiraConfig>) {
     setJiraConfig((current) => normalizeJiraConfig({ ...current, ...patch }));
   }
@@ -1111,63 +1055,6 @@ export function SettingsScreen({
               </section>
             ) : null}
 
-            {activeCategory === "templates" ? (
-              <section className="settings-section">
-                <div className="settings-section-head">
-                  <h3>Runner Templates</h3>
-                  <p className="muted">{language === "ko" ? "기존 role preset과 새 AI CLI command/작업별 선택 기본값을 함께 적용합니다." : "Apply role presets, new AI CLI commands, and per-task defaults together."}</p>
-                </div>
-                <div className="runner-onboarding-panel">
-                  <div className="runner-onboarding-summary">
-                    <div>
-                      <strong>{language === "ko" ? "Runner 준비 상태" : "Runner readiness"}</strong>
-                      <span>
-                        {language === "ko"
-                          ? `${readyRunnerCount}/${ROLE_DEFINITIONS.length} 역할 준비됨 · 활성 CLI 연결 ${enabledConnections.length}개`
-                          : `${readyRunnerCount}/${ROLE_DEFINITIONS.length} roles ready · ${enabledConnections.length} active CLI connections`}
-                      </span>
-                    </div>
-                    <span className={readyRunnerCount === ROLE_DEFINITIONS.length ? "check-pass" : "check-fail"}>
-                      {readyRunnerCount === ROLE_DEFINITIONS.length ? (language === "ko" ? "준비 완료" : "Ready") : (language === "ko" ? "설정 필요" : "Needs setup")}
-                    </span>
-                  </div>
-                  <ul className="runner-onboarding-roles">
-                    {runnerOnboarding.map((item) => (
-                      <li key={item.roleId}>
-                        <span className={item.readiness.ready ? "check-pass" : "check-fail"}>
-                          {item.readiness.ready ? "ready" : "missing"}
-                        </span>
-                        <strong>{item.label}</strong>
-                        <span>{item.readiness.ready ? item.readiness.label : item.readiness.description}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-                {templates.length === 0 ? (
-                  <p className="muted">{language === "ko" ? "사용 가능한 template이 없습니다." : "No templates available."}</p>
-                ) : (
-                  <div className="template-grid">
-                    {templates.map((template) => (
-                      <article className="template-card" key={template.id}>
-                        <div>
-                          <strong>{template.label}</strong>
-                          <p>{runnerTemplateDescription(template, language)}</p>
-                        </div>
-                        <button
-                          className="secondary-button"
-                          disabled={busy}
-                          onClick={() => applyTemplate(template.id)}
-                          type="button"
-                        >
-                          {language === "ko" ? "적용" : "Apply"}
-                        </button>
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </section>
-            ) : null}
-
             {activeCategory === "connections" ? (
               <section className="settings-section">
                 <div className="settings-section-head">
@@ -1460,56 +1347,6 @@ export function SettingsScreen({
                     })}
                   </div>
                 )}
-              </section>
-            ) : null}
-
-            {activeCategory === "policies" ? (
-              <section className="settings-section">
-                <div className="settings-section-head">
-                  <h3>{language === "ko" ? "역할 정책 MD" : "Role Policy Markdown"}</h3>
-                  <p className="muted">
-                    {language === "ko"
-                      ? "Context Pack에 함께 포함할 역할별 Markdown 정책입니다. 경로는 각 repo 기준 상대 .md 파일만 허용합니다."
-                      : "Markdown policies to include in the Context Pack per role. Paths must be relative .md files from each repo."}
-                  </p>
-                </div>
-                <div className="role-assignment-list">
-                  {normalizeRolePolicies(rolePolicies).map((policy) => {
-                    const role = ROLE_DEFINITIONS.find((item) => item.roleId === policy.roleId);
-                    return (
-                      <article className="role-assignment-row" key={policy.roleId}>
-                        <div>
-                          <strong>{roleLabel(policy.roleId, language)}</strong>
-                          <span>
-                            {role ? roleGroupLabel(role.roleId, language) : language === "ko" ? "역할" : "Role"}
-                            <span className="role-mode-pill">{policy.enabled ? (language === "ko" ? "사용" : "Enabled") : (language === "ko" ? "비활성" : "Disabled")}</span>
-                          </span>
-                        </div>
-                        <div className="connection-fields">
-                          <label className="toggle-switch">
-                            <input
-                              checked={policy.enabled}
-                              onChange={(event) =>
-                                updateRolePolicy(policy.roleId, { enabled: event.target.checked })
-                              }
-                              type="checkbox"
-                            />
-                            <span className="toggle-switch-track" aria-hidden />
-                            <span className="toggle-switch-label">{language === "ko" ? "Context Pack에 정책 포함" : "Include policy in Context Pack"}</span>
-                          </label>
-                          <label>
-                            <span>{language === "ko" ? "정책 문서 경로" : "Policy document path"}</span>
-                            <input
-                              placeholder={`.helm/policies/${policy.roleId}.md`}
-                              value={policy.path}
-                              onChange={(event) => updateRolePolicy(policy.roleId, { path: event.target.value })}
-                            />
-                          </label>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
               </section>
             ) : null}
 
@@ -2117,15 +1954,6 @@ function normalizeJiraProjectKey(value: string): string | null {
   return trimmed ? trimmed : null;
 }
 
-function parseRolePresets(raw: string): unknown | null {
-  if (!raw.trim()) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
 function normalizeAiConnections(value: unknown): AiConnection[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -2382,22 +2210,6 @@ function roleGroupLabel(roleId: RoleAssignment["roleId"], language: AppLanguage)
       return language === "ko" ? "테스트" : "Testing";
     default:
       return language === "ko" ? "역할" : "Role";
-  }
-}
-
-function runnerTemplateDescription(template: RunnerTemplateSummary, language: AppLanguage): string {
-  if (language === "ko") return template.description;
-  switch (template.id) {
-    case "fixture":
-      return "Local verification runner. Generates artifacts and diffs without calling a real AI.";
-    case "codex":
-      return "Use the installed codex CLI as the role runner. Adjust the command for your environment.";
-    case "claude":
-      return "Use the installed claude CLI as the role runner. Local authentication is required.";
-    case "gemini":
-      return "Use the installed gemini CLI as the role runner. Local authentication or GEMINI_API_KEY is required.";
-    default:
-      return template.description;
   }
 }
 

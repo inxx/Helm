@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  attentionNeeded,
-  availableActions,
-  cardColumn,
-  groupByStatus,
-  isGated,
-} from "./hermesBoard.ts";
+import { hermesCardToTask } from "./hermesBoard.ts";
 import type { HermesBoardCard } from "./types";
 
 function card(over: Partial<HermesBoardCard>): HermesBoardCard {
@@ -31,45 +25,43 @@ function card(over: Partial<HermesBoardCard>): HermesBoardCard {
   };
 }
 
-test("cardColumn maps task + run status to columns", () => {
-  assert.equal(cardColumn(card({ status: "ready" })), "queued");
-  assert.equal(cardColumn(card({ status: "todo" })), "queued");
-  assert.equal(cardColumn(card({ status: "running" })), "running");
-  assert.equal(cardColumn(card({ status: "done" })), "done");
-  assert.equal(cardColumn(card({ status: "blocked" })), "blocked");
+test("hermesCardToTask maps Hermes status + run status onto Helm TaskStatus", () => {
+  assert.equal(hermesCardToTask(card({ status: "ready" }), "p").status, "Ready");
+  assert.equal(hermesCardToTask(card({ status: "todo" }), "p").status, "Ready");
+  assert.equal(hermesCardToTask(card({ status: "running" }), "p").status, "Coding");
+  assert.equal(hermesCardToTask(card({ status: "done" }), "p").status, "Done");
+  assert.equal(hermesCardToTask(card({ status: "blocked" }), "p").status, "Blocked");
   // a crashed/failed run pulls the card to Blocked even if task status lags.
-  assert.equal(cardColumn(card({ status: "running", runStatus: "crashed" })), "blocked");
-  assert.equal(cardColumn(card({ status: "ready", runStatus: "running" })), "running");
+  assert.equal(hermesCardToTask(card({ status: "running", runStatus: "crashed" }), "p").status, "Blocked");
+  assert.equal(hermesCardToTask(card({ status: "ready", runStatus: "running" }), "p").status, "Coding");
 });
 
-test("isGated detects dependency-gated todo cards", () => {
-  assert.equal(isGated(card({ status: "todo", parents: ["t_0"] })), true);
-  assert.equal(isGated(card({ status: "todo", parents: [] })), false);
-  assert.equal(isGated(card({ status: "ready", parents: ["t_0"] })), false);
-});
-
-test("attentionNeeded flags only blocked cards", () => {
-  assert.equal(attentionNeeded(card({ status: "blocked" })), true);
-  assert.equal(attentionNeeded(card({ status: "running" })), false);
-});
-
-test("groupByStatus partitions cards", () => {
-  const groups = groupByStatus([
-    card({ id: "a", status: "ready" }),
-    card({ id: "b", status: "running" }),
-    card({ id: "c", status: "blocked" }),
-    card({ id: "d", status: "done" }),
-    card({ id: "e", status: "todo", parents: ["a"] }),
-  ]);
-  assert.equal(groups.queued.length, 2); // ready + gated todo
-  assert.equal(groups.running.length, 1);
-  assert.equal(groups.blocked.length, 1);
-  assert.equal(groups.done.length, 1);
-});
-
-test("availableActions offers a human gate per column", () => {
-  assert.deepEqual(availableActions(card({ status: "blocked" })), ["unblock", "complete", "archive"]);
-  assert.deepEqual(availableActions(card({ status: "todo", parents: ["a"] })), ["promote", "archive"]);
-  assert.deepEqual(availableActions(card({ status: "running" })), ["block", "archive"]);
-  assert.deepEqual(availableActions(card({ status: "done" })), ["archive"]);
+test("hermesCardToTask maps cards onto the Helm TaskBoard model", () => {
+  const task = hermesCardToTask(
+    card({
+      id: "t_9",
+      title: "build feature",
+      status: "running",
+      priority: 5,
+      branchName: "feat/x",
+      assignee: "coder",
+      runOutcome: "in-progress",
+      runSummary: "wiring it up",
+      createdAt: 1_700_000_000,
+      startedAt: 1_700_000_500,
+    }),
+    "proj-1",
+  );
+  assert.equal(task.id, "t_9");
+  assert.equal(task.projectId, "proj-1");
+  assert.equal(task.status, "Coding"); // running → Coding
+  assert.equal(task.sortOrder, -5); // higher priority sorts earlier
+  assert.equal(task.statusReason, "in-progress");
+  assert.equal(task.description, "wiring it up");
+  assert.equal(task.externalRefs[0]?.refValue, "feat/x");
+  assert.equal(task.lastTransitionAt, new Date(1_700_000_500 * 1000).toISOString());
+  // blocked + no branch → Blocked, empty refs
+  const blocked = hermesCardToTask(card({ status: "blocked" }), "proj-1");
+  assert.equal(blocked.status, "Blocked");
+  assert.deepEqual(blocked.externalRefs, []);
 });
