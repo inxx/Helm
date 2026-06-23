@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -1964,6 +1964,9 @@ pub fn prepare_role_context(
         ));
     }
     let settings = effective_settings(conn, project_id)?;
+    // 멀티 리뷰어 role이면 아직 실행되지 않은 다음 connection을 run에 고정(pin)한다.
+    let pinned_connection_id =
+        pick_pending_role_connection(conn, project_id, task_id, role_id, &settings)?;
     let worktree_setup = resolve_worktree_setup_config(root, settings.worktree_setup.as_ref())?;
     let role_policy = resolve_role_policy(root, &settings.role_policies, role_id);
 
@@ -2050,10 +2053,10 @@ pub fn prepare_role_context(
         "INSERT INTO agent_runs (
            id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
            stdout_log_path, stderr_log_path, exit_code, result_status, started_at, finished_at,
-           lifecycle_phase, attempt, created_at, updated_at
+           lifecycle_phase, attempt, created_at, updated_at, connection_id
          )
          SELECT ?1, ?2, ?3, ?4, 'Queued', ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL, NULL,
-                'queued', 1, ?10, ?10
+                'queued', 1, ?10, ?10, ?11
           WHERE NOT EXISTS (
             SELECT 1 FROM agent_runs
              WHERE project_id = ?2
@@ -2070,7 +2073,8 @@ pub fn prepare_role_context(
             "structured-result.json",
             "stdout.log",
             "stderr.log",
-            timestamp
+            timestamp,
+            pinned_connection_id
         ],
     )
     .map_err(|err| CommandError::database("실행 컨텍스트를 저장하지 못했습니다.", err))?;
@@ -2352,7 +2356,12 @@ pub fn run_host_role(
     })?;
     let settings = effective_settings(conn, project_id)?;
     let placeholders = host_runner_placeholders(root, &worktree, &run);
-    let runner_command = resolve_host_runner_command(&settings, &run.role_id, &placeholders)?;
+    let runner_command = resolve_host_runner_command(
+        &settings,
+        &run.role_id,
+        run.connection_id.as_deref(),
+        &placeholders,
+    )?;
     let command_args =
         resolve_command_args(Path::new(&worktree.worktree_path), &runner_command.args);
     let timeout_seconds = runner_command.timeout_seconds;
@@ -7154,9 +7163,12 @@ enum RunnerAdapterKind {
 fn resolve_host_runner_command(
     settings: &EffectiveSettings,
     role_id: &str,
+    pinned_connection_id: Option<&str>,
     placeholders: &HashMap<String, String>,
 ) -> CommandResult<ResolvedHostRunnerCommand> {
-    if let Some(command) = role_assignment_command(settings, role_id, placeholders)? {
+    if let Some(command) =
+        role_assignment_command(settings, role_id, pinned_connection_id, placeholders)?
+    {
         return Ok(command);
     }
 
@@ -7176,6 +7188,7 @@ fn resolve_host_runner_command(
 fn role_assignment_command(
     settings: &EffectiveSettings,
     role_id: &str,
+    pinned_connection_id: Option<&str>,
     placeholders: &HashMap<String, String>,
 ) -> CommandResult<Option<ResolvedHostRunnerCommand>> {
     let assignment = settings.role_assignments.as_array().and_then(|items| {
@@ -7187,7 +7200,13 @@ fn role_assignment_command(
         return Ok(None);
     };
 
-    let Some(selection) = first_role_selection(assignment) else {
+    // 멀티 리뷰어처럼 run에 connection이 고정(pin)된 경우 해당 selection을 사용하고,
+    // 그렇지 않으면 기존처럼 첫 번째 selection을 사용한다.
+    let selection = match pinned_connection_id {
+        Some(connection_id) => role_selection_for_connection(assignment, connection_id),
+        None => first_role_selection(assignment),
+    };
+    let Some(selection) = selection else {
         return Ok(None);
     };
     let connection_id = selection
@@ -7389,6 +7408,108 @@ fn first_role_selection(assignment: &Value) -> Option<Value> {
         .and_then(|items| items.first())
         .and_then(Value::as_str)
         .map(|connection_id| json!({ "connectionId": connection_id }))
+}
+
+/// 특정 connection에 고정된(pinned) run을 위한 selection을 찾는다.
+/// 일치하는 selection이 없으면 connectionId만 가진 최소 selection을 합성한다.
+fn role_selection_for_connection(assignment: &Value, connection_id: &str) -> Option<Value> {
+    assignment
+        .get("selections")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("connectionId").and_then(Value::as_str) == Some(connection_id)
+            })
+        })
+        .cloned()
+        .or_else(|| Some(json!({ "connectionId": connection_id })))
+}
+
+/// 한 role에 배정된 connection id를 selections 순서대로 반환한다(legacy connectionIds 폴백 포함).
+/// 멀티 리뷰어 순차 실행과 all_pass 집계의 기준 목록이 된다.
+fn role_connection_ids(settings: &EffectiveSettings, role_id: &str) -> Vec<String> {
+    let Some(assignment) = settings.role_assignments.as_array().and_then(|items| {
+        items
+            .iter()
+            .find(|item| item.get("roleId").and_then(Value::as_str) == Some(role_id))
+    }) else {
+        return Vec::new();
+    };
+    if let Some(items) = assignment.get("selections").and_then(Value::as_array) {
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(|item| item.get("connectionId").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        if !ids.is_empty() {
+            return ids;
+        }
+    }
+    assignment
+        .get("connectionIds")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 멀티 리뷰어(연결 2개 이상) role에서 아직 실행되지 않은 다음 connection을 고른다.
+/// 단일 연결 role은 None을 반환해 기존 first_role_selection 동작을 그대로 유지한다.
+fn pick_pending_role_connection(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    role_id: &str,
+    settings: &EffectiveSettings,
+) -> CommandResult<Option<String>> {
+    let connection_ids = role_connection_ids(settings, role_id);
+    if connection_ids.len() < 2 {
+        return Ok(None);
+    }
+    let mut done: HashSet<String> = HashSet::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT connection_id FROM agent_runs
+             WHERE project_id = ?1 AND task_id = ?2 AND role_id = ?3
+               AND connection_id IS NOT NULL",
+        )
+        .map_err(|err| CommandError::database("리뷰어 실행 이력을 확인하지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id, task_id, role_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|err| CommandError::database("리뷰어 실행 이력을 확인하지 못했습니다.", err))?;
+    for row in rows {
+        done.insert(row.map_err(|err| {
+            CommandError::database("리뷰어 실행 이력을 확인하지 못했습니다.", err)
+        })?);
+    }
+    Ok(connection_ids.into_iter().find(|id| !done.contains(id)))
+}
+
+/// 한 role에서 통과(Succeeded·pass)한 서로 다른 connection 수를 센다. all_pass 집계용.
+fn count_passed_role_connections(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    role_id: &str,
+) -> CommandResult<usize> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT connection_id) FROM agent_runs
+             WHERE project_id = ?1 AND task_id = ?2 AND role_id = ?3
+               AND status = 'Succeeded' AND result_status = 'pass'
+               AND connection_id IS NOT NULL",
+            params![project_id, task_id, role_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| CommandError::database("리뷰어 통과 수를 확인하지 못했습니다.", err))?;
+    Ok(count as usize)
 }
 
 fn inject_provider_options(
@@ -8663,6 +8784,34 @@ fn apply_successful_role_result(
             }),
         )?;
         return Ok(());
+    }
+
+    // 멀티 리뷰어(연결 2개 이상)는 all_pass 정책: 모든 리뷰어가 통과해야 다음 단계로 전이한다.
+    // 아직 통과하지 않은 리뷰어가 남아 있으면 상태 전이를 보류하고, auto-handoff가
+    // 같은 role의 다음 connection run을 큐잉하도록 둔다.
+    if role_id == "code_reviewer" {
+        let settings = effective_settings(conn, project_id)?;
+        let reviewer_ids = role_connection_ids(&settings, "code_reviewer");
+        if reviewer_ids.len() >= 2 {
+            let passed = count_passed_role_connections(conn, project_id, &task.id, "code_reviewer")?;
+            if passed < reviewer_ids.len() {
+                insert_audit(
+                    conn,
+                    project_id,
+                    "Task",
+                    Some(&task.id),
+                    "code_review.partial",
+                    json!({
+                        "taskId": task.id,
+                        "runId": run_id,
+                        "passed": passed,
+                        "total": reviewer_ids.len(),
+                        "policy": "all_pass"
+                    }),
+                )?;
+                return Ok(());
+            }
+        }
     }
 
     if let Some(next_status) = next_status_for_role(role_id) {
@@ -12082,6 +12231,76 @@ mod tests {
     }
 
     #[test]
+    fn multi_reviewer_pins_selected_connection() {
+        let settings = EffectiveSettings {
+            role_presets: default_role_presets(),
+            ai_connections: json!([
+                {
+                    "id": "claude-a",
+                    "label": "Reviewer A",
+                    "provider": "claude",
+                    "commandArgs": ["claude", "--", "review-a"],
+                    "timeoutSeconds": 120,
+                    "enabled": true
+                },
+                {
+                    "id": "claude-b",
+                    "label": "Reviewer B",
+                    "provider": "claude",
+                    "commandArgs": ["claude", "--", "review-b"],
+                    "timeoutSeconds": 120,
+                    "enabled": true
+                }
+            ]),
+            role_assignments: json!([
+                {
+                    "roleId": "code_reviewer",
+                    "selectionMode": "multiple",
+                    "connectionIds": ["claude-a", "claude-b"],
+                    "selections": [
+                        { "connectionId": "claude-a" },
+                        { "connectionId": "claude-b" }
+                    ],
+                    "aggregationPolicy": "all_pass"
+                }
+            ]),
+            role_policies: default_role_policies(),
+            conductor_config: None,
+            worktree_root: None,
+            worktree_setup: None,
+            jira_config: None,
+            obsidian_vault_path: None,
+            obsidian_artifact_path: None,
+            token_budget: None,
+            artifact_retention_days: Some(30),
+        };
+        let placeholders = HashMap::new();
+
+        // 배정된 리뷰어 connection은 selections 순서대로 나열된다(all_pass 기준 목록).
+        assert_eq!(
+            role_connection_ids(&settings, "code_reviewer"),
+            vec!["claude-a".to_string(), "claude-b".to_string()]
+        );
+
+        // pin이 없으면 첫 번째 리뷰어, pin이 있으면 해당 리뷰어 명령으로 해석된다.
+        let first =
+            resolve_host_runner_command(&settings, "code_reviewer", None, &placeholders)
+                .expect("first reviewer");
+        assert_eq!(first.connection_id.as_deref(), Some("claude-a"));
+        assert!(first.args.contains(&"review-a".to_string()));
+
+        let pinned = resolve_host_runner_command(
+            &settings,
+            "code_reviewer",
+            Some("claude-b"),
+            &placeholders,
+        )
+        .expect("pinned reviewer");
+        assert_eq!(pinned.connection_id.as_deref(), Some("claude-b"));
+        assert!(pinned.args.contains(&"review-b".to_string()));
+    }
+
+    #[test]
     fn role_assignment_command_injects_provider_model_flag() {
         let settings = EffectiveSettings {
             role_presets: default_role_presets(),
@@ -12125,7 +12344,7 @@ mod tests {
         ]);
 
         let command =
-            resolve_host_runner_command(&settings, "coder", &placeholders).expect("command");
+            resolve_host_runner_command(&settings, "coder", None, &placeholders).expect("command");
 
         assert_eq!(
             command.args,
@@ -12194,7 +12413,7 @@ mod tests {
         ]);
 
         let command =
-            resolve_host_runner_command(&settings, "coder", &placeholders).expect("command");
+            resolve_host_runner_command(&settings, "coder", None, &placeholders).expect("command");
 
         assert_eq!(
             command.args,
@@ -12253,7 +12472,7 @@ mod tests {
         ]);
 
         let command =
-            resolve_host_runner_command(&settings, "coder", &placeholders).expect("command");
+            resolve_host_runner_command(&settings, "coder", None, &placeholders).expect("command");
 
         assert_eq!(
             command.args,
