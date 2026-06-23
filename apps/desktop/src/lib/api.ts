@@ -228,6 +228,21 @@ export const api = {
   hermesKanbanAction(action: HermesKanbanAction, taskId: string, reason?: string) {
     return invoke<void>("hermes_kanban_action", { action, taskId, reason: reason ?? null });
   },
+  acpSessionNew(cwd?: string) {
+    return invoke<string>("acp_session_new", { cwd: cwd ?? null });
+  },
+  acpSessionPrompt(sessionId: string, text: string) {
+    return invoke<void>("acp_session_prompt", { sessionId, text });
+  },
+  acpSessionCancel(sessionId: string) {
+    return invoke<void>("acp_session_cancel", { sessionId });
+  },
+  acpPermissionRespond(sessionId: string, requestId: unknown, optionId: string) {
+    return invoke<void>("acp_permission_respond", { sessionId, requestId, optionId });
+  },
+  acpSessionClose(sessionId: string) {
+    return invoke<void>("acp_session_close", { sessionId });
+  },
   listTaskTimeline(projectId: string, taskId: string) {
     return invoke<TaskTimelineEntry[]>("list_task_timeline", { projectId, taskId });
   },

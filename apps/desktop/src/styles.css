@@ -10179,3 +10179,64 @@ textarea {
   overflow: auto;
   font-size: 10px;
 }
+
+/* Hermes mode toggle + permission prompt */
+.hermes-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.hermes-mode-toggle {
+  display: flex;
+  gap: 4px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.hermes-mode-toggle button {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 4px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.hermes-mode-toggle button.active {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+}
+.hermes-mode-toggle button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+.hermes-root .sessions-layout {
+  flex: 1;
+  min-height: 0;
+}
+.hermes-permission {
+  border: 1px solid var(--amber);
+  background: var(--amber-weak);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin: 8px 0;
+}
+.hermes-permission-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.hermes-permission-actions button {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hermes-permission-actions button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}

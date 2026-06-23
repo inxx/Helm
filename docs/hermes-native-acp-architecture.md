@@ -122,6 +122,12 @@ Hermes-native control plane의 첫 제품 슬라이스가 구현·검증됨.
 - `cargo check`/`cargo test`(5) / `tsc` / `npm test`(15) / `npm run build`(vite prod) 전부 통과.
 - 미완(모델 능력): 로컬 MLX 7B 워커는 kanban 워커 프로토콜(`kanban_complete`) 미준수로 crash — Opus/Sonnet 키 연결 시 정상 예상.
 
+### slice 2 (2026-06-23): worktree diff 리뷰 + ACP 인터랙티브 채팅
+
+- **diff 리뷰**: `get_hermes_task_diff(task_id)` — 작업 `workspace_path`에서 `git.rs`(changed_files/file_diff) 재사용한 read-only unified diff. Evidence 패널 "Changes"에 파일별 아코디언(hunk 강조, +/- 카운트). per-hunk accept/reject 쓰기는 Helm Git 승인 플로우와 겹쳐 후속.
+- **ACP 채팅**(`hermes_acp.rs`): Helm이 ACP 클라이언트로 `hermes acp`를 spawn(NDJSON JSON-RPC, std process+thread, tokio 없음). 커맨드 `acp_session_new`/`acp_session_prompt`/`acp_session_cancel`/`acp_permission_respond`/`acp_session_close`. 스트리밍은 Tauri 이벤트 `acp://update`/`turn`/`permission`/`notify`/`closed`. 프론트 `HermesChat.tsx`(Hermes 탭 Pipeline/Chat 토글) = 스트리밍 메시지/tool 렌더 + 권한 inline 승인 + cancel. 세션 트리(per-profile state.db)는 사후 audit, ACP 채팅은 실시간 대화 — 둘 다 같은 Hermes 백엔드.
+- 검증: cargo check/test(5), tsc, npm test(15), npm run build, 풀 cargo build(네이티브 바이너리) 통과. GUI 렌더(브라우저 프리뷰): nav 탭/모드 토글/셋업 상태/채팅 셸 정상, invoke 데이터 흐름은 Tauri 런타임(`npm run tauri dev`)에서 검증.
+
 ## 사용자 셋업 가이드 (단계별 모델 차등)
 
 1. `hermes kanban init` — 보드 초기화.

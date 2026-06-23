@@ -13,6 +13,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { HermesChat } from "./HermesChat";
 import {
   ACTION_LABELS,
   COLUMN_LABELS,
@@ -43,6 +44,7 @@ interface StageDraft {
 const DEFAULT_STAGE_LABELS = ["설계", "코딩"];
 
 export function HermesScreen() {
+  const [mode, setMode] = useState<"pipeline" | "chat">("pipeline");
   const [available, setAvailable] = useState<boolean | null>(null);
   const [profiles, setProfiles] = useState<HermesProfile[]>([]);
   const [cards, setCards] = useState<HermesBoardCard[]>([]);
@@ -152,12 +154,51 @@ export function HermesScreen() {
     }
   }
 
+  const modeToggle = (
+    <div className="hermes-mode-toggle" role="tablist" aria-label="Hermes mode">
+      <button
+        role="tab"
+        aria-selected={mode === "pipeline"}
+        className={mode === "pipeline" ? "active" : ""}
+        onClick={() => setMode("pipeline")}
+        type="button"
+      >
+        Pipeline
+      </button>
+      <button
+        role="tab"
+        aria-selected={mode === "chat"}
+        className={mode === "chat" ? "active" : ""}
+        onClick={() => setMode("chat")}
+        type="button"
+      >
+        Chat
+      </button>
+    </div>
+  );
+
+  if (mode === "chat") {
+    return (
+      <div className="hermes-root">
+        {modeToggle}
+        <HermesChat />
+      </div>
+    );
+  }
+
   if (available === false) {
-    return <HermesSetup error={error} onRetry={() => void loadBoard()} />;
+    return (
+      <div className="hermes-root">
+        {modeToggle}
+        <HermesSetup error={error} onRetry={() => void loadBoard()} />
+      </div>
+    );
   }
 
   return (
-    <div className="sessions-layout">
+    <div className="hermes-root">
+      {modeToggle}
+      <div className="sessions-layout">
       <section className="session-chat" aria-label="Hermes pipeline board">
         <header className="session-chat-header">
           <div>
@@ -218,6 +259,7 @@ export function HermesScreen() {
       </section>
 
       <EvidencePanel card={selected} tree={tree} diff={diff} />
+      </div>
     </div>
   );
 }

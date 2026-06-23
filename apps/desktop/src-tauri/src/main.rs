@@ -1,6 +1,7 @@
 mod db;
 mod git;
 mod hermes;
+mod hermes_acp;
 mod models;
 
 use crate::models::{
@@ -96,6 +97,7 @@ struct AppState {
     terminal_sessions: Mutex<HashMap<String, PtySession>>,
     role_pty_sessions: Mutex<HashMap<String, RolePtySession>>,
     handoff_watcher: Mutex<Option<Child>>,
+    acp_sessions: Mutex<HashMap<String, hermes_acp::AcpSession>>,
 }
 
 struct PtySession {
@@ -2543,6 +2545,71 @@ fn hermes_kanban_action(
     reason: Option<String>,
 ) -> CommandResult<()> {
     hermes::kanban_action(action, task_id, reason)
+}
+
+fn lock_acp<'a>(
+    state: &'a State<'_, AppState>,
+) -> CommandResult<std::sync::MutexGuard<'a, HashMap<String, hermes_acp::AcpSession>>> {
+    state
+        .acp_sessions
+        .lock()
+        .map_err(|_| CommandError::new("IoFailed", "ACP 세션 상태를 사용하지 못했습니다."))
+}
+
+#[tauri::command]
+fn acp_session_new(
+    cwd: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> CommandResult<String> {
+    let (session_id, session) = hermes_acp::start_session(&app, cwd)?;
+    lock_acp(&state)?.insert(session_id.clone(), session);
+    Ok(session_id)
+}
+
+#[tauri::command]
+fn acp_session_prompt(
+    session_id: String,
+    text: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let sessions = lock_acp(&state)?;
+    let session = sessions
+        .get(&session_id)
+        .ok_or_else(|| CommandError::new("AcpNoSession", "ACP 세션을 찾을 수 없습니다."))?;
+    hermes_acp::prompt(session, &session_id, &text)
+}
+
+#[tauri::command]
+fn acp_session_cancel(session_id: String, state: State<'_, AppState>) -> CommandResult<()> {
+    let sessions = lock_acp(&state)?;
+    let session = sessions
+        .get(&session_id)
+        .ok_or_else(|| CommandError::new("AcpNoSession", "ACP 세션을 찾을 수 없습니다."))?;
+    hermes_acp::cancel(session, &session_id)
+}
+
+#[tauri::command]
+fn acp_permission_respond(
+    session_id: String,
+    request_id: serde_json::Value,
+    option_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let sessions = lock_acp(&state)?;
+    let session = sessions
+        .get(&session_id)
+        .ok_or_else(|| CommandError::new("AcpNoSession", "ACP 세션을 찾을 수 없습니다."))?;
+    hermes_acp::respond_permission(session, request_id, &option_id)
+}
+
+#[tauri::command]
+fn acp_session_close(session_id: String, state: State<'_, AppState>) -> CommandResult<()> {
+    let session = lock_acp(&state)?.remove(&session_id);
+    if let Some(session) = session {
+        hermes_acp::close(session);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -6436,6 +6503,11 @@ fn main() {
             create_hermes_stage_chain,
             list_hermes_profiles,
             hermes_kanban_action,
+            acp_session_new,
+            acp_session_prompt,
+            acp_session_cancel,
+            acp_permission_respond,
+            acp_session_close,
             list_task_timeline,
             list_run_events,
             get_agent_run,
