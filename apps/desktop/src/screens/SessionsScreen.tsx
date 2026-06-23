@@ -57,7 +57,8 @@ export function SessionsScreen({
   const [orchestratorBusy, setOrchestratorBusy] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [events, setEvents] = useState<RunEventSummary[]>([]);
-  const [summaryText, setSummaryText] = useState<string | null>(null);
+  const [summaries, setSummaries] = useState<Array<{ runId: string; roleId: string; text: string; at: string | null }>>([]);
+  const [runAlert, setRunAlert] = useState<{ roleId: string; status: string; failureKind: string | null; failureReason: string | null; at: string | null } | null>(null);
   const [orchestratorMessages, setOrchestratorMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string }>>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -67,6 +68,7 @@ export function SessionsScreen({
   const [reloadKey, setReloadKey] = useState(0);
   const [activityRefreshKey, setActivityRefreshKey] = useState(0);
   const [stoppingTerminalId, setStoppingTerminalId] = useState<string | null>(null);
+  const [mergeApproving, setMergeApproving] = useState(false);
   const [composingNewSession, setComposingNewSession] = useState(false);
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -254,7 +256,7 @@ export function SessionsScreen({
     activeTask?.id,
     events.length,
     orchestratorMessages.length,
-    summaryText,
+    summaries.length,
   ]);
 
   useEffect(() => {
@@ -266,24 +268,55 @@ export function SessionsScreen({
   }, []);
 
   useEffect(() => {
-    if (!snapshot || !activeSession?.sourceRunId || !activeSession.taskId) {
+    const taskId = activeTask?.id;
+    if (!snapshot || !taskId) {
       setEvents([]);
-      setSummaryText(null);
+      setSummaries([]);
+      setRunAlert(null);
       return;
     }
     let disposed = false;
-    void Promise.all([
-      api.listRunEvents(snapshot.project.id, activeSession.sourceRunId).catch(() => []),
-      api.readRunArtifact(snapshot.project.id, activeSession.sourceRunId, "summary.md").catch(() => null),
-    ]).then(([nextEvents, nextSummary]) => {
-      if (disposed) return;
-      setEvents(nextEvents);
-      setSummaryText(nextSummary);
-    });
+    const projectId = snapshot.project.id;
+    // Accumulate the whole task transcript: every role run's events + summary, in run order,
+    // so handing off to the next role appends history instead of replacing it.
+    void api
+      .listAgentRuns(projectId, taskId)
+      .then(async (runs) => {
+        const ordered = [...runs].sort((a, b) => timestampValue(a.createdAt) - timestampValue(b.createdAt));
+        const perRun = await Promise.all(
+          ordered.map(async (run) => ({
+            run,
+            events: await api.listRunEvents(projectId, run.id).catch(() => []),
+            summary: await api.readRunArtifact(projectId, run.id, "summary.md").catch(() => null),
+          })),
+        );
+        if (disposed) return;
+        setEvents(perRun.flatMap((entry) => entry.events));
+        setSummaries(
+          perRun
+            .filter((entry) => entry.summary?.trim())
+            .map((entry) => ({ runId: entry.run.id, roleId: entry.run.roleId, text: entry.summary!.trim(), at: entry.run.finishedAt ?? entry.run.updatedAt })),
+        );
+        // Surface the latest run's blocking reason: a NeedsInspection/Failed run leaves the task
+        // silently stuck (e.g. coder reported edits that aren't in the worktree diff). Show it.
+        const latest = ordered.at(-1);
+        setRunAlert(
+          latest && (latest.status === "NeedsInspection" || latest.status === "Failed")
+            ? { roleId: latest.roleId, status: latest.status, failureKind: latest.failureKind, failureReason: latest.failureReason, at: latest.finishedAt ?? latest.updatedAt }
+            : null,
+        );
+      })
+      .catch(() => {
+        if (!disposed) {
+          setEvents([]);
+          setSummaries([]);
+          setRunAlert(null);
+        }
+      });
     return () => {
       disposed = true;
     };
-  }, [activeSession?.sourceRunId, activeSession?.taskId, activityRefreshKey, snapshot?.project.id]);
+  }, [activeTask?.id, activityRefreshKey, snapshot?.project.id]);
 
   useEffect(() => {
     if (!snapshot || !activeSession?.sourceRunId) return;
@@ -410,6 +443,30 @@ export function SessionsScreen({
     setOrchestratorBusy(false);
     await onRefresh();
     setReloadKey((value) => value + 1);
+  }
+
+  // Manual merge gate: tasks auto-run through the tester, then stop at MergeWaiting. The user
+  // approves the merge here, which commits + pushes the worktree branch (same backend command the
+  // Tasks view uses).
+  async function approveMerge() {
+    if (!snapshot || !activeTask || mergeApproving) return;
+    const proceed = window.confirm(
+      language === "ko"
+        ? `"${activeTask.title}" 작업을 머지 승인할까요?\nworktree 변경사항을 커밋하고 origin에 push합니다.`
+        : `Approve merge for "${activeTask.title}"?\nThis commits the worktree changes and pushes to origin.`,
+    );
+    if (!proceed) return;
+    setMergeApproving(true);
+    setLoadError(null);
+    try {
+      await api.approveTaskCompletionWithGit(snapshot.project.id, activeTask.id);
+      await onRefresh();
+      setReloadKey((value) => value + 1);
+    } catch (error) {
+      setLoadError(messageFromError(error, language === "ko" ? "머지 승인에 실패했습니다." : "Failed to approve the merge."));
+    } finally {
+      setMergeApproving(false);
+    }
   }
 
   function beginStageAiEdit() {
@@ -652,7 +709,7 @@ export function SessionsScreen({
                   />
                 </SessionMessage>
               ) : null}
-              {events.map((event) => (
+              {events.filter(isContentEvent).map((event) => (
                 <SessionMessage
                   icon={event.kind === "artifact" ? "file" : "bot"}
                   key={event.id}
@@ -664,13 +721,20 @@ export function SessionsScreen({
                   <p>{event.message}</p>
                 </SessionMessage>
               ))}
-              {summaryText && activeSession ? (
-                <SessionMessage icon="file" role="assistant" timestamp={activeSession.updatedAt} title={t("sessions.summaryTitle")} language={language}>
+              {summaries.map((summary) => (
+                <SessionMessage
+                  icon="file"
+                  key={summary.runId}
+                  role="assistant"
+                  timestamp={summary.at}
+                  title={`${roleLabel(summary.roleId, language)} · ${t("sessions.summaryTitle")}`}
+                  language={language}
+                >
                   <div className="session-markdown">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryText.trim()}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary.text}</ReactMarkdown>
                   </div>
                 </SessionMessage>
-              ) : null}
+              ))}
               {orchestratorMessages.map((message) => (
                 <SessionMessage
                   icon={message.role === "user" ? "user" : "bot"}
@@ -683,6 +747,48 @@ export function SessionsScreen({
                   <p>{message.content}</p>
                 </SessionMessage>
               ))}
+              {runAlert ? (
+                <SessionMessage
+                  icon="bot"
+                  role="tool"
+                  timestamp={runAlert.at}
+                  title={language === "ko" ? "막힘 · 점검 필요" : "Blocked · needs inspection"}
+                  language={language}
+                >
+                  <p>{blockReasonCopy(runAlert.failureKind, runAlert.failureReason, language)}</p>
+                  {runAlert.failureKind === "diff_mismatch" ? (
+                    <p>
+                      {language === "ko"
+                        ? "에이전트가 보고한 변경 파일이 worktree의 실제 git diff에 없습니다. coder를 재실행하거나 Git 화면에서 worktree 변경사항을 직접 확인하세요."
+                        : "The agent's reported changes are not in the worktree's actual git diff. Re-run the coder, or inspect the worktree in the Git view."}
+                    </p>
+                  ) : null}
+                </SessionMessage>
+              ) : null}
+              {activeTask?.status === "MergeWaiting" ? (
+                <SessionMessage
+                  icon="bot"
+                  role="assistant"
+                  timestamp={activeTask.updatedAt}
+                  title={language === "ko" ? "머지 승인 대기" : "Waiting for merge approval"}
+                  language={language}
+                >
+                  <p>
+                    {language === "ko"
+                      ? "테스트까지 모두 통과했습니다. 승인하면 worktree 변경사항을 커밋하고 origin에 push합니다."
+                      : "All checks including tests passed. Approving commits the worktree changes and pushes to origin."}
+                  </p>
+                  <button
+                    className="primary-button loading-button"
+                    disabled={mergeApproving}
+                    onClick={() => void approveMerge()}
+                    type="button"
+                  >
+                    {mergeApproving ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+                    <span>{mergeApproving ? (language === "ko" ? "커밋/푸시 중…" : "Committing…") : (language === "ko" ? "머지 승인" : "Approve merge")}</span>
+                  </button>
+                </SessionMessage>
+              ) : null}
               {activeRunWorking ? (
                 <SessionMessage icon="bot" role="assistant" timestamp={activeSession?.lastSignalAt ?? null} title={language === "ko" ? "진행 중" : "Working"} language={language}>
                   <SessionWorkingIndicator
@@ -723,23 +829,30 @@ export function SessionsScreen({
           </>
         ) : (
           <>
-            <div className="session-chat-empty">
-              <MessageSquare size={20} />
-              <h2>{t("sessions.emptyChat.title")}</h2>
-              <p>{t("sessions.emptyChat.description")}</p>
-              {orchestratorMessages.map((message) => (
-                <SessionMessage
-                  icon={message.role === "user" ? "user" : "bot"}
-                  key={message.id}
-                  role={message.role}
-                  timestamp={null}
-                  title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
-                  language={language}
-                >
-                  <p>{message.content}</p>
-                </SessionMessage>
-              ))}
-            </div>
+            {orchestratorMessages.length === 0 ? (
+              <div className="session-chat-empty">
+                <MessageSquare size={20} />
+                <h2>{t("sessions.emptyChat.title")}</h2>
+                <p>{t("sessions.emptyChat.description")}</p>
+              </div>
+            ) : (
+              <div className="session-chat-scroll" ref={chatScrollRef}>
+                <div className="session-chat-thread">
+                  {orchestratorMessages.map((message) => (
+                    <SessionMessage
+                      icon={message.role === "user" ? "user" : "bot"}
+                      key={message.id}
+                      role={message.role}
+                      timestamp={null}
+                      title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
+                      language={language}
+                    >
+                      <p>{message.content}</p>
+                    </SessionMessage>
+                  ))}
+                </div>
+              </div>
+            )}
             <form
               className="session-orchestrator-composer"
               onSubmit={(event) => {
@@ -1077,6 +1190,30 @@ function sessionStatusCopy(session: AgentSessionSummary, language: AppLanguage):
   if (session.nextAction === "retry") return "실행 실패 또는 취소 상태입니다. 실패 이유를 확인하고 재시도 여부를 결정해야 합니다.";
   if (session.nextAction === "start") return "실행 대기 상태입니다. 작업자가 세션을 가져가면 상세 이벤트가 표시됩니다.";
   return "세션 상세를 확인합니다.";
+}
+
+// Lifecycle plumbing (status/system/artifact creation notices) is noise in the chat; show only
+// events that carry real agent output. The run summary already renders separately as a summary block.
+function isContentEvent(event: RunEventSummary): boolean {
+  return event.kind === "stdout" || event.kind === "stderr" || event.kind === "result";
+}
+
+function blockReasonCopy(failureKind: string | null, failureReason: string | null, language: AppLanguage): string {
+  if (language !== "ko") return failureReason ?? "Run requires manual inspection before continuing.";
+  switch (failureKind) {
+    case "diff_mismatch":
+      return "보고된 변경 파일과 실제 Git diff가 일치하지 않아 자동 진행을 멈췄습니다.";
+    case "schema_invalid":
+      return "structured-result.json이 없거나 계약 형식과 맞지 않습니다.";
+    case "blocking_gate":
+      return "게이트 결과가 차단 이슈를 보고했습니다.";
+    case "timeout":
+      return "실행이 제한 시간을 초과했습니다.";
+    case "exit_failed":
+      return "러너가 비정상 종료 코드로 끝났습니다.";
+    default:
+      return "계속하기 전에 수동 점검이 필요합니다.";
+  }
 }
 
 function isSessionWorking(session: AgentSessionSummary): boolean {

@@ -1100,6 +1100,13 @@ h3 {
   font-size: 12px;
 }
 
+.session-chat-thread {
+  display: flex;
+  margin-top: auto; /* anchor blocks to the bottom; still scrolls up when they overflow */
+  flex-direction: column;
+  gap: 18px;
+}
+
 .session-chat-empty {
   display: grid;
   flex: 1 1 auto;
