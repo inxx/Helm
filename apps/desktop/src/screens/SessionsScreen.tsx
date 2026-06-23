@@ -69,6 +69,8 @@ export function SessionsScreen({
   const [activityRefreshKey, setActivityRefreshKey] = useState(0);
   const [stoppingTerminalId, setStoppingTerminalId] = useState<string | null>(null);
   const [mergeApproving, setMergeApproving] = useState(false);
+  const [changeRequest, setChangeRequest] = useState("");
+  const [requestingChanges, setRequestingChanges] = useState(false);
   const [composingNewSession, setComposingNewSession] = useState(false);
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -183,6 +185,9 @@ export function SessionsScreen({
   const pendingApprovalCount = snapshot?.approvals.filter((approval) => approval.status === "Pending").length ?? 0;
   const activeRunWorking = Boolean(activeSession && isSessionWorking(activeSession));
   const latestActivity = events.at(-1) ?? null;
+  // Orchestrator turn is in flight but no assistant chunk has streamed in yet — show a waiting
+  // bubble so a long Hermes turn doesn't look like a dead screen after the user hits send.
+  const orchestratorPending = orchestratorBusy && orchestratorMessages.at(-1)?.role !== "assistant";
 
   useEffect(() => {
     if (!snapshot) {
@@ -256,6 +261,7 @@ export function SessionsScreen({
     activeTask?.id,
     events.length,
     orchestratorMessages.length,
+    orchestratorPending,
     summaries.length,
   ]);
 
@@ -466,6 +472,29 @@ export function SessionsScreen({
       setLoadError(messageFromError(error, language === "ko" ? "머지 승인에 실패했습니다." : "Failed to approve the merge."));
     } finally {
       setMergeApproving(false);
+    }
+  }
+
+  // Merge-gate "request changes": attach the feedback as a task instruction, reopen the task at
+  // the coder stage, and re-run. Auto-handoff replays coder → … → MergeWaiting with the feedback
+  // visible in the runner's context pack. Reuses existing commands — no dedicated backend path.
+  async function requestChanges() {
+    if (!snapshot || !activeTask || requestingChanges) return;
+    const feedback = changeRequest.trim();
+    if (!feedback) return;
+    setRequestingChanges(true);
+    setLoadError(null);
+    try {
+      await api.appendTaskInstruction(snapshot.project.id, activeTask.id, feedback);
+      await api.updateTaskStatus(snapshot.project.id, activeTask.id, "Ready", language === "ko" ? "머지 전 수정 요청으로 재작업" : "Reopened for pre-merge changes");
+      await api.startNextRoleRun(snapshot.project.id, activeTask.id);
+      setChangeRequest("");
+      await onRefresh();
+      setReloadKey((value) => value + 1);
+    } catch (error) {
+      setLoadError(messageFromError(error, language === "ko" ? "수정 요청에 실패했습니다." : "Failed to request changes."));
+    } finally {
+      setRequestingChanges(false);
     }
   }
 
@@ -747,6 +776,7 @@ export function SessionsScreen({
                   <p>{message.content}</p>
                 </SessionMessage>
               ))}
+              {orchestratorPending ? <OrchestratorPending language={language} /> : null}
               {runAlert ? (
                 <SessionMessage
                   icon="bot"
@@ -778,15 +808,39 @@ export function SessionsScreen({
                       ? "테스트까지 모두 통과했습니다. 승인하면 worktree 변경사항을 커밋하고 origin에 push합니다."
                       : "All checks including tests passed. Approving commits the worktree changes and pushes to origin."}
                   </p>
-                  <button
-                    className="primary-button loading-button"
-                    disabled={mergeApproving}
-                    onClick={() => void approveMerge()}
-                    type="button"
-                  >
-                    {mergeApproving ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
-                    <span>{mergeApproving ? (language === "ko" ? "커밋/푸시 중…" : "Committing…") : (language === "ko" ? "머지 승인" : "Approve merge")}</span>
-                  </button>
+                  <p>
+                    {language === "ko"
+                      ? "수정할 부분이 있으면 아래에 적어 다시 작업시킬 수 있습니다."
+                      : "If anything needs fixing, describe it below to send it back for rework."}
+                  </p>
+                  <textarea
+                    className="session-change-request"
+                    disabled={mergeApproving || requestingChanges}
+                    onChange={(event) => setChangeRequest(event.target.value)}
+                    placeholder={language === "ko" ? "수정 요청 내용 (선택)" : "Revision request (optional)"}
+                    rows={2}
+                    value={changeRequest}
+                  />
+                  <div className="composer-buttons">
+                    <button
+                      className="primary-button loading-button"
+                      disabled={mergeApproving || requestingChanges}
+                      onClick={() => void approveMerge()}
+                      type="button"
+                    >
+                      {mergeApproving ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+                      <span>{mergeApproving ? (language === "ko" ? "커밋/푸시 중…" : "Committing…") : (language === "ko" ? "머지 승인" : "Approve merge")}</span>
+                    </button>
+                    <button
+                      className="secondary-button loading-button"
+                      disabled={mergeApproving || requestingChanges || !changeRequest.trim()}
+                      onClick={() => void requestChanges()}
+                      type="button"
+                    >
+                      {requestingChanges ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Pencil size={14} aria-hidden />}
+                      <span>{requestingChanges ? (language === "ko" ? "재작업 시작 중…" : "Reopening…") : (language === "ko" ? "수정 요청" : "Request changes")}</span>
+                    </button>
+                  </div>
                 </SessionMessage>
               ) : null}
               {activeRunWorking ? (
@@ -850,6 +904,7 @@ export function SessionsScreen({
                       <p>{message.content}</p>
                     </SessionMessage>
                   ))}
+                  {orchestratorPending ? <OrchestratorPending language={language} /> : null}
                 </div>
               </div>
             )}
@@ -1125,6 +1180,17 @@ function SessionMessage(props: {
         <div className="session-message-content">{props.children}</div>
       </div>
     </article>
+  );
+}
+
+function OrchestratorPending({ language }: { language: AppLanguage }) {
+  return (
+    <SessionMessage role="assistant" icon="bot" title={language === "ko" ? "응답 대기 중" : "Waiting for reply"} timestamp={null} language={language}>
+      <div className="session-working-indicator">
+        <span className="session-working-spinner" aria-hidden="true" />
+        <strong>{language === "ko" ? "오케스트레이터가 응답을 작성 중입니다…" : "The orchestrator is composing a reply…"}</strong>
+      </div>
+    </SessionMessage>
   );
 }
 

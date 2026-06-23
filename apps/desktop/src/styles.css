@@ -1002,6 +1002,25 @@ h3 {
   font-size: 12px;
 }
 
+.session-change-request {
+  width: 100%;
+  margin: 8px 0;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--background);
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.session-change-request:focus {
+  border-color: var(--brand);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--brand-weak);
+}
+
 .session-working-indicator {
   display: flex;
   align-items: center;
