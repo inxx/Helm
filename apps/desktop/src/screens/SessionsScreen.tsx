@@ -607,18 +607,6 @@ export function SessionsScreen({
               <SessionMessage role="assistant" icon="bot" title={t("sessions.assistantTitle")} timestamp={activeSession?.lastSignalAt ?? null} language={language}>
                 <p>{t("sessions.introMessage")}</p>
               </SessionMessage>
-              {orchestratorMessages.map((message) => (
-                <SessionMessage
-                  icon={message.role === "user" ? "user" : "bot"}
-                  key={message.id}
-                  role={message.role}
-                  timestamp={null}
-                  title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
-                  language={language}
-                >
-                  <p>{message.content}</p>
-                </SessionMessage>
-              ))}
               <SessionMessage role="user" icon="user" title={t("sessions.requestTitle")} timestamp={activeTask?.createdAt ?? activeSession?.createdAt ?? null} language={language}>
                 <strong>{activeTask?.title ?? activeSession?.title}</strong>
                 {activeTask?.description ? <p>{activeTask.description}</p> : null}
@@ -654,6 +642,25 @@ export function SessionsScreen({
                   <p>{event.message}</p>
                 </SessionMessage>
               ))}
+              {summaryText && activeSession ? (
+                <SessionMessage icon="file" role="assistant" timestamp={activeSession.updatedAt} title={t("sessions.summaryTitle")} language={language}>
+                  <div className="session-markdown">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryText.trim()}</ReactMarkdown>
+                  </div>
+                </SessionMessage>
+              ) : null}
+              {orchestratorMessages.map((message) => (
+                <SessionMessage
+                  icon={message.role === "user" ? "user" : "bot"}
+                  key={message.id}
+                  role={message.role}
+                  timestamp={null}
+                  title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
+                  language={language}
+                >
+                  <p>{message.content}</p>
+                </SessionMessage>
+              ))}
               {activeRunWorking ? (
                 <SessionMessage icon="bot" role="assistant" timestamp={activeSession?.lastSignalAt ?? null} title={language === "ko" ? "진행 중" : "Working"} language={language}>
                   <SessionWorkingIndicator
@@ -661,13 +668,6 @@ export function SessionsScreen({
                     latestActivity={latestActivity}
                     session={activeSession}
                   />
-                </SessionMessage>
-              ) : null}
-              {summaryText && activeSession ? (
-                <SessionMessage icon="file" role="assistant" timestamp={activeSession.updatedAt} title={t("sessions.summaryTitle")} language={language}>
-                  <div className="session-markdown">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryText.trim()}</ReactMarkdown>
-                  </div>
                 </SessionMessage>
               ) : null}
             </div>
