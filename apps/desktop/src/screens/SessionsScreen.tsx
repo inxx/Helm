@@ -76,15 +76,18 @@ export function SessionsScreen({
   // kanban tasks. Execution is owned by Helm's dispatcher, not this chat.
   const [acpSessionId, setAcpSessionId] = useState<string | null>(null);
   const streamingIdRef = useRef<string | null>(null);
-  // When materializing, ACP's reply is a tasks[] JSON we parse instead of showing verbatim.
-  const materializingRef = useRef(false);
-  const materializeBufferRef = useRef("");
+  // Every assistant turn's text is accumulated here so we can parse it for a tasks[] JSON on
+  // turn end. `primedRef` tracks whether the tasks[] schema rule has been prepended to a message
+  // yet this session — it rides the user's first real send, so there is no startup round-trip.
+  const primedRef = useRef(false);
+  const turnTextRef = useRef("");
 
   // start an ACP session scoped to the active project; tear it down on project change.
   useEffect(() => {
     if (!snapshot) return;
     let disposed = false;
     let created: string | null = null;
+    primedRef.current = false;
     void api
       .acpSessionNew(snapshot.project.rootPath)
       .then((id) => {
@@ -121,13 +124,9 @@ export function SessionsScreen({
       if (kind === "agent_message_chunk") {
         const text = chunkText(payload.update);
         if (!text) return;
-        // while materializing, accumulate into a buffer to parse — don't show the raw JSON.
-        if (materializingRef.current) {
-          materializeBufferRef.current += text;
-          return;
-        }
+        turnTextRef.current += text;
         setOrchestratorMessages((items) => appendAssistantChunk(items, text, streamingIdRef));
-      } else if (kind === "tool_call" && !materializingRef.current) {
+      } else if (kind === "tool_call") {
         streamingIdRef.current = null;
         const title = payload.update.title ?? "tool";
         setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "assistant", content: `🔧 ${title}` }]);
@@ -136,11 +135,10 @@ export function SessionsScreen({
     sub<{ sessionId: string }>("acp://turn", (payload) => {
       if (payload.sessionId !== acpSessionId) return;
       streamingIdRef.current = null;
-      if (materializingRef.current) {
-        void finishMaterialize(materializeBufferRef.current);
-      } else {
-        setOrchestratorBusy(false);
-      }
+      setOrchestratorBusy(false);
+      const turnText = turnTextRef.current;
+      turnTextRef.current = "";
+      void maybeMaterializeTasks(turnText);
     });
     sub<{ sessionId: string }>("acp://closed", (payload) => {
       if (payload.sessionId === acpSessionId) {
@@ -358,49 +356,27 @@ export function SessionsScreen({
     setOrchestratorInput("");
     setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "user", content: goalText }]);
     streamingIdRef.current = null;
+    // The chat bubble shows only the user's text; the tasks[] schema rule rides invisibly on the
+    // first send of the session so Hermes knows how to emit a task list when later asked.
+    const prompt = primedRef.current ? goalText : `${HERMES_TASK_RULE}\n\n---\n${goalText}`;
+    primedRef.current = true;
     try {
-      await api.acpSessionPrompt(acpSessionId, goalText);
+      await api.acpSessionPrompt(acpSessionId, prompt);
     } catch (error) {
       setOrchestratorBusy(false);
       setLoadError(messageFromError(error, language === "ko" ? "오케스트레이터에 지시를 전달하지 못했습니다." : "Failed to send the instruction to the orchestrator."));
     }
   }
 
-  // Ask ACP to decompose the conversation so far into a tasks[] JSON, then materialize each
-  // into a Helm task that the existing role-pipeline engine runs.
-  async function generatePlanTasks() {
-    if (orchestratorBusy) return;
-    if (!acpSessionId) {
-      setLoadError(language === "ko" ? "ACP 세션이 아직 준비되지 않았습니다." : "The ACP session is not ready yet.");
-      return;
-    }
-    setOrchestratorBusy(true);
-    setLoadError(null);
-    materializingRef.current = true;
-    materializeBufferRef.current = "";
-    streamingIdRef.current = null;
-    setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "assistant", content: language === "ko" ? "계획을 작업으로 분해하는 중…" : "Decomposing the plan into tasks…" }]);
-    try {
-      await api.acpSessionPrompt(acpSessionId, PLAN_DECOMPOSE_PROMPT);
-    } catch (error) {
-      materializingRef.current = false;
-      setOrchestratorBusy(false);
-      setLoadError(messageFromError(error, language === "ko" ? "작업 분해 요청에 실패했습니다." : "Failed to request task decomposition."));
-    }
-  }
-
-  async function finishMaterialize(raw: string) {
-    materializingRef.current = false;
-    if (!snapshot) {
-      setOrchestratorBusy(false);
-      return;
-    }
-    const tasks = parsePlanTasks(raw);
-    if (!tasks) {
-      setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "assistant", content: language === "ko" ? "작업 분해 결과를 JSON으로 해석하지 못했습니다. 다시 시도해 주세요." : "Could not parse the task breakdown as JSON. Please try again." }]);
-      setOrchestratorBusy(false);
-      return;
-    }
+  // Every assistant turn is parsed for a tasks[] JSON. If found, confirm once, then materialize
+  // each into a Helm task that the existing role-pipeline engine runs. Non-task replies parse to
+  // null and are left as ordinary chat — the schema rule (priming) keeps false positives rare.
+  async function maybeMaterializeTasks(turnText: string) {
+    if (!snapshot) return;
+    const tasks = parsePlanTasks(turnText);
+    if (!tasks) return;
+    const proceed = window.confirm(language === "ko" ? "이 대화를 작업으로 만들까요?" : "Turn this into tasks?");
+    if (!proceed) return;
     const projectId = snapshot.project.id;
     const created: string[] = [];
     for (const task of tasks) {
@@ -738,16 +714,6 @@ export function SessionsScreen({
                 value={orchestratorInput}
               />
               <div className="composer-buttons">
-                <button
-                  className="composer-plan-button"
-                  disabled={orchestratorBusy || !acpSessionId}
-                  onClick={() => void generatePlanTasks()}
-                  title={language === "ko" ? "대화를 작업으로 분해해 실행 시작" : "Decompose the chat into tasks and start runs"}
-                  type="button"
-                >
-                  <Check size={14} aria-hidden />
-                  <span>{language === "ko" ? "작업 생성" : "Create tasks"}</span>
-                </button>
                 <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
                   {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
                   <span>{orchestratorBusy ? t("sessions.sending") : t("sessions.send")}</span>
@@ -795,16 +761,6 @@ export function SessionsScreen({
                 value={orchestratorInput}
               />
               <div className="composer-buttons">
-                <button
-                  className="composer-plan-button"
-                  disabled={orchestratorBusy || !acpSessionId}
-                  onClick={() => void generatePlanTasks()}
-                  title={language === "ko" ? "대화를 작업으로 분해해 실행 시작" : "Decompose the chat into tasks and start runs"}
-                  type="button"
-                >
-                  <Check size={14} aria-hidden />
-                  <span>{language === "ko" ? "작업 생성" : "Create tasks"}</span>
-                </button>
                 <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
                   {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
                   <span>{orchestratorBusy ? t("sessions.sending") : t("sessions.send")}</span>
@@ -1246,11 +1202,11 @@ function chunkText(update: AcpUpdatePayload["update"]): string {
   return content.text ?? "";
 }
 
-const PLAN_DECOMPOSE_PROMPT = `지금까지의 대화를 바탕으로 작업을 분해해줘. 다른 설명·인사 없이 아래 JSON 코드블록 하나만 출력해:
+const HERMES_TASK_RULE = `[규칙] 너는 Helm의 계획 파트너야. 평소엔 자연스럽게 대화해. 사용자가 작업/할 일로 만들어 달라고 할 때만, 다른 설명·인사 없이 아래 JSON 코드블록 하나만 출력해:
 \`\`\`json
 {"tasks":[{"title":"한 줄 제목","description":"구체적 작업 지시","role":"coder"}]}
 \`\`\`
-role은 planner, coder, plan_verifier, code_reviewer, tester 중 하나. 작업은 의존 순서대로 나열.`;
+role은 planner, coder, plan_verifier, code_reviewer, tester 중 하나. 작업은 의존 순서대로 나열. 작업화 요청이 아니면 이 JSON을 절대 출력하지 마.`;
 
 type OrchestratorMessage = { id: string; role: "user" | "assistant"; content: string };
 

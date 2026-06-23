@@ -929,30 +929,6 @@ h3 {
   align-items: stretch;
 }
 
-.composer-plan-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--text);
-  padding: 0 14px;
-  font: inherit;
-  font-size: 13px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.composer-plan-button:hover:not(:disabled) {
-  border-color: var(--brand);
-}
-
-.composer-plan-button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
 .session-message {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
