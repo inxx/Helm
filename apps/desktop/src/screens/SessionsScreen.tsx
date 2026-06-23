@@ -9,6 +9,7 @@ import { api } from "../lib/api";
 import { useI18n, type AppLanguage } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
 import { roleLabel } from "../lib/runnerReadiness";
+import { parsePlanTasks } from "../lib/planParse";
 import type {
   AgentSessionSummary,
   GitFileStatus,
@@ -71,6 +72,88 @@ export function SessionsScreen({
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatScrollFrameRef = useRef<number | null>(null);
+  // ACP orchestrator session: the chat drives `hermes acp`, which decomposes goals into
+  // kanban tasks. Execution is owned by Helm's dispatcher, not this chat.
+  const [acpSessionId, setAcpSessionId] = useState<string | null>(null);
+  const streamingIdRef = useRef<string | null>(null);
+  // When materializing, ACP's reply is a tasks[] JSON we parse instead of showing verbatim.
+  const materializingRef = useRef(false);
+  const materializeBufferRef = useRef("");
+
+  // start an ACP session scoped to the active project; tear it down on project change.
+  useEffect(() => {
+    if (!snapshot) return;
+    let disposed = false;
+    let created: string | null = null;
+    void api
+      .acpSessionNew(snapshot.project.rootPath)
+      .then((id) => {
+        if (disposed) {
+          void api.acpSessionClose(id);
+          return;
+        }
+        created = id;
+        setAcpSessionId(id);
+      })
+      .catch((err) => !disposed && setLoadError(messageFromError(err, language === "ko" ? "ACP 세션을 시작하지 못했습니다." : "Failed to start the ACP session.")));
+    return () => {
+      disposed = true;
+      setAcpSessionId(null);
+      streamingIdRef.current = null;
+      if (created) void api.acpSessionClose(created);
+    };
+  }, [snapshot?.project.id, snapshot?.project.rootPath]);
+
+  // stream ACP updates into the chat transcript.
+  useEffect(() => {
+    if (!acpSessionId) return;
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const sub = <T,>(event: string, handler: (payload: T) => void) => {
+      void listen<T>(event, (e) => {
+        if (!disposed) handler(e.payload);
+      }).then((un) => (disposed ? un() : unlisteners.push(un)));
+    };
+
+    sub<AcpUpdatePayload>("acp://update", (payload) => {
+      if (payload.sessionId !== acpSessionId || !payload.update) return;
+      const kind = payload.update.sessionUpdate;
+      if (kind === "agent_message_chunk") {
+        const text = chunkText(payload.update);
+        if (!text) return;
+        // while materializing, accumulate into a buffer to parse — don't show the raw JSON.
+        if (materializingRef.current) {
+          materializeBufferRef.current += text;
+          return;
+        }
+        setOrchestratorMessages((items) => appendAssistantChunk(items, text, streamingIdRef));
+      } else if (kind === "tool_call" && !materializingRef.current) {
+        streamingIdRef.current = null;
+        const title = payload.update.title ?? "tool";
+        setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "assistant", content: `🔧 ${title}` }]);
+      }
+    });
+    sub<{ sessionId: string }>("acp://turn", (payload) => {
+      if (payload.sessionId !== acpSessionId) return;
+      streamingIdRef.current = null;
+      if (materializingRef.current) {
+        void finishMaterialize(materializeBufferRef.current);
+      } else {
+        setOrchestratorBusy(false);
+      }
+    });
+    sub<{ sessionId: string }>("acp://closed", (payload) => {
+      if (payload.sessionId === acpSessionId) {
+        streamingIdRef.current = null;
+        setOrchestratorBusy(false);
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisteners.forEach((un) => un());
+    };
+  }, [acpSessionId]);
   const taskById = useMemo(
     () => new Map(snapshot?.tasks.map((task) => [task.id, task]) ?? []),
     [snapshot?.tasks],
@@ -265,129 +348,92 @@ export function SessionsScreen({
 
   async function submitOrchestratorInstruction() {
     const goalText = orchestratorInput.trim();
-    if (!snapshot || !goalText || orchestratorBusy) return;
-    const projectId = snapshot.project.id;
+    if (!goalText || orchestratorBusy) return;
+    if (!acpSessionId) {
+      setLoadError(language === "ko" ? "ACP 세션이 아직 준비되지 않았습니다." : "The ACP session is not ready yet.");
+      return;
+    }
     setOrchestratorBusy(true);
     setLoadError(null);
+    setOrchestratorInput("");
+    setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "user", content: goalText }]);
+    streamingIdRef.current = null;
     try {
-      setOrchestratorInput("");
-      setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "user", content: goalText }]);
-      if (activeTask && !composingNewSession) {
-        await api.appendTaskInstruction(projectId, activeTask.id, goalText);
-        if (activeRunWorking) {
-          setOrchestratorMessages((items) => [
-            ...items,
-            {
-              id: crypto.randomUUID(),
-              role: "assistant",
-              content:
-                language === "ko"
-                  ? `"${activeTask.title}"에 후속 지시를 남겼습니다. 현재 실행 중이라 새 실행은 추가로 만들지 않고 진행 상황을 갱신합니다.`
-                  : `Added the follow-up instruction to "${activeTask.title}". It is already running, so I will refresh the current run instead of creating another one.`,
-            },
-          ]);
-          await onRefresh();
-          setActivityRefreshKey((value) => value + 1);
-          setReloadKey((value) => value + 1);
-          return;
-        }
-        try {
-          await api.startNextRoleRun(projectId, activeTask.id);
-          setOrchestratorMessages((items) => [
-            ...items,
-            {
-              id: crypto.randomUUID(),
-              role: "assistant",
-              content:
-                language === "ko"
-                  ? `"${activeTask.title}"에 후속 지시를 남기고 다음 실행을 시작했습니다. 진행 상황은 이 채팅과 태스크 탭에서 확인합니다.`
-                  : `Added the follow-up instruction to "${activeTask.title}" and started the next run. Follow progress here and in Tasks.`,
-            },
-          ]);
-        } catch (error) {
-          setOrchestratorMessages((items) => [
-            ...items,
-            {
-              id: crypto.randomUUID(),
-              role: "assistant",
-              content: messageFromError(
-                error,
-                language === "ko" ? "다음 실행을 시작하지 못했습니다." : "Failed to start the next run.",
-              ),
-            },
-          ]);
-        }
-        await onRefresh();
-        setReloadKey((value) => value + 1);
-        return;
-      }
-      const existingTask = findExistingTaskForGoal(snapshot.tasks, goalText);
-      if (existingTask) {
-        setComposingNewSession(false);
-        setActiveSessionId(null);
-        onSelectTask(existingTask.id);
-        setOrchestratorMessages((items) => [
-          ...items,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content:
-              language === "ko"
-                ? `"${existingTask.title}"와 같은 요청이 이미 있어 새 Task를 만들지 않고 기존 세션을 열었습니다.`
-                : `A matching request already exists as "${existingTask.title}", so I opened the existing session instead of creating a duplicate.`,
-          },
-        ]);
-        await onRefresh();
-        setReloadKey((value) => value + 1);
-        return;
-      }
-      const task = await api.createTask(projectId, {
-        title: titleFromGoal(goalText),
-        description: goalText,
-        externalRefs: [
-          {
-            refType: "PlainText",
-            refValue: goalText,
-            refTitle: language === "ko" ? "오케스트레이터 요청" : "Orchestrator request",
-          },
-        ],
-      });
-      let runStarted = true;
-      let runStartMessage: string | null = null;
-      try {
-        await api.startNextRoleRun(projectId, task.id);
-      } catch (error) {
-        runStarted = false;
-        runStartMessage = messageFromError(
-          error,
-          language === "ko" ? "첫 실행을 시작하지 못했습니다." : "Failed to start the first run.",
-        );
-      }
-      setOrchestratorMessages((items) => [
-        ...items,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content:
-            language === "ko"
-              ? runStarted
-                ? `"${task.title}" 태스크를 만들고 첫 실행을 시작했습니다. 진행 상황은 이 채팅과 태스크 탭에서 확인합니다.`
-                : `"${task.title}" 태스크를 만들었지만 첫 실행은 시작하지 못했습니다. ${runStartMessage}`
-              : runStarted
-                ? `Created "${task.title}" and started the first run. Follow progress here and in Tasks.`
-                : `Created "${task.title}", but could not start the first run. ${runStartMessage}`,
-        },
-      ]);
-      setComposingNewSession(false);
-      setActiveSessionId(null);
-      onSelectTask(task.id);
-      await onRefresh();
-      setReloadKey((value) => value + 1);
+      await api.acpSessionPrompt(acpSessionId, goalText);
     } catch (error) {
-      setLoadError(messageFromError(error, language === "ko" ? "오케스트레이터 지시를 저장하지 못했습니다." : "Failed to save the orchestrator instruction."));
-    } finally {
       setOrchestratorBusy(false);
+      setLoadError(messageFromError(error, language === "ko" ? "오케스트레이터에 지시를 전달하지 못했습니다." : "Failed to send the instruction to the orchestrator."));
     }
+  }
+
+  // Ask ACP to decompose the conversation so far into a tasks[] JSON, then materialize each
+  // into a Helm task that the existing role-pipeline engine runs.
+  async function generatePlanTasks() {
+    if (orchestratorBusy) return;
+    if (!acpSessionId) {
+      setLoadError(language === "ko" ? "ACP 세션이 아직 준비되지 않았습니다." : "The ACP session is not ready yet.");
+      return;
+    }
+    setOrchestratorBusy(true);
+    setLoadError(null);
+    materializingRef.current = true;
+    materializeBufferRef.current = "";
+    streamingIdRef.current = null;
+    setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "assistant", content: language === "ko" ? "계획을 작업으로 분해하는 중…" : "Decomposing the plan into tasks…" }]);
+    try {
+      await api.acpSessionPrompt(acpSessionId, PLAN_DECOMPOSE_PROMPT);
+    } catch (error) {
+      materializingRef.current = false;
+      setOrchestratorBusy(false);
+      setLoadError(messageFromError(error, language === "ko" ? "작업 분해 요청에 실패했습니다." : "Failed to request task decomposition."));
+    }
+  }
+
+  async function finishMaterialize(raw: string) {
+    materializingRef.current = false;
+    if (!snapshot) {
+      setOrchestratorBusy(false);
+      return;
+    }
+    const tasks = parsePlanTasks(raw);
+    if (!tasks) {
+      setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "assistant", content: language === "ko" ? "작업 분해 결과를 JSON으로 해석하지 못했습니다. 다시 시도해 주세요." : "Could not parse the task breakdown as JSON. Please try again." }]);
+      setOrchestratorBusy(false);
+      return;
+    }
+    const projectId = snapshot.project.id;
+    const created: string[] = [];
+    for (const task of tasks) {
+      try {
+        const description = [task.description, task.role ? `(role: ${task.role})` : null].filter(Boolean).join("\n\n") || task.title;
+        const newTask = await api.createTask(projectId, {
+          title: task.title.slice(0, 120),
+          description,
+          externalRefs: [{ refType: "PlainText", refValue: task.description ?? task.title, refTitle: language === "ko" ? "ACP 분해 작업" : "ACP-decomposed task" }],
+        });
+        try {
+          await api.startNextRoleRun(projectId, newTask.id);
+        } catch {
+          /* task created; run start is best-effort */
+        }
+        created.push(newTask.title);
+      } catch {
+        /* skip a task that failed to create */
+      }
+    }
+    setOrchestratorMessages((items) => [
+      ...items,
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: created.length
+          ? (language === "ko" ? `${created.length}개 작업을 만들고 실행을 시작했습니다:\n- ${created.join("\n- ")}` : `Created ${created.length} task(s) and started their runs:\n- ${created.join("\n- ")}`)
+          : (language === "ko" ? "작업 생성에 실패했습니다." : "Failed to create tasks."),
+      },
+    ]);
+    setOrchestratorBusy(false);
+    await onRefresh();
+    setReloadKey((value) => value + 1);
   }
 
   function beginStageAiEdit() {
@@ -691,10 +737,22 @@ export function SessionsScreen({
                 rows={2}
                 value={orchestratorInput}
               />
-              <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
-                {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
-                <span>{orchestratorBusy ? t("sessions.sending") : t("sessions.send")}</span>
-              </button>
+              <div className="composer-buttons">
+                <button
+                  className="composer-plan-button"
+                  disabled={orchestratorBusy || !acpSessionId}
+                  onClick={() => void generatePlanTasks()}
+                  title={language === "ko" ? "대화를 작업으로 분해해 실행 시작" : "Decompose the chat into tasks and start runs"}
+                  type="button"
+                >
+                  <Check size={14} aria-hidden />
+                  <span>{language === "ko" ? "작업 생성" : "Create tasks"}</span>
+                </button>
+                <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
+                  {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
+                  <span>{orchestratorBusy ? t("sessions.sending") : t("sessions.send")}</span>
+                </button>
+              </div>
             </form>
           </>
         ) : (
@@ -736,10 +794,22 @@ export function SessionsScreen({
                 rows={2}
                 value={orchestratorInput}
               />
-              <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
-                {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
-                <span>{orchestratorBusy ? t("sessions.sending") : t("sessions.send")}</span>
-              </button>
+              <div className="composer-buttons">
+                <button
+                  className="composer-plan-button"
+                  disabled={orchestratorBusy || !acpSessionId}
+                  onClick={() => void generatePlanTasks()}
+                  title={language === "ko" ? "대화를 작업으로 분해해 실행 시작" : "Decompose the chat into tasks and start runs"}
+                  type="button"
+                >
+                  <Check size={14} aria-hidden />
+                  <span>{language === "ko" ? "작업 생성" : "Create tasks"}</span>
+                </button>
+                <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
+                  {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
+                  <span>{orchestratorBusy ? t("sessions.sending") : t("sessions.send")}</span>
+                </button>
+              </div>
             </form>
           </>
         )}
@@ -1080,20 +1150,6 @@ function changedFileCountLabel(files: GitFileStatus[], session: AgentSessionSumm
   return session?.changedFileCount?.toString() ?? "-";
 }
 
-function findExistingTaskForGoal(tasks: TaskSummary[], goalText: string): TaskSummary | null {
-  const normalizedGoal = normalizeTaskText(goalText);
-  if (!normalizedGoal) return null;
-  return (
-    tasks.find((task) => normalizeTaskText(task.description) === normalizedGoal) ??
-    tasks.find((task) => normalizeTaskText(task.title) === normalizeTaskText(titleFromGoal(goalText))) ??
-    null
-  );
-}
-
-function normalizeTaskText(value: string): string {
-  return value.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
 function mergeTaskBackedSessions(
   sessions: AgentSessionSummary[],
   tasks: TaskSummary[],
@@ -1137,11 +1193,6 @@ function timestampValue(value: string | null): number {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function titleFromGoal(goalText: string): string {
-  const firstLine = goalText.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "New task";
-  return firstLine.length > 48 ? `${firstLine.slice(0, 48)}...` : firstLine;
-}
-
 function shortPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
   if (parts.length <= 2) return path || "/";
@@ -1177,4 +1228,44 @@ function messageFromError(error: unknown, fallback: string): string {
     return String((error as { message: unknown }).message);
   }
   return fallback;
+}
+
+interface AcpUpdatePayload {
+  sessionId: string;
+  update: {
+    sessionUpdate?: string;
+    content?: { text?: string } | { text?: string }[];
+    title?: string;
+  } | null;
+}
+
+function chunkText(update: AcpUpdatePayload["update"]): string {
+  const content = update?.content;
+  if (!content) return "";
+  if (Array.isArray(content)) return content.map((part) => part.text ?? "").join("");
+  return content.text ?? "";
+}
+
+const PLAN_DECOMPOSE_PROMPT = `지금까지의 대화를 바탕으로 작업을 분해해줘. 다른 설명·인사 없이 아래 JSON 코드블록 하나만 출력해:
+\`\`\`json
+{"tasks":[{"title":"한 줄 제목","description":"구체적 작업 지시","role":"coder"}]}
+\`\`\`
+role은 planner, coder, plan_verifier, code_reviewer, tester 중 하나. 작업은 의존 순서대로 나열.`;
+
+type OrchestratorMessage = { id: string; role: "user" | "assistant"; content: string };
+
+// Append a streaming agent chunk: extend the in-progress assistant message (tracked by ref)
+// or start a new one.
+function appendAssistantChunk(
+  items: OrchestratorMessage[],
+  text: string,
+  ref: { current: string | null },
+): OrchestratorMessage[] {
+  if (ref.current) {
+    const id = ref.current;
+    return items.map((message) => (message.id === id ? { ...message, content: message.content + text } : message));
+  }
+  const id = crypto.randomUUID();
+  ref.current = id;
+  return [...items, { id, role: "assistant", content: text }];
 }
