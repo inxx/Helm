@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Bot, Check, FileText, Folder, Loader2, MessageSquare, MoreHorizontal, Pencil, Plus, Send, Square, Trash2, User, X } from "lucide-react";
 import { ApprovalInbox } from "../components/ApprovalInbox";
+import { collapseSessionsByTask } from "../lib/agentSessions";
 import { api } from "../lib/api";
 import { useI18n, type AppLanguage } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
@@ -666,8 +667,10 @@ export function SessionsScreen({
                         <span>{t("sessions.noSessions")}</span>
                       </div>
                     ) : null}
-                    {sessions.map((session) => {
-                      const active = session.id === activeSession?.id;
+                    {collapseSessionsByTask(sessions).map((session) => {
+                      const active = session.taskId
+                        ? session.taskId === activeSession?.taskId
+                        : session.id === activeSession?.id;
                       return (
                         <button
                           className={active ? "session-row active" : "session-row"}

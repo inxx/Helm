@@ -59,6 +59,23 @@ function sessionBoardColumn(session: AgentSessionSummary): AgentSessionBoardColu
   return "idle";
 }
 
+// Each role hand-off (planner → coder → reviewer → tester) is its own agent_runs row sharing one
+// taskId, so a single task stacks up as N identical-titled sidebar rows. Collapse to one row per
+// task — the first occurrence wins, so callers must pass sessions sorted most-recent-first.
+// Sessions without a taskId stay individual.
+export function collapseSessionsByTask(sessions: AgentSessionSummary[]): AgentSessionSummary[] {
+  const seenTaskIds = new Set<string>();
+  const collapsed: AgentSessionSummary[] = [];
+  for (const session of sessions) {
+    if (session.taskId) {
+      if (seenTaskIds.has(session.taskId)) continue;
+      seenTaskIds.add(session.taskId);
+    }
+    collapsed.push(session);
+  }
+  return collapsed;
+}
+
 function providerLabel(session: AgentSessionSummary): string {
   const provider = session.provider?.trim();
   const model = session.model?.trim();

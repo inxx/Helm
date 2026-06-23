@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupAgentSessionsForBoard, toAgentSessionBoardCard } from "./agentSessions.ts";
+import { collapseSessionsByTask, groupAgentSessionsForBoard, toAgentSessionBoardCard } from "./agentSessions.ts";
 import type { AgentSessionSummary } from "./types";
 
 test("toAgentSessionBoardCard keeps board cards summary-only", () => {
@@ -48,6 +48,22 @@ test("groupAgentSessionsForBoard groups by next action", () => {
   assert.deepEqual(
     grouped.done.map((card) => card.id),
     ["done"],
+  );
+});
+
+test("collapseSessionsByTask keeps one row per task, individuals for null taskId", () => {
+  const collapsed = collapseSessionsByTask([
+    session({ id: "tester-run", taskId: "task-a", roleId: "tester" }),
+    session({ id: "coder-run", taskId: "task-a", roleId: "coder" }),
+    session({ id: "planner-run", taskId: "task-a", roleId: "planner" }),
+    session({ id: "other-task", taskId: "task-b" }),
+    session({ id: "loose-1", taskId: null }),
+    session({ id: "loose-2", taskId: null }),
+  ]);
+
+  assert.deepEqual(
+    collapsed.map((item) => item.id),
+    ["tester-run", "other-task", "loose-1", "loose-2"],
   );
 });
 
