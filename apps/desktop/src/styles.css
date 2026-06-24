@@ -6389,7 +6389,12 @@ textarea {
 
 .jira-status-trigger {
   cursor: pointer;
-  font: inherit;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.jira-status-caret {
+  opacity: 0.6;
 }
 
 .jira-status-trigger:hover:not(:disabled) {
@@ -11247,6 +11252,8 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  box-sizing: border-box;
+  height: 48px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
 }
@@ -11269,7 +11276,13 @@ textarea {
 .editor-toolbar-actions button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
+  height: 30px;
+  min-width: 96px;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -11278,9 +11291,16 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 4px 6px 8px;
-  margin-bottom: 4px;
+  box-sizing: border-box;
+  height: 48px;
+  /* editor-tree의 8px padding 밖으로 빼내 툴바와 같은 위치에서 시작·정렬 */
+  margin: -8px -8px 8px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--border);
+}
+
+.editor-tree-header .git-repo-title {
+  padding: 6px 8px;
 }
 
 .editor-tree-root {

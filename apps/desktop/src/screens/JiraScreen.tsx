@@ -1,4 +1,4 @@
-import { ExternalLink, RefreshCw, Search, Ticket, UserRound } from "lucide-react";
+import { ChevronDown, ExternalLink, RefreshCw, Search, Ticket, UserRound } from "lucide-react";
 import { type MouseEvent, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../lib/api";
@@ -289,6 +289,7 @@ function JiraStatusSelect({
         disabled={busy}
       >
         {issue.status}
+        <ChevronDown size={12} className="jira-status-caret" />
       </button>
       {open && pos
         ? createPortal(
