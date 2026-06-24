@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 // ponytail: GitHub serves avatars at github.com/<login>.png — no API call, no avatarUrl field.
 function AuthorAvatar({ login }: { login: string }) {
@@ -430,7 +432,9 @@ function PrDetail({
             <div className="pr-detail-section">
               <h3>{ko ? "설명" : "Description"}</h3>
               {detail.body.trim() ? (
-                <pre className="pr-detail-description">{detail.body.trim()}</pre>
+                <div className="pr-detail-description">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{detail.body.trim()}</ReactMarkdown>
+                </div>
               ) : (
                 <p className="pr-detail-empty">{ko ? "설명이 없습니다." : "No description."}</p>
               )}

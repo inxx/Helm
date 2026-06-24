@@ -192,13 +192,9 @@ function JiraRowView({ issue, ko }: { issue: JiraIssueSummary; ko: boolean }) {
         <Ticket size={13} />
         {issue.key}
       </span>
-      <span className="git-work-titlecell">
+      <span className="git-work-titlecell jira-titlecell">
         <strong>{issue.summary}</strong>
-        {issue.url ? (
-          <span>
-            <ExternalLink size={12} />
-          </span>
-        ) : null}
+        {issue.url ? <ExternalLink className="jira-link-icon" size={12} /> : null}
       </span>
       <span className="git-status-pill muted">
         {issue.assigneeAvatar ? (

@@ -6135,7 +6135,27 @@ textarea {
 }
 
 .git-work-table.jira-cols .git-work-row {
-  grid-template-columns: 152px minmax(260px, 1fr) minmax(120px, 0.55fr) minmax(88px, 0.36fr) 92px;
+  grid-template-columns: 168px minmax(260px, 1fr) minmax(120px, 0.55fr) minmax(88px, 0.36fr) 92px;
+}
+
+.git-work-table.jira-cols .git-pr-id {
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.jira-titlecell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.jira-titlecell strong {
+  min-width: 0;
+}
+
+.jira-titlecell .jira-link-icon {
+  flex-shrink: 0;
+  color: var(--soft);
 }
 
 /* ponytail: sticky header — overflow:visible lets the shell be the scroll parent so the head can stick */
@@ -6149,6 +6169,7 @@ textarea {
   position: sticky;
   top: 0;
   z-index: 2;
+  justify-items: center;
 }
 
 .git-work-row-link {
