@@ -1200,6 +1200,18 @@ async fn pull_request_detail(
 }
 
 #[tauri::command]
+async fn pull_request_diff(
+    project_id: String,
+    number: i64,
+    state: State<'_, AppState>,
+) -> CommandResult<String> {
+    let context = project_context(&state, &project_id)?;
+    tauri::async_runtime::spawn_blocking(move || git::pull_request_diff(&context.root_path, number))
+        .await
+        .map_err(|err| CommandError::io("PR diff 조회 thread가 중단되었습니다.", err))?
+}
+
+#[tauri::command]
 fn approve_pull_request(
     project_id: String,
     number: i64,
@@ -6817,6 +6829,7 @@ fn main() {
             list_pull_requests,
             list_all_pull_requests,
             pull_request_detail,
+            pull_request_diff,
             approve_pull_request,
             merge_pull_request,
             list_jira_issues,

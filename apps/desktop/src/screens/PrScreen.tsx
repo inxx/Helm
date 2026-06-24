@@ -272,6 +272,9 @@ function PrDetail({
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<PullRequestDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
+  const [diff, setDiff] = useState<string | null>(null);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const review = reviewView(pr.reviewDecision, ko);
   const checks = checksView(pr.checks, ko);
   const state = stateView(pr.state, ko);
@@ -296,6 +299,26 @@ function PrDetail({
     };
   }, [pr.projectId, pr.number]);
 
+  // ponytail: one `gh pr diff` for the whole PR, sliced per file in-browser — no per-file fetch.
+  const fileDiffs = useMemo(() => splitDiffByFile(diff ?? ""), [diff]);
+
+  function toggleFile(path: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    if (diff === null && diffError === null) {
+      api
+        .pullRequestDiff(pr.projectId, pr.number)
+        .then(setDiff)
+        .catch((err) =>
+          setDiffError(messageFromError(err, ko ? "diff를 불러오지 못했습니다." : "Failed to load diff.")),
+        );
+    }
+  }
+
   async function run(action: "approve" | "merge") {
     setBusy(action);
     setError(null);
@@ -314,17 +337,28 @@ function PrDetail({
     <section className="issues-layout">
       <header className="issues-header">
         <div>
-          <button className="link-back" onClick={onBack} type="button">
-            <ArrowLeft size={15} />
-            {ko ? "목록" : "Back"}
-          </button>
           <h2>
-            <GitPullRequest size={18} />#{pr.number} {pr.title}
+            #{pr.number} {pr.title}
           </h2>
           <p>
             {pr.projectName} · {pr.branch} → {pr.base}
             {pr.isDraft ? <i className="draft">{ko ? "초안" : "draft"}</i> : null}
           </p>
+        </div>
+        <div className="pr-header-actions">
+          <button className="link-back" onClick={onBack} type="button">
+            <ArrowLeft size={15} />
+            {ko ? "목록" : "Back"}
+          </button>
+          <button
+            className="ghost-button"
+            disabled={!pr.url}
+            onClick={() => pr.url && void api.openExternal(pr.url)}
+            type="button"
+          >
+            <ExternalLink size={15} />
+            {ko ? "GitHub에서 열기" : "Open on GitHub"}
+          </button>
         </div>
       </header>
 
@@ -343,36 +377,27 @@ function PrDetail({
             {checks.label}
           </StatusPill>
           <span className="git-work-updated">{relativeDate(pr.updatedAt)}</span>
-        </div>
 
-        <div className="pr-detail-actions">
-          <button
-            className="primary-button"
-            disabled={!isOpen || busy !== null}
-            onClick={() => void run("approve")}
-            type="button"
-          >
-            <ThumbsUp size={15} />
-            {busy === "approve" ? (ko ? "승인 중…" : "Approving…") : ko ? "승인" : "Approve"}
-          </button>
-          <button
-            className="primary-button"
-            disabled={!isOpen || busy !== null}
-            onClick={() => void run("merge")}
-            type="button"
-          >
-            <GitMerge size={15} />
-            {busy === "merge" ? (ko ? "머지 중…" : "Merging…") : ko ? "메인 머지" : "Merge"}
-          </button>
-          <button
-            className="ghost-button"
-            disabled={!pr.url}
-            onClick={() => pr.url && void api.openExternal(pr.url)}
-            type="button"
-          >
-            <ExternalLink size={15} />
-            {ko ? "GitHub에서 열기" : "Open on GitHub"}
-          </button>
+          <div className="pr-detail-actions">
+            <button
+              className="primary-button"
+              disabled={!isOpen || busy !== null}
+              onClick={() => void run("approve")}
+              type="button"
+            >
+              <ThumbsUp size={15} />
+              {busy === "approve" ? (ko ? "승인 중…" : "Approving…") : ko ? "승인" : "Approve"}
+            </button>
+            <button
+              className="primary-button"
+              disabled={!isOpen || busy !== null}
+              onClick={() => void run("merge")}
+              type="button"
+            >
+              <GitMerge size={15} />
+              {busy === "merge" ? (ko ? "머지 중…" : "Merging…") : ko ? "메인 머지" : "Merge"}
+            </button>
+          </div>
         </div>
 
         {detailLoading ? (
@@ -423,20 +448,32 @@ function PrDetail({
                   {ko ? "변경된 파일" : "Changed files"} ({detail.files.length})
                 </h3>
                 <ul className="pr-file-list">
-                  {detail.files.map((file) => (
-                    <li
-                      key={file.path}
-                      className={pr.url ? "pr-file-row-link" : undefined}
-                      title={pr.url ? (ko ? "GitHub에서 변경된 코드 보기" : "View diff on GitHub") : undefined}
-                      onClick={pr.url ? () => void openFileDiff(pr.url, file.path) : undefined}
-                    >
-                      <span className="pr-file-path">{file.path}</span>
-                      <span className="pr-file-stat">
-                        <span className="pr-diff-add">+{file.additions}</span>
-                        <span className="pr-diff-del">−{file.deletions}</span>
-                      </span>
-                    </li>
-                  ))}
+                  {detail.files.map((file) => {
+                    const open = expanded.has(file.path);
+                    return (
+                      <li key={file.path} className={open ? "pr-file-open" : undefined}>
+                        <div
+                          className="pr-file-row-link"
+                          title={ko ? "변경된 코드 보기" : "View diff"}
+                          onClick={() => toggleFile(file.path)}
+                        >
+                          <span className="pr-file-path">{file.path}</span>
+                          <span className="pr-file-stat">
+                            <span className="pr-diff-add">+{file.additions}</span>
+                            <span className="pr-diff-del">−{file.deletions}</span>
+                          </span>
+                        </div>
+                        {open ? (
+                          <PrFileDiff
+                            diff={fileDiffs.get(file.path) ?? ""}
+                            loading={diff === null && diffError === null}
+                            error={diffError}
+                            ko={ko}
+                          />
+                        ) : null}
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             ) : null}
@@ -475,13 +512,49 @@ function PrDetail({
   );
 }
 
-// ponytail: GitHub anchors each PR file diff as `#diff-<sha256(path)>` — compute it in-browser, no API.
-async function openFileDiff(prUrl: string, path: string) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(path));
-  const hex = Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  await api.openExternal(`${prUrl}/files#diff-${hex}`);
+// Split a unified PR diff into per-file sections, keyed by the new ("b/") path.
+function splitDiffByFile(diff: string): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!diff.trim()) return map;
+  for (const section of diff.split(/\n(?=diff --git )/)) {
+    const match = section.match(/^diff --git a\/.+? b\/(.+)$/m);
+    if (match) map.set(match[1].trim(), section);
+  }
+  return map;
+}
+
+function PrFileDiff({
+  diff,
+  loading,
+  error,
+  ko,
+}: {
+  diff: string;
+  loading: boolean;
+  error: string | null;
+  ko: boolean;
+}) {
+  if (loading) return <div className="pr-detail-empty">{ko ? "diff 불러오는 중…" : "Loading diff…"}</div>;
+  if (error) return <div className="git-inline-error">{error}</div>;
+  if (!diff.trim()) return <div className="pr-detail-empty">{ko ? "표시할 diff 없음" : "No diff to display"}</div>;
+  return (
+    <pre className="git-diff-code pr-file-diff" aria-label={ko ? "파일 diff" : "File diff"}>
+      {diff.split("\n").map((line, index) => (
+        <span className={diffLineClass(line)} key={`${index}:${line}`}>
+          {line || " "}
+        </span>
+      ))}
+    </pre>
+  );
+}
+
+function diffLineClass(line: string): string {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("diff --git") || line.startsWith("index ")) return "meta";
+  if (line.startsWith("+++") || line.startsWith("---")) return "file";
+  if (line.startsWith("+")) return "added";
+  if (line.startsWith("-")) return "deleted";
+  return "";
 }
 
 function commentTag(kind: string, ko: boolean): { tone: Tone; label: string } | null {

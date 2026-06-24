@@ -146,6 +146,23 @@ pub fn pull_request_detail(root: &Path, number: i64) -> CommandResult<PullReques
     })
 }
 
+pub fn pull_request_diff(root: &Path, number: i64) -> CommandResult<String> {
+    // ponytail: `gh pr diff` returns the whole unified diff; the screen splits it per file.
+    let output = Command::new("gh")
+        .current_dir(root)
+        .args(["pr", "diff", &number.to_string()])
+        .output()
+        .map_err(|err| CommandError::io("PR diff를 불러오지 못했습니다.", err))?;
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GhCommandFailed",
+            "PR diff를 불러오지 못했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 // Merge issue comments and reviews into one chronological thread.
 fn pr_comment_timeline(value: &Value) -> Vec<PullRequestComment> {
     let mut items = Vec::new();

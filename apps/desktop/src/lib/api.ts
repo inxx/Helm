@@ -285,6 +285,9 @@ export const api = {
   pullRequestDetail(projectId: string, number: number) {
     return invoke<PullRequestDetail>("pull_request_detail", { projectId, number });
   },
+  pullRequestDiff(projectId: string, number: number) {
+    return invoke<string>("pull_request_diff", { projectId, number });
+  },
   approvePullRequest(projectId: string, number: number) {
     return invoke<void>("approve_pull_request", { projectId, number });
   },

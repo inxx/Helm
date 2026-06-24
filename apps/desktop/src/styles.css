@@ -5805,10 +5805,22 @@ textarea {
   gap: 10px;
 }
 
+.pr-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.pr-header-actions .link-back {
+  margin-bottom: 0;
+}
+
 .pr-detail-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  margin-left: auto;
 }
 
 .pr-detail-loading,
@@ -5982,11 +5994,6 @@ textarea {
 }
 
 .pr-file-list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 7px 12px;
   border-bottom: 1px solid var(--line-soft);
   font-size: 12px;
 }
@@ -5996,11 +6003,23 @@ textarea {
 }
 
 .pr-file-row-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 12px;
   cursor: pointer;
 }
 
 .pr-file-row-link:hover {
   background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
+.pr-file-diff {
+  margin: 0;
+  border-top: 1px solid var(--line-soft);
+  border-radius: 0;
+  max-height: 420px;
 }
 
 .pr-file-path {
@@ -6183,7 +6202,7 @@ textarea {
   white-space: nowrap;
 }
 
-.jira-titlecell {
+.git-work-titlecell.jira-titlecell {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -11175,20 +11194,52 @@ textarea {
   flex-shrink: 0;
 }
 
-.editor-textarea {
-  flex: 1 1 auto;
-  width: 100%;
-  min-height: 0;
-  resize: none;
-  border: none;
-  outline: none;
-  padding: 12px 16px;
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--mono);
+.editor-toolbar-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.editor-tree-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.editor-tree-root {
   font-size: 13px;
-  line-height: 1.6;
-  tab-size: 2;
-  white-space: pre;
+  font-weight: 600;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-codemirror {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
+  font-size: 13px;
+}
+
+.editor-codemirror .cm-editor {
+  height: 100%;
+}
+
+.editor-codemirror .cm-scroller {
+  font-family: var(--mono);
+  line-height: 1.6;
+}
+
+.editor-placeholder {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
 }
