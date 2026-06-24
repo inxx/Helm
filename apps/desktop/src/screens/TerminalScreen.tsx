@@ -20,7 +20,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
@@ -40,7 +40,6 @@ interface TerminalScreenProps {
   recents: RecentProject[];
   activeProjectId: string | null;
   onSwitchProject: (projectId: string) => Promise<void>;
-  onSnapshotUpdated: (snapshot: ProjectSnapshot) => void;
 }
 
 interface TerminalPtyOutput {
@@ -78,7 +77,7 @@ const MAX_TERMINAL_COMMAND_LENGTH = 500;
 const MAX_SAVED_TERMINAL_SCRIPT_LENGTH = 4000;
 const MAX_TERMINAL_PANE_NAME_LENGTH = 60;
 
-export function TerminalScreen({
+export const TerminalScreen = memo(function TerminalScreen({
   snapshot,
   isActive,
   onOpenProject,
@@ -1276,6 +1275,15 @@ export function TerminalScreen({
         </div>
       ) : null}
     </section>
+  );
+}, areTerminalScreenPropsEqual);
+
+function areTerminalScreenPropsEqual(previous: TerminalScreenProps, next: TerminalScreenProps): boolean {
+  return (
+    previous.snapshot === next.snapshot &&
+    previous.isActive === next.isActive &&
+    previous.recents === next.recents &&
+    previous.activeProjectId === next.activeProjectId
   );
 }
 

@@ -1,7 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { GitBranch, GitPullRequest, ListChecks, MessageSquare, Settings, SquareTerminal, Ticket } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
 import { I18nProvider, normalizeLanguage, translate, type AppLanguage, type MessageKey } from "./lib/i18n";
@@ -38,6 +38,7 @@ export function App() {
   const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
   const [terminalMounted, setTerminalMounted] = useState(false);
   const [language, setLanguage] = useState<AppLanguage>("en");
+  const contentScreen = useDeferredValue(screen);
   const navItems = useMemo(
     () =>
       navItemDefinitions.map((item) => ({
@@ -271,7 +272,7 @@ export function App() {
         </section>
       ) : (
         <>
-          {screen === "sessions" ? (
+          {contentScreen === "sessions" ? (
             <SessionsScreen
               snapshot={snapshot}
               selectedTaskId={selectedTaskId}
@@ -287,7 +288,7 @@ export function App() {
               onRefresh={refresh}
             />
           ) : null}
-          {screen === "tasks" ? (
+          {contentScreen === "tasks" ? (
             <TasksScreen
               snapshot={snapshot}
               onOpenTaskChat={(taskId) => {
@@ -300,32 +301,31 @@ export function App() {
               onFocusProjectTask={focusProjectTask}
             />
           ) : null}
-          {screen === "git" ? (
+          {contentScreen === "git" ? (
             <GitScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
           ) : null}
-          {screen === "pr" ? (
+          {contentScreen === "pr" ? (
             <PrScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
           ) : null}
-          {screen === "jira" ? (
+          {contentScreen === "jira" ? (
             <JiraScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
           ) : null}
           {terminalMounted ? (
             <div
-              className={screen === "terminal" ? "screen-host" : "screen-host inactive"}
-              aria-hidden={screen !== "terminal"}
+              className={contentScreen === "terminal" ? "screen-host" : "screen-host inactive"}
+              aria-hidden={contentScreen !== "terminal"}
             >
               <TerminalScreen
                 snapshot={snapshot}
-                isActive={screen === "terminal"}
+                isActive={contentScreen === "terminal"}
                 onOpenProject={() => void openProject({ nextScreen: "terminal" })}
                 recents={recents}
                 activeProjectId={snapshot?.project.id ?? null}
                 onSwitchProject={switchProject}
-                onSnapshotUpdated={applySnapshotUpdate}
               />
             </div>
           ) : null}
-          {screen === "settings" ? (
+          {contentScreen === "settings" ? (
             <SettingsScreen
               snapshot={snapshot}
               onRefresh={refresh}
