@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal, Ticket } from "lucide-react";
+import { FileCode, GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal, Ticket } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
@@ -13,8 +13,9 @@ import { SettingsScreen } from "./screens/SettingsScreen";
 import { SessionsScreen } from "./screens/SessionsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
+import { EditorScreen } from "./screens/EditorScreen";
 
-type Screen = "sessions" | "tasks" | "git" | "jira" | "terminal" | "settings";
+type Screen = "sessions" | "tasks" | "git" | "jira" | "terminal" | "editor" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItemDefinitions: Array<{ id: Screen; labelKey: MessageKey; icon: typeof MessageSquare }> = [
@@ -23,6 +24,7 @@ const navItemDefinitions: Array<{ id: Screen; labelKey: MessageKey; icon: typeof
   { id: "git", labelKey: "nav.git", icon: GitBranch },
   { id: "jira", labelKey: "nav.jira", icon: Ticket },
   { id: "terminal", labelKey: "nav.terminal", icon: SquareTerminal },
+  { id: "editor", labelKey: "nav.editor", icon: FileCode },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
 
@@ -327,6 +329,11 @@ export function App() {
                 activeProjectId={snapshot?.project.id ?? null}
                 onSwitchProject={switchProject}
               />
+            </ScreenHost>
+          ) : null}
+          {mounted.has("editor") ? (
+            <ScreenHost active={screen === "editor"}>
+              <EditorScreen snapshot={snapshot} onOpenProject={() => void openProject({ nextScreen: "editor" })} />
             </ScreenHost>
           ) : null}
           {mounted.has("settings") ? (

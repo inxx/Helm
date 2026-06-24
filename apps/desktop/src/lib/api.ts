@@ -330,6 +330,15 @@ export const api = {
   listTerminalDirectories(projectId: string, cwd: string) {
     return invoke<TerminalDirectoryEntry[]>("list_terminal_directories", { projectId, cwd });
   },
+  listEditorEntries(projectId: string, cwd: string) {
+    return invoke<TerminalDirectoryEntry[]>("list_editor_entries", { projectId, cwd });
+  },
+  readEditorFile(projectId: string, path: string) {
+    return invoke<string>("read_editor_file", { projectId, path });
+  },
+  writeEditorFile(projectId: string, path: string, contents: string) {
+    return invoke<void>("write_editor_file", { projectId, path, contents });
+  },
   runTerminalCommand(projectId: string, cwd: string, command: string) {
     return invoke<TerminalCommandResult>("run_terminal_command", {
       projectId,

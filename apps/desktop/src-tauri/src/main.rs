@@ -1400,6 +1400,96 @@ fn list_terminal_directories(
     Ok(entries)
 }
 
+// 에디터: 디렉토리 안의 폴더 + 파일을 함께 반환한다(터미널 목록과 달리 파일 포함).
+#[tauri::command]
+fn list_editor_entries(
+    project_id: String,
+    cwd: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<TerminalDirectoryEntry>> {
+    let context = project_context(&state, &project_id)?;
+    let current = resolve_terminal_path(&context.root_path, &cwd, ".")?;
+    let mut entries = Vec::new();
+
+    entries.push(TerminalDirectoryEntry {
+        path: context.root_path.to_string_lossy().to_string(),
+        label: "프로젝트 루트".to_string(),
+        kind: "projectRoot".to_string(),
+    });
+    if let Some(parent) = current.parent() {
+        entries.push(TerminalDirectoryEntry {
+            path: parent.to_string_lossy().to_string(),
+            label: "↑ ..".to_string(),
+            kind: "parent".to_string(),
+        });
+    }
+
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&current)
+        .map_err(|err| CommandError::io("디렉토리 목록을 읽지 못했습니다.", err))?
+        .filter_map(Result::ok)
+    {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if matches!(name.as_str(), ".git" | ".helm") {
+            continue;
+        }
+        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        let item = TerminalDirectoryEntry {
+            path: entry.path().to_string_lossy().to_string(),
+            label: name,
+            kind: if is_dir { "child".to_string() } else { "file".to_string() },
+        };
+        if is_dir {
+            dirs.push(item);
+        } else {
+            files.push(item);
+        }
+    }
+    dirs.sort_by(|left, right| left.label.cmp(&right.label));
+    files.sort_by(|left, right| left.label.cmp(&right.label));
+    entries.extend(dirs);
+    entries.extend(files);
+    Ok(entries)
+}
+
+// 프로젝트 루트 밖으로 빠져나가는 경로를 차단한다(canonicalize 후 starts_with 검사).
+fn resolve_editor_file(project_root: &Path, path: &str) -> CommandResult<PathBuf> {
+    let target = resolve_terminal_path(project_root, "", path)?;
+    let root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    if !target.starts_with(&root) {
+        return Err(CommandError::validation(
+            "프로젝트 폴더 밖의 파일은 열 수 없습니다.",
+        ));
+    }
+    Ok(target)
+}
+
+#[tauri::command]
+fn read_editor_file(
+    project_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> CommandResult<String> {
+    let context = project_context(&state, &project_id)?;
+    let target = resolve_editor_file(&context.root_path, &path)?;
+    fs::read_to_string(&target).map_err(|err| CommandError::io("파일을 읽지 못했습니다.", err))
+}
+
+#[tauri::command]
+fn write_editor_file(
+    project_id: String,
+    path: String,
+    contents: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let context = project_context(&state, &project_id)?;
+    let target = resolve_editor_file(&context.root_path, &path)?;
+    fs::write(&target, contents).map_err(|err| CommandError::io("파일을 저장하지 못했습니다.", err))
+}
+
 #[tauri::command]
 fn run_terminal_command(
     project_id: String,
@@ -6744,6 +6834,9 @@ fn main() {
             delete_local_branch,
             list_node_runtimes,
             list_terminal_directories,
+            list_editor_entries,
+            read_editor_file,
+            write_editor_file,
             run_terminal_command,
             resolve_terminal_cwd,
             start_terminal_pty,
