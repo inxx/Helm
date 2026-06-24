@@ -11,15 +11,13 @@ use crate::models::{
     CoordinationExportSummary, CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput,
     DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary,
     GitFileDiff, GitFileStatus, GitRepositoryState, JiraIssueSummary, JiraTransition,
-    NodeRuntimeSummary,
-    OrchestratorSettings, PlannerConversationInput, PlannerConversationResult,
+    NodeRuntimeSummary, OrchestratorSettings, PlannerConversationInput, PlannerConversationResult,
     PlanningMaterializationSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectContext,
     ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, PullRequestDetail, PullRequestSummary,
-    RunEventSummary,
-    RunnerCheckResult, RunnerTemplateSummary, SavePlanDraftRevisionInput, SaveTerminalScriptInput,
-    TaskCompletionGitSummary, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
-    TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
-    TerminalSavedScriptSummary,
+    RunEventSummary, RunnerCheckResult, RunnerTemplateSummary, SavePlanDraftRevisionInput,
+    SaveTerminalScriptInput, TaskCompletionGitSummary, TaskGraphConflictSummary,
+    TaskGraphExportSummary, TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
+    TerminalCommandResult, TerminalDirectoryEntry, TerminalSavedScriptSummary,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -218,6 +216,7 @@ fn open_project(
     let snapshot = open_project_from_path(
         Path::new(&path),
         &state,
+        &app,
         reconcile_stale_runs.unwrap_or(false),
     )?;
     remember_project(&app, &snapshot.project)?;
@@ -252,6 +251,7 @@ fn open_project_by_id(
     let snapshot = open_project_from_path(
         Path::new(&root_path),
         &state,
+        &app,
         reconcile_stale_runs.unwrap_or(false),
     )?;
     remember_project(&app, &snapshot.project)?;
@@ -318,7 +318,7 @@ fn get_launch_state(state: State<'_, AppState>, app: AppHandle) -> CommandResult
     let mut restore_error = None;
 
     if let Some(root_path) = restore_root {
-        match open_project_from_path(Path::new(&root_path), &state, true) {
+        match open_project_from_path(Path::new(&root_path), &state, &app, true) {
             Ok(next) => {
                 remember_project(&app, &next.project)?;
                 stored = load_stored_launch_state(&app)?;
@@ -379,7 +379,7 @@ fn get_project_snapshot(
                     }
                 })
                 .ok_or(err)?;
-            open_project_from_path(Path::new(&root_path), &state, false)?;
+            open_project_from_path(Path::new(&root_path), &state, &app, false)?;
             project_context(&state, &project_id)?
         }
         Err(err) => return Err(err),
@@ -400,7 +400,7 @@ fn list_control_tower_projects(
     let mut summaries = Vec::new();
 
     for recent in stored.recent_projects {
-        match open_project_from_path(Path::new(&recent.root_path), &state, false) {
+        match open_project_from_path(Path::new(&recent.root_path), &state, &app, false) {
             Ok(snapshot) => {
                 let runs = match project_context(&state, &snapshot.project.id)
                     .and_then(|context| db::open_existing_db(&context.db_path))
@@ -1195,9 +1195,11 @@ async fn pull_request_detail(
     state: State<'_, AppState>,
 ) -> CommandResult<PullRequestDetail> {
     let context = project_context(&state, &project_id)?;
-    tauri::async_runtime::spawn_blocking(move || git::pull_request_detail(&context.root_path, number))
-        .await
-        .map_err(|err| CommandError::io("PR 상세 조회 thread가 중단되었습니다.", err))?
+    tauri::async_runtime::spawn_blocking(move || {
+        git::pull_request_detail(&context.root_path, number)
+    })
+    .await
+    .map_err(|err| CommandError::io("PR 상세 조회 thread가 중단되었습니다.", err))?
 }
 
 #[tauri::command]
@@ -1265,7 +1267,12 @@ fn set_jira_status(
     let context = project_context(&state, &project_id)?;
     let conn = db::open_existing_db(&context.db_path)?;
     let settings = db::effective_settings(&conn, &project_id)?;
-    jira::transition_issue(&project_id, &settings.jira_config, &issue_key, &transition_id)
+    jira::transition_issue(
+        &project_id,
+        &settings.jira_config,
+        &issue_key,
+        &transition_id,
+    )
 }
 
 #[tauri::command]
@@ -1476,7 +1483,11 @@ fn list_editor_entries(
         let item = TerminalDirectoryEntry {
             path: entry.path().to_string_lossy().to_string(),
             label: name,
-            kind: if is_dir { "child".to_string() } else { "file".to_string() },
+            kind: if is_dir {
+                "child".to_string()
+            } else {
+                "file".to_string()
+            },
         };
         if is_dir {
             dirs.push(item);
@@ -2972,16 +2983,78 @@ fn reject_approval(
 fn open_project_from_path(
     path: &Path,
     state: &State<'_, AppState>,
+    app: &AppHandle,
     reconcile_stale_runs: bool,
 ) -> CommandResult<ProjectSnapshot> {
     let root = git::resolve_git_root(path)?;
     let conn = db::open_project_db(&root)?;
     let project = db::upsert_project(&conn, &root)?;
-    if reconcile_stale_runs {
-        db::reconcile_interrupted_runs(&conn, &project.id)?;
-    }
+    let reattach_run_ids = if reconcile_stale_runs {
+        db::reconcile_interrupted_runs(&conn, &project.id)?
+    } else {
+        Vec::new()
+    };
     register_project_context(state, &project.id, &root)?;
+    // 재시작 후에도 살아남은 detached host run을 백그라운드에서 재연결한다.
+    for run_id in reattach_run_ids {
+        if let Ok(context) = project_context(state, &project.id) {
+            spawn_reattach_host_run(app.clone(), context, project.id.clone(), run_id);
+        }
+    }
     project_snapshot(&conn, &root, project)
+}
+
+/// 재시작 시 reconcile가 "아직 살아있다"고 판단한 host run에 백그라운드로 재연결한다.
+fn spawn_reattach_host_run(
+    app: AppHandle,
+    context: ProjectContext,
+    project_id: String,
+    run_id: String,
+) {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let state = app.state::<AppState>();
+    match register_running_run(&state, &run_id, cancellation.clone()) {
+        Ok(true) => {}
+        // 이미 추적 중이면 중복 재연결하지 않는다.
+        Ok(false) => return,
+        Err(_) => return,
+    }
+
+    std::thread::spawn(move || {
+        let result = db::open_existing_db(&context.db_path).and_then(|mut conn| {
+            let mut event_sink = |event: &RunEventSummary| emit_run_event(&app, event);
+            let result = db::reattach_host_run(
+                &mut conn,
+                &context.root_path,
+                &project_id,
+                &run_id,
+                cancellation,
+                Some(&mut event_sink),
+            );
+            if let Ok(run) = &result {
+                queue_next_role_after_success(&app, &mut conn, &context, &project_id, run);
+            }
+            result
+        });
+
+        unregister_running_run(&app, &run_id);
+
+        let payload = match result {
+            Ok(run) => json!({
+                "projectId": project_id,
+                "taskId": run.task_id,
+                "runId": run.id,
+                "status": run.status
+            }),
+            Err(error) => json!({
+                "projectId": project_id,
+                "runId": run_id,
+                "status": "NeedsInspection",
+                "error": command_error_summary(&error)
+            }),
+        };
+        let _ = app.emit("agent-run://updated", payload);
+    });
 }
 
 fn register_project_context(
@@ -3163,7 +3236,7 @@ fn sync_app_settings_to_recent_projects(
 ) -> CommandResult<()> {
     let stored = load_stored_launch_state(app)?;
     for recent in stored.recent_projects {
-        let Ok(snapshot) = open_project_from_path(Path::new(&recent.root_path), state, false)
+        let Ok(snapshot) = open_project_from_path(Path::new(&recent.root_path), state, app, false)
         else {
             continue;
         };

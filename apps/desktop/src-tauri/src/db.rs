@@ -27,7 +27,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 11;
+const SUPPORTED_SCHEMA_VERSION: i64 = 12;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
@@ -39,6 +39,7 @@ const PHASE8_MIGRATION: &str = include_str!("../migrations/0008_planning_workspa
 const PHASE9_MIGRATION: &str = include_str!("../migrations/0009_planning_approvals_artifacts.sql");
 const PHASE10_MIGRATION: &str = include_str!("../migrations/0010_terminal_orca_parity.sql");
 const PHASE11_MIGRATION: &str = include_str!("../migrations/0011_agent_run_runner_metadata.sql");
+const PHASE12_MIGRATION: &str = include_str!("../migrations/0012_agent_run_host_pid.sql");
 const TASK_STATUS_ORDER: &[&str] = &[
     "Planned",
     "Ready",
@@ -392,6 +393,11 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
         || !table_has_column(conn, "agent_runs", "model")?
     {
         apply_phase11_schema_patch(conn)?;
+    }
+    if current_version < 12 {
+        apply_migration(conn, 12, "phase12_agent_run_host_pid", PHASE12_MIGRATION)?;
+    } else if !table_has_column(conn, "agent_runs", "host_pid")? {
+        apply_schema_patch(conn, PHASE12_MIGRATION)?;
     }
     Ok(())
 }
@@ -2058,8 +2064,9 @@ pub fn prepare_role_context(
     let tx = conn
         .transaction()
         .map_err(|err| CommandError::database("실행 컨텍스트를 저장하지 못했습니다.", err))?;
-    let inserted = tx.execute(
-        "INSERT INTO agent_runs (
+    let inserted = tx
+        .execute(
+            "INSERT INTO agent_runs (
            id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
            stdout_log_path, stderr_log_path, exit_code, result_status, started_at, finished_at,
            lifecycle_phase, attempt, created_at, updated_at, connection_id
@@ -2072,21 +2079,21 @@ pub fn prepare_role_context(
                AND task_id = ?3
                AND status IN ('Queued', 'Running')
           )",
-        params![
-            run_id,
-            project_id,
-            task_id,
-            role_id,
-            artifact_dir,
-            "summary.md",
-            "structured-result.json",
-            "stdout.log",
-            "stderr.log",
-            timestamp,
-            pinned_connection_id
-        ],
-    )
-    .map_err(|err| CommandError::database("실행 컨텍스트를 저장하지 못했습니다.", err))?;
+            params![
+                run_id,
+                project_id,
+                task_id,
+                role_id,
+                artifact_dir,
+                "summary.md",
+                "structured-result.json",
+                "stdout.log",
+                "stderr.log",
+                timestamp,
+                pinned_connection_id
+            ],
+        )
+        .map_err(|err| CommandError::database("실행 컨텍스트를 저장하지 못했습니다.", err))?;
     if inserted == 0 {
         return Err(CommandError::validation(
             "이미 준비 중이거나 실행 중인 role run이 있습니다.",
@@ -2516,8 +2523,27 @@ pub fn run_host_role(
                     jira_config_string(&settings.jira_config, "taskIssueType"),
                 );
             apply_connection_env(&mut command, &runner_command.env);
-            run_command_with_timeout(
-                &mut command,
+            let child = spawn_detached_host_child(&mut command, &artifact_path)?;
+            let host_pid = child.id();
+            // 재시작 후 재연결을 위해 PID를 즉시 저장한다(wait 진입 전).
+            conn.execute(
+                "UPDATE agent_runs SET host_pid = ?1, updated_at = ?2 WHERE id = ?3",
+                params![host_pid, now(), run_id],
+            )
+            .map_err(|err| CommandError::database("host run PID를 저장하지 못했습니다.", err))?;
+            append_and_emit_run_event(
+                conn,
+                project_id,
+                &run.task_id,
+                run_id,
+                "system",
+                "Host child detached",
+                json!({ "pid": host_pid }),
+                &mut event_sink,
+            )?;
+            wait_host_child(
+                child,
+                &artifact_path,
                 timeout_seconds,
                 cancellation,
                 |stream, chunk| {
@@ -2555,6 +2581,38 @@ pub fn run_host_role(
         .elapsed()
         .as_millis()
         .min(i64::MAX as u128) as i64;
+    finalize_host_run(
+        conn,
+        project_id,
+        &task,
+        &run,
+        &worktree,
+        &artifact_path,
+        &command_args,
+        &command_started_at,
+        command_duration_ms,
+        &command_output,
+        event_sink,
+    )
+}
+
+/// host run 종료 후 산출물(structured-result.json 등)을 읽어 final status를 계산하고
+/// DB/audit/태스크 전이/Obsidian 문서를 영속화한다. 일반 실행(run_host_role)과
+/// 재시작 후 재연결(reattach_host_run) 양쪽에서 공유한다.
+fn finalize_host_run(
+    conn: &mut Connection,
+    project_id: &str,
+    task: &TaskSummary,
+    run: &AgentRunSummary,
+    worktree: &TaskWorktreeSummary,
+    artifact_path: &Path,
+    command_args: &[String],
+    command_started_at: &str,
+    command_duration_ms: i64,
+    command_output: &HostCommandOutput,
+    mut event_sink: Option<&mut dyn FnMut(&RunEventSummary)>,
+) -> CommandResult<AgentRunSummary> {
+    let run_id = run.id.as_str();
     let command_finished_at = now();
 
     fs::write(artifact_path.join("stdout.log"), &command_output.stdout)
@@ -2680,7 +2738,7 @@ pub fn run_host_role(
                 project_id,
                 task_id: Some(&run.task_id),
                 run_id: Some(run_id),
-                command_args: &command_args,
+                command_args,
                 cwd: &worktree.worktree_path,
                 exit_code,
                 timed_out: command_output.timed_out,
@@ -2690,13 +2748,14 @@ pub fn run_host_role(
                 changed_files_path: Some("changed-files.json"),
                 diff_path: Some("diff.patch"),
                 duration_ms: Some(command_duration_ms),
-                started_at: &command_started_at,
+                started_at: command_started_at,
                 finished_at: Some(&command_finished_at),
             },
         )?;
         tx.execute(
             "UPDATE agent_runs
              SET status = ?1,
+                 host_pid = NULL,
                  exit_code = ?2,
                  result_status = ?3,
                  finished_at = ?4,
@@ -2771,7 +2830,7 @@ pub fn run_host_role(
                     &finished_at,
                 )?;
             }
-            apply_successful_role_result(&tx, project_id, &task, &run.role_id, run_id)?;
+            apply_successful_role_result(&tx, project_id, task, &run.role_id, run_id)?;
         } else if run.role_id == "coder" {
             // 구현자 run 종료 처리. 세 갈래다:
             // 1) "실행은 끝났지만 자동 판정 근거가 부족한" NeedsInspection(결과 파일/역할 산출물
@@ -2781,12 +2840,19 @@ pub fn run_host_role(
             //    Blocked로 보내 사람이 확인하게 한다. Ready로 두면 has_role_run 가드 때문에 재실행도
             //    다음 단계 전이도 막혀 "준비됨"에서 멈춰 마치 정상 대기처럼 보인다. Blocked는
             //    auto-handoff 대상이 아니라 사람이 보고 직접 repair/판단하게 멈춘다.
-            let inspection_only =
-                final_status == "NeedsInspection" && !has_blocking_gate && diff_consistency.is_none();
+            let inspection_only = final_status == "NeedsInspection"
+                && !has_blocking_gate
+                && diff_consistency.is_none();
             let (next_status, reason) = if inspection_only {
-                ("PlanVerification", format!("구현자 실행 점검 필요: {final_status} (리뷰 단계로 전달)"))
+                (
+                    "PlanVerification",
+                    format!("구현자 실행 점검 필요: {final_status} (리뷰 단계로 전달)"),
+                )
             } else {
-                ("Blocked", format!("구현자 실행 점검 필요: {final_status} (확인 필요)"))
+                (
+                    "Blocked",
+                    format!("구현자 실행 점검 필요: {final_status} (확인 필요)"),
+                )
             };
             let changed = tx
                 .execute(
@@ -2795,7 +2861,9 @@ pub fn run_host_role(
                      WHERE id = ?4 AND project_id = ?5 AND status = 'Coding'",
                     params![next_status, reason, finished_at, run.task_id, project_id],
                 )
-                .map_err(|err| CommandError::database("태스크 실행 상태를 저장하지 못했습니다.", err))?;
+                .map_err(|err| {
+                    CommandError::database("태스크 실행 상태를 저장하지 못했습니다.", err)
+                })?;
             if changed > 0 {
                 insert_audit(
                     &tx,
@@ -2839,8 +2907,8 @@ pub fn run_host_role(
     match write_obsidian_run_artifact(
         conn,
         project_id,
-        &task,
-        &run,
+        task,
+        run,
         final_status,
         result_status.as_deref(),
         changed_files.len(),
@@ -2892,6 +2960,124 @@ pub fn run_host_role(
     )?;
 
     get_agent_run(conn, run_id)
+}
+
+/// Helm 재시작 후 살아남은 detached host run에 재연결한다. 자식을 새로 spawn하지 않고
+/// 저장된 PID가 끝날 때까지 로그를 tail하며 기다린 뒤, run_host_role와 동일한 finalize를 탄다.
+pub fn reattach_host_run(
+    conn: &mut Connection,
+    root: &Path,
+    project_id: &str,
+    run_id: &str,
+    cancellation: Arc<AtomicBool>,
+    mut event_sink: Option<&mut dyn FnMut(&RunEventSummary)>,
+) -> CommandResult<AgentRunSummary> {
+    let run = get_agent_run(conn, run_id)?;
+    if run.project_id != project_id {
+        return Err(CommandError::validation(
+            "대상 실행 기록을 찾을 수 없습니다.",
+        ));
+    }
+    if run.status != "Running" {
+        return Err(CommandError::validation(
+            "Running 상태의 host run만 재연결할 수 있습니다.",
+        ));
+    }
+    let host_pid: Option<i64> = conn
+        .query_row(
+            "SELECT host_pid FROM agent_runs WHERE id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| CommandError::database("host PID를 읽지 못했습니다.", err))?;
+    let host_pid =
+        host_pid.ok_or_else(|| CommandError::validation("재연결할 host PID가 없습니다."))? as u32;
+
+    let task = get_task(conn, &run.task_id)?;
+    let worktree = get_task_worktree(conn, project_id, &run.task_id)?
+        .ok_or_else(|| CommandError::validation("host run worktree를 찾을 수 없습니다."))?;
+    let settings = effective_settings(conn, project_id)?;
+    let placeholders = host_runner_placeholders(root, &worktree, &run);
+    let runner_command = resolve_host_runner_command(
+        &settings,
+        &run.role_id,
+        run.connection_id.as_deref(),
+        &placeholders,
+    )?;
+    let command_args =
+        resolve_command_args(Path::new(&worktree.worktree_path), &runner_command.args);
+    let timeout_seconds = runner_command.timeout_seconds;
+    let artifact_path = root.join(&run.artifact_dir);
+
+    append_and_emit_run_event(
+        conn,
+        project_id,
+        &run.task_id,
+        run_id,
+        "system",
+        "Reattached to detached host run",
+        json!({ "pid": host_pid }),
+        &mut event_sink,
+    )?;
+
+    let command_started_at = run.claimed_at.clone().unwrap_or_else(now);
+    // ponytail: duration은 재연결 시점부터 측정한다(원래 시작 시각 파싱 생략). evidence상 참고용.
+    let started_instant = Instant::now();
+
+    let raw_output = wait_detached_pid(
+        host_pid,
+        &artifact_path,
+        timeout_seconds,
+        cancellation,
+        |stream, chunk| {
+            let text = String::from_utf8_lossy(chunk).to_string();
+            let _ = append_and_emit_run_event(
+                conn,
+                project_id,
+                &run.task_id,
+                run_id,
+                stream,
+                &text,
+                json!({
+                    "stream": stream,
+                    "bytes": chunk.len()
+                }),
+                &mut event_sink,
+            );
+        },
+    )?;
+
+    // 재연결 경로는 실제 exit code를 모른다. structured-result.json 계약을 source of truth로
+    // 삼아 보정한다. ponytail: non-zero 종료인데 schema-valid pass 결과를 남긴 러너는
+    // success로 보일 수 있음 — 정확히 하려면 러너가 exit code 파일을 남기게 한다.
+    let result_valid = fs::read_to_string(artifact_path.join("structured-result.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .is_some_and(|value| validate_structured_result(&value));
+    let exit_code = if !raw_output.canceled && !raw_output.timed_out && result_valid {
+        0
+    } else {
+        -1
+    };
+    let command_output = HostCommandOutput {
+        exit_code,
+        ..raw_output
+    };
+    let command_duration_ms = started_instant.elapsed().as_millis().min(i64::MAX as u128) as i64;
+
+    finalize_host_run(
+        conn,
+        project_id,
+        &task,
+        &run,
+        &worktree,
+        &artifact_path,
+        &command_args,
+        &command_started_at,
+        command_duration_ms,
+        &command_output,
+        event_sink,
+    )
 }
 
 pub fn mark_host_run_launch_error(
@@ -4712,10 +4898,40 @@ pub fn append_system_run_event(
     )
 }
 
-pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> CommandResult<usize> {
+/// Helm 재시작 시 'Running'으로 남은 host run을 정리한다.
+/// - 저장된 host_pid가 아직 살아있으면(detached로 생존) 상태를 그대로 두고 run_id를 반환한다
+///   → 호출부가 reattach_host_run으로 재연결한다.
+/// - PID가 없거나 죽었으면 기존처럼 NeedsInspection(orphaned)으로 표시한다.
+pub fn reconcile_interrupted_runs(
+    conn: &Connection,
+    project_id: &str,
+) -> CommandResult<Vec<String>> {
+    let running: Vec<(String, Option<i64>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, host_pid FROM agent_runs WHERE project_id = ?1 AND status = 'Running'",
+            )
+            .map_err(|err| CommandError::database("중단된 실행을 조회하지 못했습니다.", err))?;
+        let rows = stmt
+            .query_map(params![project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+            })
+            .map_err(|err| CommandError::database("중단된 실행을 조회하지 못했습니다.", err))?;
+        collect_rows(rows, "중단된 실행을 조회하지 못했습니다.")?
+    };
+
+    let mut reattach = Vec::new();
+    let mut orphaned = Vec::new();
+    for (id, pid) in running {
+        match pid {
+            Some(pid) if host_pid_is_alive(pid as u32) => reattach.push(id),
+            _ => orphaned.push(id),
+        }
+    }
+
     let timestamp = now();
-    let count = conn
-        .execute(
+    for id in &orphaned {
+        conn.execute(
             "UPDATE agent_runs
              SET status = 'NeedsInspection',
                  result_status = COALESCE(result_status, 'needs_changes'),
@@ -4723,11 +4939,13 @@ pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> Comman
                  failure_kind = 'orphaned_after_restart',
                  failure_reason = 'Helm app restarted before the host run finished.',
                  finished_at = COALESCE(finished_at, ?1),
+                 host_pid = NULL,
                  updated_at = ?1
-             WHERE project_id = ?2 AND status = 'Running'",
-            params![timestamp, project_id],
+             WHERE id = ?2",
+            params![timestamp, id],
         )
         .map_err(|err| CommandError::database("중단된 실행 상태를 정리하지 못했습니다.", err))?;
+    }
     let expired_approvals = conn
         .execute(
             "UPDATE approvals
@@ -4750,7 +4968,7 @@ pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> Comman
         )
         .map_err(|err| CommandError::database("중단된 실행 승인을 정리하지 못했습니다.", err))?;
 
-    if count > 0 || expired_approvals > 0 {
+    if !orphaned.is_empty() || !reattach.is_empty() || expired_approvals > 0 {
         insert_audit(
             conn,
             project_id,
@@ -4759,15 +4977,15 @@ pub fn reconcile_interrupted_runs(conn: &Connection, project_id: &str) -> Comman
             "agent_run.reconciled",
             json!({
                 "from": "Running",
-                "to": "NeedsInspection",
-                "count": count,
+                "orphanedCount": orphaned.len(),
+                "reattachedCount": reattach.len(),
                 "expiredRunApprovals": expired_approvals,
-                "reason": "Helm app restarted before the host run finished"
+                "reason": "Helm app restarted; live host runs reattached, dead ones marked for inspection"
             }),
         )?;
     }
 
-    Ok(count)
+    Ok(reattach)
 }
 
 fn mark_host_run_persistence_failed(
@@ -7352,7 +7570,11 @@ fn connection_env(connection: &Value) -> Vec<(String, String)> {
                 .filter_map(|(key, value)| {
                     let key = key.trim();
                     let value = value.as_str()?;
-                    if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+                    if key.is_empty()
+                        || key.contains('=')
+                        || key.contains('\0')
+                        || value.contains('\0')
+                    {
                         return None;
                     }
                     Some((key.to_string(), value.to_string()))
@@ -7360,7 +7582,10 @@ fn connection_env(connection: &Value) -> Vec<(String, String)> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    add_provider_env_defaults(connection.get("provider").and_then(Value::as_str), &mut entries);
+    add_provider_env_defaults(
+        connection.get("provider").and_then(Value::as_str),
+        &mut entries,
+    );
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     entries
 }
@@ -7395,7 +7620,10 @@ fn provider_env_keys(provider: Option<&str>) -> &'static [&'static str] {
 }
 
 fn login_shell_env_value(key: &str) -> Option<String> {
-    if !key.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_') {
+    if !key
+        .chars()
+        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+    {
         return None;
     }
     let output = Command::new("/bin/zsh")
@@ -8591,83 +8819,115 @@ struct HostCommandOutput {
     canceled: bool,
 }
 
-struct HostOutputChunk {
-    stream: &'static str,
-    bytes: Vec<u8>,
+/// 자식 프로세스가 Helm 종료 후에도 살아남도록 spawn한다.
+/// - stdout/stderr를 부모 소유 파이프 대신 artifact 로그 파일로 돌린다 → Helm이 죽어도
+///   read 단이 닫히지 않아 EPIPE/SIGPIPE로 자식이 죽지 않는다.
+/// - unix에선 새 프로세스 그룹으로 분리해 Helm 프로세스 그룹에 가는 시그널과 끊는다.
+fn spawn_detached_host_child(
+    command: &mut Command,
+    artifact_path: &Path,
+) -> CommandResult<std::process::Child> {
+    let stdout_file = fs::File::create(artifact_path.join("stdout.log"))
+        .map_err(|err| CommandError::io("host runner stdout 로그를 열지 못했습니다.", err))?;
+    let stderr_file = fs::File::create(artifact_path.join("stderr.log"))
+        .map_err(|err| CommandError::io("host runner stderr 로그를 열지 못했습니다.", err))?;
+    command
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // process_group(0): 자식 PID로 새 그룹 생성. Helm 종료 시 그룹 시그널과 분리된다.
+        command.process_group(0);
+    }
+    command
+        .spawn()
+        .map_err(|err| CommandError::io("host runner command를 실행하지 못했습니다.", err))
 }
 
-fn spawn_output_reader<R: Read + Send + 'static>(
-    mut reader: R,
-    stream: &'static str,
-    sender: mpsc::Sender<HostOutputChunk>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let mut buffer = [0_u8; 8192];
+/// PID 생존 확인. ponytail: `kill -0` 쉘아웃 — libc 의존성 없이 재시작 시 몇 번만 호출.
+/// 정밀/고빈도가 필요하면 libc::kill(pid, 0)로 교체.
+#[cfg(unix)]
+fn host_pid_is_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn host_pid_is_alive(_pid: u32) -> bool {
+    // 비-unix 데스크톱은 프로세스 분리/재연결을 지원하지 않는다(파일 stdio만 적용).
+    false
+}
+
+#[cfg(unix)]
+fn kill_host_pid(pid: u32) {
+    let _ = Command::new("kill")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_host_pid(_pid: u32) {}
+
+/// detached 자식의 stdout.log / stderr.log를 tail한다. 일반 파일은 EOF(Ok(0)) 이후
+/// 파일이 커지면 같은 핸들에서 read가 새 바이트를 반환하므로 follow가 된다.
+struct HostLogTailer {
+    stdout: Option<fs::File>,
+    stderr: Option<fs::File>,
+}
+
+impl HostLogTailer {
+    fn open(artifact_path: &Path) -> Self {
+        HostLogTailer {
+            stdout: fs::File::open(artifact_path.join("stdout.log")).ok(),
+            stderr: fs::File::open(artifact_path.join("stderr.log")).ok(),
+        }
+    }
+
+    fn drain<F>(&mut self, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>, on_output: &mut F)
+    where
+        F: FnMut(&str, &[u8]),
+    {
+        Self::drain_stream("stdout", &mut self.stdout, stdout, on_output);
+        Self::drain_stream("stderr", &mut self.stderr, stderr, on_output);
+    }
+
+    fn drain_stream<F>(
+        stream: &'static str,
+        file: &mut Option<fs::File>,
+        buf: &mut Vec<u8>,
+        on_output: &mut F,
+    ) where
+        F: FnMut(&str, &[u8]),
+    {
+        let Some(file) = file.as_mut() else { return };
+        let mut chunk = [0_u8; 8192];
         loop {
-            match reader.read(&mut buffer) {
+            match file.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(size) => {
-                    if sender
-                        .send(HostOutputChunk {
-                            stream,
-                            bytes: buffer[..size].to_vec(),
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
+                    buf.extend_from_slice(&chunk[..size]);
+                    on_output(stream, &chunk[..size]);
                 }
                 Err(_) => break,
             }
         }
-    })
-}
-
-fn drain_host_output<F>(
-    receiver: &mpsc::Receiver<HostOutputChunk>,
-    stdout: &mut Vec<u8>,
-    stderr: &mut Vec<u8>,
-    on_output: &mut F,
-) where
-    F: FnMut(&str, &[u8]),
-{
-    while let Ok(chunk) = receiver.try_recv() {
-        match chunk.stream {
-            "stdout" => stdout.extend_from_slice(&chunk.bytes),
-            "stderr" => stderr.extend_from_slice(&chunk.bytes),
-            _ => {}
-        }
-        on_output(chunk.stream, &chunk.bytes);
     }
 }
 
-fn finish_host_child<F>(
-    child: &mut std::process::Child,
-    stdout_reader: &mut Option<std::thread::JoinHandle<()>>,
-    stderr_reader: &mut Option<std::thread::JoinHandle<()>>,
-    receiver: &mpsc::Receiver<HostOutputChunk>,
-    stdout: &mut Vec<u8>,
-    stderr: &mut Vec<u8>,
-    on_output: &mut F,
-) -> CommandResult<std::process::ExitStatus>
-where
-    F: FnMut(&str, &[u8]),
-{
-    let status = child
-        .wait()
-        .map_err(|err| CommandError::io("host runner 종료 상태를 읽지 못했습니다.", err))?;
-    if let Some(reader) = stdout_reader.take() {
-        let _ = reader.join();
-    }
-    if let Some(reader) = stderr_reader.take() {
-        let _ = reader.join();
-    }
-    drain_host_output(receiver, stdout, stderr, on_output);
-    Ok(status)
-}
-
-fn run_command_with_timeout<F>(
-    command: &mut Command,
+/// Helm이 살아있는 동안 detached 자식을 기다린다. 로그 파일을 tail하며 이벤트를 내보내고,
+/// Child 핸들의 try_wait로 종료를 감지해 실제 exit code를 얻는다.
+fn wait_host_child<F>(
+    mut child: std::process::Child,
+    artifact_path: &Path,
     timeout_seconds: u64,
     cancellation: Arc<AtomicBool>,
     mut on_output: F,
@@ -8675,39 +8935,19 @@ fn run_command_with_timeout<F>(
 where
     F: FnMut(&str, &[u8]),
 {
-    let mut child = command
-        .spawn()
-        .map_err(|err| CommandError::io("host runner command를 실행하지 못했습니다.", err))?;
-    let (sender, receiver) = mpsc::channel();
-    let mut stdout_reader = child
-        .stdout
-        .take()
-        .map(|stdout| spawn_output_reader(stdout, "stdout", sender.clone()));
-    let mut stderr_reader = child
-        .stderr
-        .take()
-        .map(|stderr| spawn_output_reader(stderr, "stderr", sender));
+    let mut tailer = HostLogTailer::open(artifact_path);
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
     loop {
-        drain_host_output(&receiver, &mut stdout, &mut stderr, &mut on_output);
+        tailer.drain(&mut stdout, &mut stderr, &mut on_output);
 
-        if child
+        if let Some(status) = child
             .try_wait()
             .map_err(|err| CommandError::io("host runner 상태를 확인하지 못했습니다.", err))?
-            .is_some()
         {
-            let status = finish_host_child(
-                &mut child,
-                &mut stdout_reader,
-                &mut stderr_reader,
-                &receiver,
-                &mut stdout,
-                &mut stderr,
-                &mut on_output,
-            )?;
+            tailer.drain(&mut stdout, &mut stderr, &mut on_output);
             return Ok(HostCommandOutput {
                 stdout,
                 stderr,
@@ -8719,19 +8959,12 @@ where
 
         if cancellation.load(Ordering::SeqCst) {
             let _ = child.kill();
-            let status = finish_host_child(
-                &mut child,
-                &mut stdout_reader,
-                &mut stderr_reader,
-                &receiver,
-                &mut stdout,
-                &mut stderr,
-                &mut on_output,
-            )?;
+            let status = child.wait().ok();
+            tailer.drain(&mut stdout, &mut stderr, &mut on_output);
             return Ok(HostCommandOutput {
                 stdout,
                 stderr,
-                exit_code: status.code().unwrap_or(-1),
+                exit_code: status.and_then(|status| status.code()).unwrap_or(-1),
                 timed_out: false,
                 canceled: true,
             });
@@ -8739,19 +8972,12 @@ where
 
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let status = finish_host_child(
-                &mut child,
-                &mut stdout_reader,
-                &mut stderr_reader,
-                &receiver,
-                &mut stdout,
-                &mut stderr,
-                &mut on_output,
-            )?;
+            let status = child.wait().ok();
+            tailer.drain(&mut stdout, &mut stderr, &mut on_output);
             return Ok(HostCommandOutput {
                 stdout,
                 stderr,
-                exit_code: status.code().unwrap_or(-1),
+                exit_code: status.and_then(|status| status.code()).unwrap_or(-1),
                 timed_out: true,
                 canceled: false,
             });
@@ -8759,6 +8985,56 @@ where
 
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Helm 재시작 후, 이미 떠 있는 detached 자식(PID)을 재연결한다. Child 핸들이 없어
+/// exit code는 직접 못 얻는다(호출부에서 structured-result.json으로 보정). 로그 tail +
+/// PID 생존 폴링만 수행한다.
+fn wait_detached_pid<F>(
+    pid: u32,
+    artifact_path: &Path,
+    timeout_seconds: u64,
+    cancellation: Arc<AtomicBool>,
+    mut on_output: F,
+) -> CommandResult<HostCommandOutput>
+where
+    F: FnMut(&str, &[u8]),
+{
+    let mut tailer = HostLogTailer::open(artifact_path);
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut timed_out = false;
+    let mut canceled = false;
+
+    loop {
+        tailer.drain(&mut stdout, &mut stderr, &mut on_output);
+
+        if !host_pid_is_alive(pid) {
+            break;
+        }
+        if cancellation.load(Ordering::SeqCst) {
+            kill_host_pid(pid);
+            canceled = true;
+            break;
+        }
+        if Instant::now() >= deadline {
+            kill_host_pid(pid);
+            timed_out = true;
+            break;
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    tailer.drain(&mut stdout, &mut stderr, &mut on_output);
+    Ok(HostCommandOutput {
+        stdout,
+        stderr,
+        exit_code: -1, // 재연결 경로: 실제 종료코드 알 수 없음. 호출부에서 보정.
+        timed_out,
+        canceled,
+    })
 }
 
 fn write_fallback_result(artifact_path: &Path, role_id: &str, exit_code: i32) -> CommandResult<()> {
@@ -8842,7 +9118,8 @@ fn apply_successful_role_result(
         let settings = effective_settings(conn, project_id)?;
         let reviewer_ids = role_connection_ids(&settings, "code_reviewer");
         if reviewer_ids.len() >= 2 {
-            let passed = count_passed_role_connections(conn, project_id, &task.id, "code_reviewer")?;
+            let passed =
+                count_passed_role_connections(conn, project_id, &task.id, "code_reviewer")?;
             if passed < reviewer_ids.len() {
                 insert_audit(
                     conn,
@@ -9397,7 +9674,10 @@ fn build_reviewer_verdicts_markdown(
                     .unwrap_or_default();
                 (summary, blockers)
             }
-            None => ("structured-result.json을 읽지 못했습니다.".to_string(), Vec::new()),
+            None => (
+                "structured-result.json을 읽지 못했습니다.".to_string(),
+                Vec::new(),
+            ),
         };
         let blockers_md = if blockers.is_empty() {
             "  - blockers: 없음".to_string()
@@ -12650,9 +12930,8 @@ mod tests {
         );
 
         // pin이 없으면 첫 번째 리뷰어, pin이 있으면 해당 리뷰어 명령으로 해석된다.
-        let first =
-            resolve_host_runner_command(&settings, "code_reviewer", None, &placeholders)
-                .expect("first reviewer");
+        let first = resolve_host_runner_command(&settings, "code_reviewer", None, &placeholders)
+            .expect("first reviewer");
         assert_eq!(first.connection_id.as_deref(), Some("claude-a"));
         assert!(first.args.contains(&"review-a".to_string()));
 
@@ -12966,8 +13245,9 @@ mod tests {
         )
         .expect("insert pending run approval");
 
-        let count = reconcile_interrupted_runs(&conn, &project.id).expect("reconcile");
-        assert_eq!(count, 1);
+        let reattach = reconcile_interrupted_runs(&conn, &project.id).expect("reconcile");
+        // host_pid가 없으므로 재연결 대상이 아니라 orphaned 처리된다.
+        assert!(reattach.is_empty());
 
         let run = get_agent_run(&conn, &run_id).expect("run");
         assert_eq!(run.status, "NeedsInspection");
@@ -12982,6 +13262,39 @@ mod tests {
             )
             .expect("approval status");
         assert_eq!(approval_status, "Expired");
+    }
+
+    #[test]
+    fn host_log_tailer_follows_appended_bytes() {
+        let dir = std::env::temp_dir().join(format!("helm-tail-{}", new_id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        fs::write(dir.join("stdout.log"), b"hello").expect("seed stdout");
+        fs::write(dir.join("stderr.log"), b"").expect("seed stderr");
+
+        let mut tailer = HostLogTailer::open(&dir);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        tailer.drain(&mut out, &mut err, &mut |_, _| {});
+        assert_eq!(out, b"hello");
+
+        // 같은 핸들에서 추가분이 follow 되어야 한다(detached 자식 출력 tail의 핵심 가정).
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("stdout.log"))
+            .expect("reopen stdout");
+        file.write_all(b" world").expect("append");
+        file.flush().expect("flush");
+
+        tailer.drain(&mut out, &mut err, &mut |_, _| {});
+        assert_eq!(out, b"hello world");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_pid_is_alive_detects_current_and_missing() {
+        assert!(host_pid_is_alive(std::process::id()));
+        assert!(!host_pid_is_alive(2_000_000_000));
     }
 
     #[test]
