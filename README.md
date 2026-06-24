@@ -38,7 +38,8 @@ The active product is the Tauri desktop app in `apps/desktop`.
 - Create and track epics, tasks, approvals, and external references
 - Store project state in repo-local SQLite under `.helm/`
 - Inspect read-only Git status and task worktree changes
-- Prepare role-specific context packs for planner, coder, verifier, reviewer, and tester runs
+- Prepare role-specific context packs for planner, coder, verifier, reviewer, arbiter, and tester runs
+- Inspect Jira issues and pull requests from dedicated screens
 - Run configured local host commands for agent roles
 - Capture run artifacts including summary, structured result, logs, diffs, and changed files
 - Enforce simple gate behavior before task status transitions
@@ -53,12 +54,12 @@ The older Node CLI remains in `src/` as a reference implementation for Git statu
 Helm is aiming to become the local operating console for AI engineering work:
 
 - Task planning and approval before code starts
-- Role-based AI execution: planner, coder, plan verifier, code reviewer, tester
+- Role-based AI execution: planner, coder, plan verifier, code reviewer, arbiter, tester
 - Task-scoped Git worktrees
 - Artifact-first run history
 - Gate checks based on real Git diffs and command results
 - Merge readiness and human approval
-- Obsidian, Jira, Slack, and terminal workflows after the core loop is solid
+- Jira issue and pull request views, with Obsidian and Slack workflows growing alongside the core loop
 - Local-first storage and explicit user control by default
 
 The goal is not full autonomy. The goal is controlled acceleration: agents can move fast, but Helm keeps the workflow inspectable, replayable, and accountable.
