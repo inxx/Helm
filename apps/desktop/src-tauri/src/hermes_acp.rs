@@ -57,7 +57,16 @@ pub fn start_session(app: &AppHandle, cwd: Option<String>) -> CommandResult<(Str
     let bin = hermes_bin()?;
     // Scope the agent's workspace at the OS level too — Hermes' file tools resolve relative to
     // the process cwd, so the ACP session/new cwd param alone leaves grep/glob/read in the wrong dir.
-    let workspace = cwd.clone().unwrap_or_else(|| "/tmp".to_string());
+    // Require an explicit project cwd: defaulting to /tmp would silently plan in the wrong tree, which
+    // is exactly the per-project scoping bug this guards against. Fail loud instead.
+    let workspace = match cwd.as_deref().map(str::trim) {
+        Some(path) if !path.is_empty() => path.to_string(),
+        _ => {
+            return Err(CommandError::validation(
+                "ACP 세션에는 프로젝트 경로(cwd)가 필요합니다. 먼저 프로젝트를 여세요.",
+            ))
+        }
+    };
     // No --yolo: the orchestrator is plan-only and must delegate real work through Helm's role
     // pipeline. Dropping --yolo re-engages Hermes' dangerous-command approval, which arrives as
     // session/request_permission — the reader thread auto-rejects those so writes/commands can't

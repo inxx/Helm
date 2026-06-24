@@ -7,6 +7,7 @@ export type HelmConfig = {
   defaultAgent?: AgentName;
   defaultCheckCommand?: string;
   prBaseBranch?: string;
+  projectPath?: string;
 };
 
 export function loadHelmConfig(repoPath: string): HelmConfig {
@@ -37,6 +38,7 @@ export function loadHelmConfig(repoPath: string): HelmConfig {
       configPath,
     ),
     prBaseBranch: readOptionalString(rawConfig.prBaseBranch, "prBaseBranch", configPath),
+    projectPath: readOptionalString(rawConfig.projectPath, "projectPath", configPath),
   };
 }
 

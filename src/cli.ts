@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { loadHelmConfig } from "./config.ts";
@@ -96,7 +97,7 @@ Commands:
   help              도움말을 출력합니다.
   version           버전을 출력합니다.
   agents            지원 agent 목록을 출력합니다.
-  run               agent를 실행하고 세션을 기록합니다.
+  run               agent를 실행하고 세션을 기록합니다. (--project <경로>로 대상 프로젝트 지정)
   status            현재 repo 상태와 최근 세션을 출력합니다.
   show              단일 세션 요약을 출력합니다.
   diff              세션 또는 현재 repo diff를 출력합니다.
@@ -789,8 +790,8 @@ function extractFirstUrl(output: string): string | null {
 function runAgent(args: string[], context: CliContext): CliResult {
   try {
     const parsed = parseRunArgs(args);
-    const before = captureSnapshot(context.cwd);
-    const config = loadHelmConfig(before.repoPath);
+    const config = loadHelmConfig(findGitRoot(context.cwd));
+    const before = captureSnapshot(resolveRunCwd(parsed.project, config.projectPath, context.cwd));
     const store = createSessionStore(before.repoPath);
     const session = createSession(store, before);
     const command = buildAgentCommand(
@@ -844,8 +845,8 @@ function runAgent(args: string[], context: CliContext): CliResult {
 async function runAgentAsync(args: string[], context: CliContext): Promise<CliResult> {
   try {
     const parsed = parseRunArgs(args);
-    const before = captureSnapshot(context.cwd);
-    const config = loadHelmConfig(before.repoPath);
+    const config = loadHelmConfig(findGitRoot(context.cwd));
+    const before = captureSnapshot(resolveRunCwd(parsed.project, config.projectPath, context.cwd));
     const store = createSessionStore(before.repoPath);
     const session = createSession(store, before);
     const command = buildAgentCommand(
@@ -1051,13 +1052,36 @@ function runLog(args: string[], context: CliContext): CliResult {
   }
 }
 
-function parseRunArgs(args: string[]): { agent: AgentName; prompt: string; dryRun: boolean } {
+function parseRunArgs(args: string[]): {
+  agent: AgentName;
+  prompt: string;
+  dryRun: boolean;
+  project?: string;
+} {
   let agent: AgentName = "codex";
   let dryRun = false;
+  let project: string | undefined;
   const promptParts: string[] = [];
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+
+    if (arg === "--project" || arg === "-C") {
+      const value = args[index + 1];
+
+      if (!value) {
+        throw new Error("--project 옵션에는 대상 프로젝트 경로가 필요합니다.");
+      }
+
+      project = value;
+      index += 1;
+      continue;
+    }
+
+    if (arg?.startsWith("--project=")) {
+      project = arg.slice("--project=".length);
+      continue;
+    }
 
     if (arg === "--agent" || arg === "-a") {
       const value = args[index + 1];
@@ -1098,7 +1122,29 @@ function parseRunArgs(args: string[]): { agent: AgentName; prompt: string; dryRu
     throw new Error(`prompt가 필요합니다. 예: ${CLI_COMMAND} run --agent codex "테스트 실패 고쳐줘"`);
   }
 
-  return { agent, prompt, dryRun };
+  return { agent, prompt, dryRun, project };
+}
+
+// 에이전트 작업 디렉터리를 대상 프로젝트로 돌린다. 지정 없으면 Helm 런치 위치(기존 동작).
+// 우선순위: --project 플래그 > config.projectPath > contextCwd
+function resolveRunCwd(
+  projectFlag: string | undefined,
+  configProjectPath: string | undefined,
+  contextCwd: string,
+): string {
+  const target = projectFlag ?? configProjectPath;
+
+  if (!target) {
+    return contextCwd;
+  }
+
+  const absolute = isAbsolute(target) ? target : resolve(contextCwd, target);
+
+  if (!existsSync(absolute)) {
+    throw new Error(`project 경로를 찾을 수 없습니다: ${absolute}`);
+  }
+
+  return absolute;
 }
 
 function formatRunLog(

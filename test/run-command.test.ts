@@ -77,6 +77,33 @@ describe("run command", () => {
     }
   });
 
+  it("runs against the project directory given by --project", () => {
+    const launchDir = mkdtempSync(join(tmpdir(), "helm-launch-"));
+    const projectDir = mkdtempSync(join(tmpdir(), "helm-project-"));
+
+    try {
+      runCommand("git", ["init"], { cwd: launchDir });
+      runCommand("git", ["init"], { cwd: projectDir });
+      writeFileSync(join(projectDir, "only-in-project.txt"), "hi\n");
+
+      const run = runCliWithContext(
+        ["run", "--agent", "codex", "--dry-run", "--project", projectDir, "hello"],
+        { cwd: launchDir },
+      );
+      const sessionId = /Session: (?<id>\S+)/.exec(run.stdout ?? "")?.groups?.id;
+
+      assert.equal(run.code, 0);
+      assert.ok(sessionId);
+      // 세션과 변경 파일은 launch(Helm) 폴더가 아니라 대상 프로젝트에 기록된다.
+      assert.match(run.stdout ?? "", /only-in-project\.txt/);
+      const session = readSession(getSessionStore(projectDir), sessionId);
+      assert.deepEqual(session.changedFiles, ["only-in-project.txt"]);
+    } finally {
+      rmSync(launchDir, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it("shows a single session summary", () => {
     const repoPath = mkdtempSync(join(tmpdir(), "helm-show-command-"));
 
