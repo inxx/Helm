@@ -1,5 +1,7 @@
-import { File, FolderOpen, RotateCcw, Save } from "lucide-react";
-import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
+import { langs, loadLanguage, type LanguageName } from "@uiw/codemirror-extensions-langs";
+import CodeMirror, { keymap, Prec } from "@uiw/react-codemirror";
+import { ChevronDown, ChevronRight, File, FolderOpen, RotateCcw, Save } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
 import type { ProjectSnapshot, TerminalDirectoryEntry } from "../lib/types";
@@ -9,11 +11,90 @@ interface EditorScreenProps {
   onOpenProject: () => void;
 }
 
+// langs의 키는 대부분 확장자와 동일하다. 확장자가 키로 존재하면 그 언어를, 없으면 plain text.
+const EXTENSION_ALIAS: Record<string, LanguageName> = { mjs: "js", cjs: "js", zsh: "sh", cc: "cpp", h: "c" };
+
+function languageForPath(path: string | null) {
+  if (!path) return null;
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const name = EXTENSION_ALIAS[ext] ?? (ext in langs ? (ext as LanguageName) : null);
+  return name ? loadLanguage(name) : null;
+}
+
+interface TreeNodeProps {
+  projectId: string;
+  entry: TerminalDirectoryEntry;
+  depth: number;
+  selectedPath: string | null;
+  onOpenFile: (path: string) => void;
+}
+
+function TreeNode({ projectId, entry, depth, selectedPath, onOpenFile }: TreeNodeProps) {
+  const { showToast } = useToast();
+  const isDir = entry.kind === "child";
+  const [expanded, setExpanded] = useState(false);
+  const [children, setChildren] = useState<TerminalDirectoryEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const toggle = useCallback(() => {
+    if (!isDir) {
+      onOpenFile(entry.path);
+      return;
+    }
+    const next = !expanded;
+    setExpanded(next);
+    if (next && children === null && !loading) {
+      setLoading(true);
+      api
+        .listEditorEntries(projectId, entry.path)
+        // projectRoot/parent 항목은 트리에서 제외하고 실제 자식만 남긴다.
+        .then((list) => setChildren(list.filter((item) => item.kind === "child" || item.kind === "file")))
+        .catch((err) => showToast({ title: "폴더를 열지 못했습니다.", description: String(err?.message ?? err), tone: "error" }))
+        .finally(() => setLoading(false));
+    }
+  }, [isDir, expanded, children, loading, projectId, entry.path, onOpenFile, showToast]);
+
+  return (
+    <li>
+      <button
+        className={`editor-entry${!isDir && selectedPath === entry.path ? " active" : ""}${isDir ? " editor-entry-dir" : ""}`}
+        onClick={toggle}
+        style={{ paddingLeft: 8 + depth * 14 }}
+        type="button"
+      >
+        {isDir ? (
+          expanded ? (
+            <ChevronDown size={14} aria-hidden />
+          ) : (
+            <ChevronRight size={14} aria-hidden />
+          )
+        ) : (
+          <File size={14} aria-hidden />
+        )}
+        {entry.label}
+      </button>
+      {isDir && expanded && children && (
+        <ul className="editor-entry-list">
+          {children.map((child) => (
+            <TreeNode
+              key={`${child.kind}:${child.path}`}
+              projectId={projectId}
+              entry={child}
+              depth={depth + 1}
+              selectedPath={selectedPath}
+              onOpenFile={onOpenFile}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
 export function EditorScreen({ snapshot, onOpenProject }: EditorScreenProps) {
   const { showToast } = useToast();
   const projectId = snapshot?.project.id ?? null;
-  const [cwd, setCwd] = useState("");
-  const [entries, setEntries] = useState<TerminalDirectoryEntry[]>([]);
+  const [roots, setRoots] = useState<TerminalDirectoryEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [content, setContent] = useState("");
   const [original, setOriginal] = useState("");
@@ -25,15 +106,15 @@ export function EditorScreen({ snapshot, onOpenProject }: EditorScreenProps) {
     if (!projectId) return;
     let cancelled = false;
     api
-      .listEditorEntries(projectId, cwd)
+      .listEditorEntries(projectId, "")
       .then((list) => {
-        if (!cancelled) setEntries(list);
+        if (!cancelled) setRoots(list.filter((item) => item.kind === "child" || item.kind === "file"));
       })
       .catch((err) => showToast({ title: "폴더를 열지 못했습니다.", description: String(err?.message ?? err), tone: "error" }));
     return () => {
       cancelled = true;
     };
-  }, [projectId, cwd, showToast]);
+  }, [projectId, showToast]);
 
   const openFile = useCallback(
     (path: string) => {
@@ -64,17 +145,12 @@ export function EditorScreen({ snapshot, onOpenProject }: EditorScreenProps) {
       .finally(() => setSaving(false));
   }, [projectId, selectedPath, saving, dirty, content, showToast]);
 
-  // 한글 등 IME 조합 중에는 Cmd/Ctrl+S 단축키를 무시해 입력이 끊기지 않게 한다.
-  const onKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (event.nativeEvent.isComposing) return;
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
-        event.preventDefault();
-        save();
-      }
-    },
-    [save],
-  );
+  const extensions = useMemo(() => {
+    // CodeMirror가 IME 조합을 직접 처리하므로 keymap만으로 한글 입력 중에도 안전하다.
+    const saveKey = Prec.highest(keymap.of([{ key: "Mod-s", run: () => (save(), true) }]));
+    const lang = languageForPath(selectedPath);
+    return lang ? [saveKey, lang] : [saveKey];
+  }, [selectedPath, save]);
 
   if (!snapshot || !projectId) {
     return (
@@ -91,23 +167,24 @@ export function EditorScreen({ snapshot, onOpenProject }: EditorScreenProps) {
   return (
     <div className="editor-screen">
       <aside className="editor-tree">
+        <header className="editor-tree-header">
+          <span className="editor-tree-root" title={snapshot.project.rootPath}>
+            {snapshot.project.name}
+          </span>
+          <button className="ghost-button" onClick={onOpenProject} title="다른 프로젝트 열기" type="button">
+            <FolderOpen size={14} aria-hidden /> 열기
+          </button>
+        </header>
         <ul className="editor-entry-list">
-          {entries.map((entry) => (
-            <li key={`${entry.kind}:${entry.path}`}>
-              {entry.kind === "file" ? (
-                <button
-                  className={`editor-entry editor-entry-file${selectedPath === entry.path ? " active" : ""}`}
-                  onClick={() => openFile(entry.path)}
-                  type="button"
-                >
-                  <File size={14} aria-hidden /> {entry.label}
-                </button>
-              ) : (
-                <button className="editor-entry editor-entry-dir" onClick={() => setCwd(entry.path)} type="button">
-                  <FolderOpen size={14} aria-hidden /> {entry.label}
-                </button>
-              )}
-            </li>
+          {roots.map((entry) => (
+            <TreeNode
+              key={`${entry.kind}:${entry.path}`}
+              projectId={projectId}
+              entry={entry}
+              depth={0}
+              selectedPath={selectedPath}
+              onOpenFile={openFile}
+            />
           ))}
         </ul>
       </aside>
@@ -129,15 +206,17 @@ export function EditorScreen({ snapshot, onOpenProject }: EditorScreenProps) {
             </button>
           </div>
         </header>
-        <textarea
-          className="editor-textarea"
-          disabled={!selectedPath}
-          onChange={(event) => setContent(event.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder={selectedPath ? "" : "왼쪽에서 파일을 선택하세요."}
-          spellCheck={false}
-          value={content}
-        />
+        {selectedPath ? (
+          <CodeMirror
+            className="editor-codemirror"
+            extensions={extensions}
+            height="100%"
+            onChange={setContent}
+            value={content}
+          />
+        ) : (
+          <div className="editor-placeholder">왼쪽에서 파일을 선택하세요.</div>
+        )}
       </section>
     </div>
   );
