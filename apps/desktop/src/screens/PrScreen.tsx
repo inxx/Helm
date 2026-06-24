@@ -424,7 +424,12 @@ function PrDetail({
                 </h3>
                 <ul className="pr-file-list">
                   {detail.files.map((file) => (
-                    <li key={file.path}>
+                    <li
+                      key={file.path}
+                      className={pr.url ? "pr-file-row-link" : undefined}
+                      title={pr.url ? (ko ? "GitHub에서 변경된 코드 보기" : "View diff on GitHub") : undefined}
+                      onClick={pr.url ? () => void openFileDiff(pr.url, file.path) : undefined}
+                    >
                       <span className="pr-file-path">{file.path}</span>
                       <span className="pr-file-stat">
                         <span className="pr-diff-add">+{file.additions}</span>
@@ -468,6 +473,15 @@ function PrDetail({
       </section>
     </section>
   );
+}
+
+// ponytail: GitHub anchors each PR file diff as `#diff-<sha256(path)>` — compute it in-browser, no API.
+async function openFileDiff(prUrl: string, path: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(path));
+  const hex = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  await api.openExternal(`${prUrl}/files#diff-${hex}`);
 }
 
 function commentTag(kind: string, ko: boolean): { tone: Tone; label: string } | null {
