@@ -179,6 +179,7 @@ export type MessageKey =
   | "sessions.composerPlaceholder"
   | "sessions.sending"
   | "sessions.send"
+  | "sessions.stop"
   | "sessions.emptyChat.title"
   | "sessions.emptyChat.description";
 
@@ -360,6 +361,7 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "sessions.composerPlaceholder": "Give the orchestrator a new task...",
     "sessions.sending": "Sending",
     "sessions.send": "Send",
+    "sessions.stop": "Stop",
     "sessions.emptyChat.title": "Chat with the orchestrator",
     "sessions.emptyChat.description": "Send a new task instruction or select a session to inspect detailed progress.",
   },
@@ -540,6 +542,7 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "sessions.composerPlaceholder": "오케스트레이터에게 새 작업 지시...",
     "sessions.sending": "전송 중",
     "sessions.send": "보내기",
+    "sessions.stop": "멈춤",
     "sessions.emptyChat.title": "오케스트레이터와 대화하세요",
     "sessions.emptyChat.description": "새 작업 지시를 보내거나, 세션을 선택해 상세 진행사항을 확인합니다.",
   },

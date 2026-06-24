@@ -408,6 +408,17 @@ export function SessionsScreen({
     }
   }
 
+  async function cancelOrchestratorTurn() {
+    if (!acpSessionId || !orchestratorBusy) return;
+    try {
+      await api.acpSessionCancel(acpSessionId);
+    } catch {
+      /* the acp://turn event clears busy regardless */
+    }
+    streamingIdRef.current = null;
+    setOrchestratorBusy(false);
+  }
+
   // Every assistant turn is parsed for a tasks[] JSON. If found, confirm once, then materialize
   // each into a Helm task that the existing role-pipeline engine runs. Non-task replies parse to
   // null and are left as ordinary chat — the schema rule (priming) keeps false positives rare.
@@ -877,10 +888,17 @@ export function SessionsScreen({
                 value={orchestratorInput}
               />
               <div className="composer-buttons">
-                <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
-                  {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
-                  <span>{orchestratorBusy ? t("sessions.sending") : t("sessions.send")}</span>
-                </button>
+                {orchestratorBusy ? (
+                  <button className="primary-button loading-button" onClick={() => void cancelOrchestratorTurn()} type="button">
+                    <Square size={14} aria-hidden />
+                    <span>{t("sessions.stop")}</span>
+                  </button>
+                ) : (
+                  <button className="primary-button loading-button" disabled={!orchestratorInput.trim()} type="submit">
+                    <Send size={14} aria-hidden />
+                    <span>{t("sessions.send")}</span>
+                  </button>
+                )}
               </div>
             </form>
           </>
@@ -932,10 +950,17 @@ export function SessionsScreen({
                 value={orchestratorInput}
               />
               <div className="composer-buttons">
-                <button className="primary-button loading-button" disabled={!orchestratorInput.trim() || orchestratorBusy} type="submit">
-                  {orchestratorBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Send size={14} aria-hidden />}
-                  <span>{orchestratorBusy ? t("sessions.sending") : t("sessions.send")}</span>
-                </button>
+                {orchestratorBusy ? (
+                  <button className="primary-button loading-button" onClick={() => void cancelOrchestratorTurn()} type="button">
+                    <Square size={14} aria-hidden />
+                    <span>{t("sessions.stop")}</span>
+                  </button>
+                ) : (
+                  <button className="primary-button loading-button" disabled={!orchestratorInput.trim()} type="submit">
+                    <Send size={14} aria-hidden />
+                    <span>{t("sessions.send")}</span>
+                  </button>
+                )}
               </div>
             </form>
           </>
