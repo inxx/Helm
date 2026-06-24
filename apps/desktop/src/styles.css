@@ -11120,7 +11120,7 @@ textarea {
 
 .editor-screen {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
 }
