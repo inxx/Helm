@@ -24,6 +24,7 @@ import type {
   GitFileDiff,
   GitFileStatus,
   JiraIssueSummary,
+  JiraTransition,
   EffectiveSettings,
   LaunchState,
   NodeRuntimeSummary,
@@ -296,6 +297,12 @@ export const api = {
   },
   listJiraIssues(projectId: string) {
     return invoke<JiraIssueSummary[]>("list_jira_issues", { projectId });
+  },
+  listJiraTransitions(projectId: string, issueKey: string) {
+    return invoke<JiraTransition[]>("list_jira_transitions", { projectId, issueKey });
+  },
+  setJiraStatus(projectId: string, issueKey: string, transitionId: string) {
+    return invoke<void>("set_jira_status", { projectId, issueKey, transitionId });
   },
   setJiraToken(projectId: string, token: string) {
     return invoke<void>("set_jira_token", { projectId, token });

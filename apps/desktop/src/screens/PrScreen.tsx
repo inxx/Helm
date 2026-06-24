@@ -346,7 +346,7 @@ function PrDetail({
           </p>
         </div>
         <div className="pr-header-actions">
-          <button className="link-back" onClick={onBack} type="button">
+          <button className="ghost-button" onClick={onBack} type="button">
             <ArrowLeft size={15} />
             {ko ? "목록" : "Back"}
           </button>

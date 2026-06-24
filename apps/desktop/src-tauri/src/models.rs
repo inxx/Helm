@@ -179,6 +179,14 @@ pub struct JiraIssueSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct JiraTransition {
+    pub id: String,
+    /// The status name the issue moves to (e.g. "In Progress").
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PullRequestSummary {
     pub project_id: String,
     pub project_name: String,

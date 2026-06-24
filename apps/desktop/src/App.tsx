@@ -333,7 +333,12 @@ export function App() {
           ) : null}
           {mounted.has("editor") ? (
             <ScreenHost active={screen === "editor"}>
-              <EditorScreen snapshot={snapshot} onOpenProject={() => void openProject({ nextScreen: "editor" })} />
+              <EditorScreen
+                snapshot={snapshot}
+                onOpenProject={() => void openProject({ nextScreen: "editor" })}
+                recents={recents}
+                onSwitchProject={switchProject}
+              />
             </ScreenHost>
           ) : null}
           {mounted.has("settings") ? (

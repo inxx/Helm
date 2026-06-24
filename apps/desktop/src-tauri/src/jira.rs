@@ -1,5 +1,5 @@
-use crate::models::{CommandError, CommandResult, JiraIssueSummary};
-use serde_json::Value;
+use crate::models::{CommandError, CommandResult, JiraIssueSummary, JiraTransition};
+use serde_json::{json, Value};
 
 const KEYRING_SERVICE: &str = "helm-jira";
 
@@ -58,6 +58,143 @@ fn config_string(config: &Option<Value>, key: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// Resolved Jira credentials + a ready blocking HTTP client.
+struct JiraConn {
+    client: reqwest::blocking::Client,
+    site: String,
+    email: String,
+    token: String,
+}
+
+fn connect(project_id: &str, config: &Option<Value>) -> CommandResult<JiraConn> {
+    let site = config_string(config, "siteUrl")
+        .trim_end_matches('/')
+        .to_string();
+    let email = config_string(config, "email");
+    if site.is_empty() || email.is_empty() {
+        return Err(CommandError::new(
+            "JiraNotConfigured",
+            "설정에서 Jira 사이트 URL과 이메일을 입력해주세요.",
+        ));
+    }
+    let token = keyring_entry(project_id)?
+        .get_password()
+        .map_err(|err| match err {
+            keyring::Error::NoEntry => CommandError::new(
+                "JiraNotConfigured",
+                "설정에서 Jira API 토큰을 저장해주세요.",
+            ),
+            other => CommandError::with_details(
+                "KeyringError",
+                "토큰을 읽지 못했습니다.",
+                other.to_string(),
+            ),
+        })?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|err| {
+            CommandError::with_details(
+                "JiraRequestError",
+                "HTTP 클라이언트 생성 실패.",
+                err.to_string(),
+            )
+        })?;
+    Ok(JiraConn {
+        client,
+        site,
+        email,
+        token,
+    })
+}
+
+/// Available status transitions for an issue (Jira workflows allow only some moves).
+pub fn list_transitions(
+    project_id: &str,
+    config: &Option<Value>,
+    issue_key: &str,
+) -> CommandResult<Vec<JiraTransition>> {
+    let conn = connect(project_id, config)?;
+    let url = format!("{}/rest/api/3/issue/{}/transitions", conn.site, issue_key);
+    let response = conn
+        .client
+        .get(&url)
+        .basic_auth(&conn.email, Some(&conn.token))
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|err| {
+            CommandError::with_details(
+                "JiraRequestError",
+                "Jira 전환 목록 요청에 실패했습니다.",
+                err.to_string(),
+            )
+        })?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() {
+        return Err(CommandError::with_details(
+            "JiraRequestError",
+            "Jira가 오류를 반환했습니다.",
+            format!("{status}: {body}"),
+        ));
+    }
+    let parsed: Value = serde_json::from_str(&body).map_err(|err| {
+        CommandError::with_details("JiraRequestError", "Jira 응답 파싱 실패.", err.to_string())
+    })?;
+    Ok(parsed["transitions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| {
+            Some(JiraTransition {
+                id: t["id"].as_str()?.to_string(),
+                // Prefer the destination status name; fall back to the transition label.
+                name: t["to"]["name"]
+                    .as_str()
+                    .or_else(|| t["name"].as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        })
+        .collect())
+}
+
+/// Move an issue through the given transition id.
+pub fn transition_issue(
+    project_id: &str,
+    config: &Option<Value>,
+    issue_key: &str,
+    transition_id: &str,
+) -> CommandResult<()> {
+    let conn = connect(project_id, config)?;
+    let url = format!("{}/rest/api/3/issue/{}/transitions", conn.site, issue_key);
+    let response = conn
+        .client
+        .post(&url)
+        .basic_auth(&conn.email, Some(&conn.token))
+        .header("Accept", "application/json")
+        .json(&json!({ "transition": { "id": transition_id } }))
+        .send()
+        .map_err(|err| {
+            CommandError::with_details(
+                "JiraRequestError",
+                "Jira 상태 변경 요청에 실패했습니다.",
+                err.to_string(),
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        return Err(CommandError::with_details(
+            "JiraRequestError",
+            "Jira 상태를 변경하지 못했습니다.",
+            format!("{status}: {body}"),
+        ));
+    }
+    Ok(())
 }
 
 pub fn list_issues(

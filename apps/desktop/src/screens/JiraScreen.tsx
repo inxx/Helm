@@ -1,8 +1,9 @@
 import { ExternalLink, RefreshCw, Search, Ticket, UserRound } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { type MouseEvent, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
-import type { JiraIssueSummary, JiraRelation, ProjectSnapshot } from "../lib/types";
+import type { JiraIssueSummary, JiraRelation, JiraTransition, ProjectSnapshot } from "../lib/types";
 
 type RelationFilter = "all" | JiraRelation;
 
@@ -172,7 +173,17 @@ export function JiraScreen({ snapshot, onOpenProject }: JiraScreenProps) {
                       : "No open Jira issues."}
               </div>
             ) : (
-              filtered.map((issue) => <JiraRowView key={issue.key} issue={issue} ko={ko} />)
+              filtered.map((issue) => (
+                <JiraRowView
+                  key={issue.key}
+                  issue={issue}
+                  ko={ko}
+                  projectId={snapshot.project.id}
+                  onStatusChanged={(key, status) =>
+                    setIssues((rows) => rows.map((row) => (row.key === key ? { ...row, status } : row)))
+                  }
+                />
+              ))
             )}
           </div>
         </div>
@@ -181,7 +192,17 @@ export function JiraScreen({ snapshot, onOpenProject }: JiraScreenProps) {
   );
 }
 
-function JiraRowView({ issue, ko }: { issue: JiraIssueSummary; ko: boolean }) {
+function JiraRowView({
+  issue,
+  ko,
+  projectId,
+  onStatusChanged,
+}: {
+  issue: JiraIssueSummary;
+  ko: boolean;
+  projectId: string;
+  onStatusChanged: (key: string, status: string) => void;
+}) {
   return (
     <div
       className={issue.url ? "git-work-row git-work-row-link" : "git-work-row"}
@@ -204,9 +225,109 @@ function JiraRowView({ issue, ko }: { issue: JiraIssueSummary; ko: boolean }) {
         )}
         {issue.assignee || (ko ? "미지정" : "Unassigned")}
       </span>
-      <span className={`git-status-pill ${jiraStatusVariant(issue.status)}`}>{issue.status}</span>
+      <JiraStatusSelect issue={issue} ko={ko} projectId={projectId} onStatusChanged={onStatusChanged} />
       <span className="git-work-updated">{relativeDate(issue.updatedAt)}</span>
     </div>
+  );
+}
+
+function JiraStatusSelect({
+  issue,
+  ko,
+  projectId,
+  onStatusChanged,
+}: {
+  issue: JiraIssueSummary;
+  ko: boolean;
+  projectId: string;
+  onStatusChanged: (key: string, status: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const [transitions, setTransitions] = useState<JiraTransition[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const toggle = (event: MouseEvent) => {
+    event.stopPropagation();
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    setPos({ top: rect.bottom + 4, left: rect.left });
+    setOpen(true);
+    if (transitions === null) {
+      api
+        .listJiraTransitions(projectId, issue.key)
+        .then(setTransitions)
+        .catch(() => setTransitions([]));
+    }
+  };
+
+  const pick = (event: MouseEvent, transition: JiraTransition) => {
+    event.stopPropagation();
+    setBusy(true);
+    api
+      .setJiraStatus(projectId, issue.key, transition.id)
+      .then(() => {
+        onStatusChanged(issue.key, transition.name);
+        setOpen(false);
+        setTransitions(null); // available transitions depend on the new status
+      })
+      .catch((error) => {
+        window.alert(messageFromError(error, ko ? "상태 변경 실패" : "Failed to change status"));
+      })
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <span className="jira-status-select" onClick={(event) => event.stopPropagation()}>
+      <button
+        type="button"
+        className={`git-status-pill ${jiraStatusVariant(issue.status)} jira-status-trigger`}
+        onClick={toggle}
+        disabled={busy}
+      >
+        {issue.status}
+      </button>
+      {open && pos
+        ? createPortal(
+            <>
+              <div
+                className="jira-status-backdrop"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setOpen(false);
+                }}
+              />
+              <div
+                className="jira-status-menu"
+                role="listbox"
+                style={{ top: pos.top, left: pos.left }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                {transitions === null ? (
+                  <div className="jira-status-menu-empty">{ko ? "불러오는 중…" : "Loading…"}</div>
+                ) : transitions.length === 0 ? (
+                  <div className="jira-status-menu-empty">{ko ? "가능한 전환 없음" : "No transitions"}</div>
+                ) : (
+                  transitions.map((transition) => (
+                    <button
+                      key={transition.id}
+                      type="button"
+                      className="jira-status-menu-item"
+                      onClick={(event) => pick(event, transition)}
+                    >
+                      {transition.name}
+                    </button>
+                  ))
+                )}
+              </div>
+            </>,
+            document.body,
+          )
+        : null}
+    </span>
   );
 }
 

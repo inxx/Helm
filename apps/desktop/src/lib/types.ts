@@ -322,6 +322,11 @@ export interface JiraIssueSummary {
 
 export type JiraRelation = "assignee" | "reporter" | "watcher";
 
+export interface JiraTransition {
+  id: string;
+  name: string;
+}
+
 export interface JiraConfig {
   enabled: boolean;
   siteUrl: string | null;

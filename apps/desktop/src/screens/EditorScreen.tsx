@@ -2,13 +2,18 @@ import { langs, loadLanguage, type LanguageName } from "@uiw/codemirror-extensio
 import CodeMirror, { keymap, Prec } from "@uiw/react-codemirror";
 import { ChevronDown, ChevronRight, File, FolderOpen, RotateCcw, Save } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ProjectSwitcher } from "../components/ProjectSwitcher";
 import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
+import { useI18n } from "../lib/i18n";
+import type { RecentProject } from "../lib/recents";
 import type { ProjectSnapshot, TerminalDirectoryEntry } from "../lib/types";
 
 interface EditorScreenProps {
   snapshot: ProjectSnapshot | null;
   onOpenProject: () => void;
+  recents: RecentProject[];
+  onSwitchProject: (projectId: string) => void;
 }
 
 // langs의 키는 대부분 확장자와 동일하다. 확장자가 키로 존재하면 그 언어를, 없으면 plain text.
@@ -91,8 +96,9 @@ function TreeNode({ projectId, entry, depth, selectedPath, onOpenFile }: TreeNod
   );
 }
 
-export function EditorScreen({ snapshot, onOpenProject }: EditorScreenProps) {
+export function EditorScreen({ snapshot, onOpenProject, recents, onSwitchProject }: EditorScreenProps) {
   const { showToast } = useToast();
+  const { language } = useI18n();
   const projectId = snapshot?.project.id ?? null;
   const [roots, setRoots] = useState<TerminalDirectoryEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -168,12 +174,13 @@ export function EditorScreen({ snapshot, onOpenProject }: EditorScreenProps) {
     <div className="editor-screen">
       <aside className="editor-tree">
         <header className="editor-tree-header">
-          <span className="editor-tree-root" title={snapshot.project.rootPath}>
-            {snapshot.project.name}
-          </span>
-          <button className="ghost-button" onClick={onOpenProject} title="다른 프로젝트 열기" type="button">
-            <FolderOpen size={14} aria-hidden /> 열기
-          </button>
+          <ProjectSwitcher
+            snapshot={snapshot}
+            recents={recents}
+            onSwitchProject={onSwitchProject}
+            onOpenProject={onOpenProject}
+            language={language}
+          />
         </header>
         <ul className="editor-entry-list">
           {roots.map((entry) => (

@@ -10,7 +10,8 @@ use crate::models::{
     AppSettings, AppendTaskInstructionInput, ApprovalSummary, CommandError, CommandResult,
     CoordinationExportSummary, CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput,
     DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary,
-    GitFileDiff, GitFileStatus, GitRepositoryState, JiraIssueSummary, NodeRuntimeSummary,
+    GitFileDiff, GitFileStatus, GitRepositoryState, JiraIssueSummary, JiraTransition,
+    NodeRuntimeSummary,
     OrchestratorSettings, PlannerConversationInput, PlannerConversationResult,
     PlanningMaterializationSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectContext,
     ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, PullRequestDetail, PullRequestSummary,
@@ -1240,6 +1241,31 @@ fn list_jira_issues(
     let conn = db::open_existing_db(&context.db_path)?;
     let settings = db::effective_settings(&conn, &project_id)?;
     jira::list_issues(&project_id, &settings.jira_config)
+}
+
+#[tauri::command]
+fn list_jira_transitions(
+    project_id: String,
+    issue_key: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<JiraTransition>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    let settings = db::effective_settings(&conn, &project_id)?;
+    jira::list_transitions(&project_id, &settings.jira_config, &issue_key)
+}
+
+#[tauri::command]
+fn set_jira_status(
+    project_id: String,
+    issue_key: String,
+    transition_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    let settings = db::effective_settings(&conn, &project_id)?;
+    jira::transition_issue(&project_id, &settings.jira_config, &issue_key, &transition_id)
 }
 
 #[tauri::command]
@@ -6833,6 +6859,8 @@ fn main() {
             approve_pull_request,
             merge_pull_request,
             list_jira_issues,
+            list_jira_transitions,
+            set_jira_status,
             set_jira_token,
             jira_token_status,
             open_external,
