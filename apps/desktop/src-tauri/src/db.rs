@@ -2773,17 +2773,27 @@ pub fn run_host_role(
             }
             apply_successful_role_result(&tx, project_id, &task, &run.role_id, run_id)?;
         } else if run.role_id == "coder" {
+            // 구현자 run 종료 처리. 세 갈래다:
+            // 1) "실행은 끝났지만 자동 판정 근거가 부족한" NeedsInspection(결과 파일/역할 산출물
+            //    누락, coder 자가 보고 미통과 등 — blocking gate도 diff 불일치도 없는 경우)은
+            //    리뷰 단계(PlanVerification)로 보내 검토자/사람이 산출물을 판단하게 한다.
+            // 2) blocking gate·diff 불일치 같은 실제 결함이나 실행 실패(Failed/TimedOut/Canceled)는
+            //    Blocked로 보내 사람이 확인하게 한다. Ready로 두면 has_role_run 가드 때문에 재실행도
+            //    다음 단계 전이도 막혀 "준비됨"에서 멈춰 마치 정상 대기처럼 보인다. Blocked는
+            //    auto-handoff 대상이 아니라 사람이 보고 직접 repair/판단하게 멈춘다.
+            let inspection_only =
+                final_status == "NeedsInspection" && !has_blocking_gate && diff_consistency.is_none();
+            let (next_status, reason) = if inspection_only {
+                ("PlanVerification", format!("구현자 실행 점검 필요: {final_status} (리뷰 단계로 전달)"))
+            } else {
+                ("Blocked", format!("구현자 실행 점검 필요: {final_status} (확인 필요)"))
+            };
             let changed = tx
                 .execute(
                     "UPDATE tasks
-                     SET status = 'Ready', status_reason = ?1, updated_at = ?2, last_transition_at = ?2
-                     WHERE id = ?3 AND project_id = ?4 AND status = 'Coding'",
-                    params![
-                        format!("구현자 실행 점검 필요: {final_status}"),
-                        finished_at,
-                        run.task_id,
-                        project_id
-                    ],
+                     SET status = ?1, status_reason = ?2, updated_at = ?3, last_transition_at = ?3
+                     WHERE id = ?4 AND project_id = ?5 AND status = 'Coding'",
+                    params![next_status, reason, finished_at, run.task_id, project_id],
                 )
                 .map_err(|err| CommandError::database("태스크 실행 상태를 저장하지 못했습니다.", err))?;
             if changed > 0 {
@@ -2796,7 +2806,7 @@ pub fn run_host_role(
                     json!({
                         "taskId": run.task_id,
                         "from": "Coding",
-                        "to": "Ready",
+                        "to": next_status,
                         "runId": run_id,
                         "reason": format!("coder host run ended with {final_status}"),
                         "source": "host_runner"
@@ -4121,13 +4131,13 @@ fn repair_attempt_count(
 }
 
 fn repair_role_for_gate(gate: Option<&str>, task: &TaskSummary) -> &'static str {
-    if matches!(task.status.as_str(), "Planned" | "Blocked") {
+    // 게이트가 있으면 그 단계의 결함이므로 coder가 고친다 — coder 결함으로 Blocked가 된
+    // 태스크도 마찬가지다(Blocked → planner로 보내면 재설계로 오라우팅된다). 게이트가 없는
+    // 순수 재계획 상황(Planned/Blocked)에서만 planner로 보낸다.
+    if gate.is_none() && matches!(task.status.as_str(), "Planned" | "Blocked") {
         return "planner";
     }
-    match gate {
-        Some("plan_verification" | "code_review" | "test" | "security" | "rules") | None => "coder",
-        Some(_) => "coder",
-    }
+    "coder"
 }
 
 fn validate_repair_run_state(
@@ -12401,7 +12411,7 @@ mod tests {
         assert_eq!(finished.result_status.as_deref(), Some("pass"));
 
         let updated_task = get_task(&conn, &task.id).expect("task");
-        assert_eq!(updated_task.status, "Ready");
+        assert_eq!(updated_task.status, "Blocked");
 
         let rules_gate_count: i64 = conn
             .query_row(
@@ -12413,14 +12423,110 @@ mod tests {
             .expect("gate count");
         assert_eq!(rules_gate_count, 1);
 
-        let repair_count: i64 = conn
+        let repair_id: String = conn
             .query_row(
-                "SELECT COUNT(*) FROM repair_requests WHERE run_id = ?1 AND status = 'Open'",
+                "SELECT id FROM repair_requests WHERE run_id = ?1 AND status = 'Open'",
                 params![run.id],
                 |row| row.get(0),
             )
-            .expect("repair count");
-        assert_eq!(repair_count, 1);
+            .expect("repair id");
+
+        // Blocked가 됐어도 게이트 결함이므로 수동 repair는 coder로 라우팅돼야 한다.
+        let repair_run = prepare_repair_context(&mut conn, &repo.root, &project.id, &repair_id)
+            .expect("repair context");
+        assert_eq!(repair_run.role_id, "coder");
+    }
+
+    #[test]
+    fn coder_host_run_needs_inspection_without_gate_advances_to_review() {
+        // 구현자 run이 실행은 끝났지만 자동 판정 근거(structured-result schema)가 부족한
+        // NeedsInspection이면, Ready로 되돌려 준비됨에서 멈추는 대신 리뷰 단계
+        // (PlanVerification)로 전이해야 한다. blocking gate도 diff 불일치도 없는 케이스다.
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("desktop app dir")
+            .join("scripts")
+            .join("fixture-runner.mjs");
+
+        run_stub_role(&mut conn, &repo.root, &project.id, &task.id, "planner").expect("planner");
+        let approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("approvals")
+            .remove(0);
+        decide_approval(&mut conn, &project.id, &approval.id, "Approved", "승인").expect("approve");
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: Some(json!([
+                    {
+                        "roleId": "coder",
+                        "label": "구현자",
+                        "provider": "fixture",
+                        "commandArgs": ["node", script.to_string_lossy(), "--mode", "schema_invalid"],
+                        "timeoutSeconds": 60
+                    }
+                ])),
+                ai_connections: None,
+                role_assignments: None,
+                role_policies: None,
+                conductor_config: None,
+                worktree_root: None,
+                worktree_setup: None,
+                jira_config: None,
+                obsidian_vault_path: None,
+                obsidian_artifact_path: None,
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("settings");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        let run = prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "coder")
+            .expect("context");
+        let finished = run_host_role(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &run.id,
+            Arc::new(AtomicBool::new(false)),
+            None,
+        )
+        .expect("host run");
+        assert_eq!(finished.status, "NeedsInspection");
+
+        let updated_task = get_task(&conn, &task.id).expect("task");
+        assert_eq!(updated_task.status, "PlanVerification");
+    }
+
+    #[test]
+    fn delete_task_cleanup_removes_worktree_dir_and_branch() {
+        // delete_task는 DB만 cascade로 지운다. 명령 계층(main.rs)이 그 뒤에 하는 디스크
+        // worktree/브랜치 정리(git::remove_worktree + delete_branch)까지 묶어, 세션 삭제 후
+        // 고아 worktree/브랜치가 남지 않는지 검증한다.
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let worktree =
+            ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+        let worktree_path = PathBuf::from(&worktree.worktree_path);
+        assert!(worktree_path.exists());
+        assert!(git::branch_exists(&repo.root, &worktree.branch_name).expect("branch_exists"));
+
+        // 명령 계층 순서 재현: 정보 확보 → DB 삭제 → 디스크/브랜치 정리.
+        let saved = get_task_worktree(&conn, &project.id, &task.id)
+            .expect("get worktree")
+            .expect("worktree row");
+        delete_task(&mut conn, &project.id, &task.id).expect("delete task");
+        git::remove_worktree(&repo.root, &PathBuf::from(&saved.worktree_path)).expect("remove wt");
+        git::delete_branch(&repo.root, &saved.branch_name, false).expect("delete branch");
+
+        assert!(!worktree_path.exists());
+        assert!(!git::branch_exists(&repo.root, &saved.branch_name).expect("branch_exists"));
+        assert!(get_task(&conn, &task.id).is_err());
     }
 
     #[test]

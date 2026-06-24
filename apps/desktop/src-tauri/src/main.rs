@@ -1015,7 +1015,16 @@ fn delete_task(
 ) -> CommandResult<()> {
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
-    db::delete_task(&mut conn, &project_id, &task_id)
+    // worktree 정보는 DB 삭제(cascade) 전에 읽어둔다 — 삭제 후엔 task_worktrees 행이 사라진다.
+    let worktree = db::get_task_worktree(&conn, &project_id, &task_id)?;
+    db::delete_task(&mut conn, &project_id, &task_id)?;
+    // 디스크 worktree와 로컬 branch는 FK cascade 대상이 아니다. DB 삭제가 성공한 뒤에만,
+    // best-effort로 정리해 고아 worktree/브랜치가 남지 않게 한다(실패해도 삭제는 이미 확정).
+    if let Some(worktree) = worktree {
+        let _ = git::remove_worktree(&context.root_path, Path::new(&worktree.worktree_path));
+        let _ = git::delete_branch(&context.root_path, &worktree.branch_name, false);
+    }
+    Ok(())
 }
 
 #[tauri::command]

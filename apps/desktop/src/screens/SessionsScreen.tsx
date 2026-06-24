@@ -57,6 +57,7 @@ export function SessionsScreen({
   const [orchestratorInput, setOrchestratorInput] = useState("");
   const [orchestratorBusy, setOrchestratorBusy] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [deletingSession, setDeletingSession] = useState(false);
   const [events, setEvents] = useState<RunEventSummary[]>([]);
   const [summaries, setSummaries] = useState<Array<{ runId: string; roleId: string; text: string; at: string | null }>>([]);
   const [runAlert, setRunAlert] = useState<{ roleId: string; status: string; failureKind: string | null; failureReason: string | null; at: string | null } | null>(null);
@@ -470,6 +471,31 @@ export function SessionsScreen({
     setReloadKey((value) => value + 1);
   }
 
+  // Delete the active work session: removes the task and (via the backend command) its runs,
+  // events, evidence, approvals, plus the on-disk git worktree and local branch. The orchestrator
+  // chat is ephemeral client state, so it clears on its own once the session is gone.
+  async function deleteSession() {
+    if (!snapshot || !activeTask || deletingSession) return;
+    const proceed = window.confirm(
+      language === "ko"
+        ? `"${activeTask.title}" 작업 세션을 삭제할까요?\n연결된 run/event/근거와 git worktree·로컬 브랜치까지 함께 삭제됩니다.`
+        : `Delete the work session "${activeTask.title}"?\nThis also removes its runs/events/evidence and the git worktree and local branch.`,
+    );
+    if (!proceed) return;
+    setDeletingSession(true);
+    setLoadError(null);
+    try {
+      await api.deleteTask(snapshot.project.id, activeTask.id);
+      setActiveSessionId(null);
+      await onRefresh();
+      setReloadKey((value) => value + 1);
+    } catch (error) {
+      setLoadError(messageFromError(error, language === "ko" ? "세션을 삭제하지 못했습니다." : "Failed to delete the session."));
+    } finally {
+      setDeletingSession(false);
+    }
+  }
+
   // Manual merge gate: tasks auto-run through the tester, then stop at MergeWaiting. The user
   // approves the merge here, which commits + pushes the worktree branch (same backend command the
   // Tasks view uses).
@@ -731,6 +757,22 @@ export function SessionsScreen({
                   {activeSession?.model ? ` · ${activeSession.model}` : ""}
                 </p>
               </div>
+              {activeTask ? (
+                <button
+                  type="button"
+                  className="secondary-button session-delete-button"
+                  onClick={() => void deleteSession()}
+                  disabled={deletingSession}
+                >
+                  {deletingSession
+                    ? language === "ko"
+                      ? "삭제 중…"
+                      : "Deleting…"
+                    : language === "ko"
+                      ? "세션 삭제"
+                      : "Delete session"}
+                </button>
+              ) : null}
             </header>
             <div className="session-chat-scroll" ref={chatScrollRef}>
               <SessionMessage role="assistant" icon="bot" title={t("sessions.assistantTitle")} timestamp={activeSession?.lastSignalAt ?? null} language={language}>

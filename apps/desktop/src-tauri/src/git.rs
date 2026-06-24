@@ -426,6 +426,26 @@ pub fn add_worktree(
     Ok(())
 }
 
+pub fn remove_worktree(root: &Path, worktree_path: &Path) -> CommandResult<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "remove", "--force"])
+        .arg(worktree_path)
+        .output()
+        .map_err(|err| CommandError::io("Git worktree 제거에 실패했습니다.", err))?;
+
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GitCommandFailed",
+            "Git worktree 제거에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn changed_files(root: &Path) -> CommandResult<Vec<GitFileStatus>> {
     let output = git_output(
         root,

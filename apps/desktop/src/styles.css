@@ -870,12 +870,17 @@ h3 {
 
 .session-chat-header {
   flex-shrink: 0;
+  align-items: flex-start;
   border-bottom: 1px solid var(--line);
   padding: 13px 18px;
 }
 
 .session-chat-header > div:first-child {
   min-width: 0;
+}
+
+.session-delete-button {
+  flex-shrink: 0;
 }
 
 .session-chat-scroll {
