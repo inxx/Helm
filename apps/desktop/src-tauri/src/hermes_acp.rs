@@ -58,9 +58,20 @@ pub fn start_session(app: &AppHandle, cwd: Option<String>) -> CommandResult<(Str
     // Scope the agent's workspace at the OS level too — Hermes' file tools resolve relative to
     // the process cwd, so the ACP session/new cwd param alone leaves grep/glob/read in the wrong dir.
     let workspace = cwd.clone().unwrap_or_else(|| "/tmp".to_string());
+    // No --yolo: the orchestrator is plan-only and must delegate real work through Helm's role
+    // pipeline. Dropping --yolo re-engages Hermes' dangerous-command approval, which arrives as
+    // session/request_permission — the reader thread auto-rejects those so writes/commands can't
+    // run, while safe reads/greps stay un-gated. (--yolo previously bypassed the gate entirely,
+    // so Hermes did the work directly.)
     let mut child = Command::new(&bin)
-        .args(["--yolo", "acp", "--accept-hooks"])
+        .args(["acp", "--accept-hooks"])
         .current_dir(&workspace)
+        // Belt-and-suspenders: HERMES_WRITE_SAFE_ROOT confines write_file/patch to this prefix;
+        // writes outside require approval. Pointing it at a sentinel disjoint from any project
+        // path means every project edit needs approval -> the reader thread auto-rejects it.
+        // Scoped to this child process only, so the user's global config / standalone Hermes are
+        // untouched. (Only effective because we dropped --yolo, which would bypass the gate.)
+        .env("HERMES_WRITE_SAFE_ROOT", "/var/empty/helm-orchestrator-no-write")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -129,6 +140,7 @@ pub fn start_session(app: &AppHandle, cwd: Option<String>) -> CommandResult<(Str
     // 3) stream the rest of stdout to the UI.
     let app_thread = app.clone();
     let sid = session_id.clone();
+    let stdin_thread = Arc::clone(&stdin);
     std::thread::spawn(move || {
         let mut line = String::new();
         loop {
@@ -141,6 +153,13 @@ pub fn start_session(app: &AppHandle, cwd: Option<String>) -> CommandResult<(Str
                         continue;
                     }
                     if let Ok(msg) = serde_json::from_str::<Value>(trimmed) {
+                        if msg.get("method").and_then(Value::as_str)
+                            == Some("session/request_permission")
+                        {
+                            // Plan-only: deny every dangerous-tool request outright.
+                            reject_permission(&stdin_thread, &msg);
+                            continue;
+                        }
                         dispatch(&app_thread, &sid, &msg);
                     }
                 }
@@ -238,6 +257,45 @@ fn dispatch(app: &AppHandle, session_id: &str, msg: &Value) {
     }
 }
 
+/// Pick the option id that denies a session/request_permission. Prefers `reject_once`, then any
+/// `reject_*` kind, then the last option (ACP lists allow options first), then a literal "reject".
+fn reject_option_id(msg: &Value) -> String {
+    let options = msg
+        .get("params")
+        .and_then(|p| p.get("options"))
+        .and_then(Value::as_array);
+    let pick = options.and_then(|opts| {
+        opts.iter()
+            .find(|o| o.get("kind").and_then(Value::as_str) == Some("reject_once"))
+            .or_else(|| {
+                opts.iter().find(|o| {
+                    o.get("kind")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| kind.starts_with("reject"))
+                })
+            })
+            .or_else(|| opts.last())
+    });
+    pick.and_then(|o| o.get("optionId").and_then(Value::as_str))
+        .unwrap_or("reject")
+        .to_string()
+}
+
+/// Auto-deny a permission request straight from the reader thread (it holds a clone of stdin, so
+/// no app-state lookup is needed). This is what keeps the orchestrator plan-only.
+fn reject_permission(stdin: &Arc<Mutex<ChildStdin>>, msg: &Value) {
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": msg.get("id").cloned().unwrap_or(Value::Null),
+        "result": { "outcome": { "outcome": "selected", "optionId": reject_option_id(msg) } }
+    });
+    if let Ok(mut guard) = stdin.lock() {
+        let _ = guard
+            .write_all(format!("{}\n", response).as_bytes())
+            .and_then(|_| guard.flush());
+    }
+}
+
 pub fn prompt(session: &AcpSession, session_id: &str, text: &str) -> CommandResult<()> {
     let id = session.next_id();
     session.write(&json!({
@@ -272,4 +330,36 @@ pub fn respond_permission(
 pub fn close(mut session: AcpSession) {
     let _ = session.child.kill();
     let _ = session.child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reject_option_id;
+    use serde_json::json;
+
+    #[test]
+    fn picks_reject_once_over_allow() {
+        let msg = json!({"params": {"options": [
+            {"optionId": "a", "kind": "allow_once"},
+            {"optionId": "r", "kind": "reject_once"},
+        ]}});
+        assert_eq!(reject_option_id(&msg), "r");
+    }
+
+    #[test]
+    fn falls_back_to_any_reject_then_last_then_literal() {
+        let reject_always = json!({"params": {"options": [
+            {"optionId": "a", "kind": "allow_always"},
+            {"optionId": "r", "kind": "reject_always"},
+        ]}});
+        assert_eq!(reject_option_id(&reject_always), "r");
+
+        let no_kind = json!({"params": {"options": [
+            {"optionId": "first"},
+            {"optionId": "last"},
+        ]}});
+        assert_eq!(reject_option_id(&no_kind), "last");
+
+        assert_eq!(reject_option_id(&json!({})), "reject");
+    }
 }
