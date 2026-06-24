@@ -46,7 +46,6 @@ export function PrScreen({ snapshot, onOpenProject }: PrScreenProps) {
   const ko = language === "ko";
   const [pulls, setPulls] = useState<PullRequestSummary[]>([]);
   const [search, setSearch] = useState("");
-  const [projectFilter, setProjectFilter] = useState("all");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -79,24 +78,15 @@ export function PrScreen({ snapshot, onOpenProject }: PrScreenProps) {
     };
   }, [ko, reloadKey, snapshot]);
 
-  const projects = useMemo(() => {
-    const seen = new Map<string, string>();
-    for (const pr of pulls) {
-      if (pr.projectId && !seen.has(pr.projectId)) seen.set(pr.projectId, pr.projectName);
-    }
-    return [...seen].map(([id, name]) => ({ id, name }));
-  }, [pulls]);
-
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return pulls.filter((pr) => {
-      if (projectFilter !== "all" && pr.projectId !== projectFilter) return false;
       if (!needle) return true;
       return [`#${pr.number}`, pr.title, pr.branch, pr.author, pr.projectName].some((value) =>
         value.toLowerCase().includes(needle),
       );
     });
-  }, [pulls, search, projectFilter]);
+  }, [pulls, search]);
 
   if (!snapshot) {
     return (
@@ -150,19 +140,6 @@ export function PrScreen({ snapshot, onOpenProject }: PrScreenProps) {
               value={search}
             />
           </label>
-          <select
-            aria-label={ko ? "프로젝트 필터" : "Filter by project"}
-            className="git-work-filter"
-            onChange={(event) => setProjectFilter(event.target.value)}
-            value={projectFilter}
-          >
-            <option value="all">{ko ? "전체 프로젝트" : "All projects"}</option>
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
           <div className="git-work-actions">
             <button
               onClick={() => setReloadKey((key) => key + 1)}
