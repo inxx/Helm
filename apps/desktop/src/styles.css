@@ -5524,9 +5524,14 @@ textarea {
   border-radius: 8px;
   background: var(--surface);
   color: var(--soft);
-  padding: 0 8px;
+  padding: 0 26px 0 8px;
   font-size: 12px;
   font-weight: 600;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
 }
 
 .git-work-filters {
@@ -5587,6 +5592,7 @@ textarea {
   min-width: 0;
   border: 0;
   outline: 0;
+  box-shadow: none;
   background: transparent;
   color: var(--text);
   font-family: var(--mono);
@@ -5722,7 +5728,8 @@ textarea {
   padding: 14px 16px;
 }
 
-.git-work-table-shell:has(.pr-cols) {
+.git-work-table-shell:has(.pr-cols),
+.git-work-table-shell:has(.jira-cols) {
   padding: 0;
 }
 
@@ -5751,6 +5758,14 @@ textarea {
 
 .git-work-table.pr-cols .git-work-row {
   grid-template-columns: 86px minmax(260px, 1.6fr) minmax(122px, 0.6fr) minmax(132px, 0.6fr) minmax(120px, 0.55fr) 92px;
+}
+
+.git-work-table.pr-cols {
+  border-radius: 0;
+}
+
+.git-work-dashboard:has(.pr-cols) .git-work-toolbar {
+  border-bottom: 0;
 }
 
 .git-work-table.jira-cols .git-work-row {
@@ -5875,6 +5890,12 @@ textarea {
   border-color: color-mix(in oklch, var(--red) 34%, var(--line));
   background: var(--red-weak);
   color: var(--red);
+}
+
+.git-status-pill.info {
+  border-color: color-mix(in oklch, var(--brand) 38%, var(--line));
+  background: var(--brand-weak);
+  color: var(--brand-strong);
 }
 
 .git-status-pill.muted {

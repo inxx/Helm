@@ -112,18 +112,18 @@ export function JiraScreen({ snapshot, onOpenProject }: JiraScreenProps) {
               value={search}
             />
           </label>
-          <div className="git-work-filters" role="group" aria-label={ko ? "관계 필터" : "Relation filter"}>
+          <select
+            className="jira-status-filter"
+            aria-label={ko ? "관계 필터" : "Relation filter"}
+            value={relationFilter}
+            onChange={(event) => setRelationFilter(event.target.value as RelationFilter)}
+          >
             {relationOptions.map((option) => (
-              <button
-                key={option.value}
-                className={relationFilter === option.value ? "active" : undefined}
-                onClick={() => setRelationFilter(option.value)}
-                type="button"
-              >
+              <option key={option.value} value={option.value}>
                 {option.label}
-              </button>
+              </option>
             ))}
-          </div>
+          </select>
           <select
             className="jira-status-filter"
             aria-label={ko ? "상태 필터" : "Status filter"}
@@ -204,10 +204,19 @@ function JiraRowView({ issue, ko }: { issue: JiraIssueSummary; ko: boolean }) {
         <UserRound size={13} />
         {issue.assignee || (ko ? "미지정" : "Unassigned")}
       </span>
-      <span className="git-status-pill muted">{issue.status}</span>
+      <span className={`git-status-pill ${jiraStatusVariant(issue.status)}`}>{issue.status}</span>
       <span className="git-work-updated">{relativeDate(issue.updatedAt)}</span>
     </div>
   );
+}
+
+function jiraStatusVariant(status: string): string {
+  const s = status.trim().toLowerCase();
+  if (/(done|완료|resolved|closed)/.test(s)) return "success";
+  if (/(drop|취소|cancel|reject)/.test(s)) return "danger";
+  if (/(review|qa|리뷰)/.test(s)) return "warning";
+  if (/(doing|progress|진행)/.test(s)) return "info";
+  return "muted"; // todo, backlog 등 등록만 된 상태
 }
 
 function relativeDate(value: string): string {
