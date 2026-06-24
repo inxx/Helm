@@ -1992,6 +1992,9 @@ pub fn prepare_role_context(
             conn, root, project_id, task_id,
         ));
     }
+    context_pack.push_str(&build_upstream_dossiers_markdown(
+        conn, root, project_id, task_id, role_id,
+    ));
     let context_manifest = build_context_manifest(
         root,
         &task,
@@ -9239,6 +9242,80 @@ fn read_run_summary_for_context(root: &Path, run: &AgentRunSummary) -> String {
         .unwrap_or_else(|_| "summary.md를 읽지 못했습니다.".to_string())
 }
 
+fn upstream_dossier_roles(role_id: &str) -> &'static [&'static str] {
+    match role_id {
+        "coder" => &["planner"],
+        "plan_verifier" => &["planner", "coder"],
+        "code_reviewer" => &["coder"],
+        "tester" => &["coder", "code_reviewer"],
+        _ => &[],
+    }
+}
+
+fn build_upstream_dossiers_markdown(
+    conn: &Connection,
+    root: &Path,
+    project_id: &str,
+    task_id: &str,
+    role_id: &str,
+) -> String {
+    let upstream_roles = upstream_dossier_roles(role_id);
+    if upstream_roles.is_empty() {
+        return String::new();
+    }
+
+    let mut entries = Vec::new();
+    for upstream_role in upstream_roles {
+        let mut stmt = match conn.prepare(
+            "SELECT id, artifact_dir
+               FROM agent_runs
+              WHERE project_id = ?1 AND task_id = ?2 AND role_id = ?3
+                AND status = 'Succeeded'
+              ORDER BY finished_at ASC, created_at ASC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => continue,
+        };
+        let rows = match stmt.query_map(params![project_id, task_id, upstream_role], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            Ok(rows) => rows,
+            Err(_) => continue,
+        };
+
+        for row in rows.flatten() {
+            let (run_id, artifact_dir) = row;
+            if validate_relative_artifact_path(&artifact_dir).is_err() {
+                continue;
+            }
+            let artifact_name = role_dossier_artifact_name(upstream_role);
+            let content = match fs::read_to_string(root.join(&artifact_dir).join(artifact_name)) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let trimmed = content.trim();
+            if trimmed.is_empty() || trimmed.contains("## 작성 대기") {
+                continue;
+            }
+            entries.push(format!(
+                "### {} · `{}` · run `{}`\n\n{}",
+                role_label(upstream_role),
+                artifact_name,
+                run_id,
+                truncate_for_context(trimmed, 6000)
+            ));
+        }
+    }
+
+    if entries.is_empty() {
+        return "\n\n## Upstream Role Dossiers\n\n- 찾은 상류 dossier가 없습니다. Task description, approval, diff를 기준으로 진행하고 부족하면 차단 이슈로 남기세요.\n".to_string();
+    }
+    format!(
+        "\n\n## Upstream Role Dossiers\n\n{}\n",
+        entries.join("\n\n")
+    )
+}
+
 /// 중재자(arbiter) Context Pack에 붙일 "리뷰어 판정 요약" 섹션을 만든다.
 /// 각 code_reviewer run의 structured-result.json을 best-effort로 읽어 connection/provider,
 /// 판정(status), summary, blockers를 요약한다. 파일이 없거나 깨져도 안전하게 건너뛴다.
@@ -11434,6 +11511,9 @@ mod tests {
         assert!(context_pack.contains("## Role Contract"));
         assert!(context_pack.contains("## Role Dossier Contract"));
         assert!(context_pack.contains("pr-dossier.md"));
+        assert!(context_pack.contains("## Upstream Role Dossiers"));
+        assert!(context_pack.contains("plan.md"));
+        assert!(context_pack.contains("stub runner가 pass 결과를 생성했습니다."));
         assert!(
             context_pack.contains("승인된 계획과 task scope 안에서 최소 변경으로 구현을 완료한다.")
         );

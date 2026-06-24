@@ -172,6 +172,8 @@ pub struct JiraIssueSummary {
     pub assignee: String,
     pub url: String,
     pub updated_at: String,
+    /// Any of "assignee", "reporter", "watcher" — how the current user relates to this issue.
+    pub relations: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -379,6 +381,8 @@ pub struct GitBranchSummary {
     pub ahead: Option<i64>,
     pub behind: Option<i64>,
     pub is_current: bool,
+    pub author_name: String,
+    pub committed_at: String,
 }
 
 #[derive(Debug, Serialize)]

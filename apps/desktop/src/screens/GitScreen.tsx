@@ -203,7 +203,14 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
         {activeView === "changes" ? (
           <ChangesView files={files} ignoredFiles={ignoredFiles} snapshot={snapshot} language={language} />
         ) : null}
-        {activeView === "branches" ? <BranchesView branches={branches} language={language} /> : null}
+        {activeView === "branches" ? (
+          <BranchesView
+            branches={branches}
+            projectId={snapshot.project.id}
+            onBranchesChange={setBranches}
+            language={language}
+          />
+        ) : null}
       </div>
     </div>
   );
@@ -886,7 +893,38 @@ function IgnoredFilesList({ files, language }: { files: GitFileStatus[]; languag
   );
 }
 
-function BranchesView({ branches, language }: { branches: GitBranchSummary[]; language: AppLanguage }) {
+function BranchesView({
+  branches,
+  projectId,
+  onBranchesChange,
+  language,
+}: {
+  branches: GitBranchSummary[];
+  projectId: string;
+  onBranchesChange: (branches: GitBranchSummary[]) => void;
+  language: AppLanguage;
+}) {
+  // 삭제 확인을 펼친 브랜치 이름. null이면 닫힘.
+  const [confirmingBranch, setConfirmingBranch] = useState<string | null>(null);
+  const [deletingBranch, setDeletingBranch] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleDelete = useCallback(
+    (branchName: string, deleteRemote: boolean) => {
+      setDeletingBranch(branchName);
+      setDeleteError(null);
+      void api
+        .deleteLocalBranch(projectId, branchName, deleteRemote)
+        .then((nextBranches) => {
+          onBranchesChange(nextBranches);
+          setConfirmingBranch(null);
+        })
+        .catch((error) => setDeleteError(messageFromError(error)))
+        .finally(() => setDeletingBranch(null));
+    },
+    [projectId, onBranchesChange],
+  );
+
   return (
     <section className="git-panel git-branches-view">
       <div className="git-panel-title">
@@ -897,20 +935,84 @@ function BranchesView({ branches, language }: { branches: GitBranchSummary[]; la
         <div className="empty-inline">{language === "ko" ? "로컬 브랜치 없음" : "No local branches"}</div>
       ) : (
         <ul className="git-branch-list">
-          {branches.map((branch) => (
-            <li className={branch.isCurrent ? "current" : ""} key={branch.branchName}>
-              <div>
-                <strong>{branch.branchName}</strong>
-                <span>{branch.upstream ?? (language === "ko" ? "upstream 없음" : "No upstream")}</span>
-              </div>
-              <div className="git-branch-meta">
-                <span>{shortHash(branch.headHash)}</span>
-                <span>{branchTrackLabel(branch)}</span>
-              </div>
-            </li>
-          ))}
+          {branches.map((branch) => {
+            const isConfirming = confirmingBranch === branch.branchName;
+            const isDeleting = deletingBranch === branch.branchName;
+            return (
+              <li className={branch.isCurrent ? "current" : ""} key={branch.branchName}>
+                <div className="git-branch-row">
+                  <div className="git-branch-identity">
+                    <strong>{branch.branchName}</strong>
+                    <span>{branch.upstream ?? (language === "ko" ? "upstream 없음" : "No upstream")}</span>
+                    <span className="git-branch-author">
+                      {branch.authorName} · {formatCommitDate(branch.committedAt)}
+                    </span>
+                  </div>
+                  <div className="git-branch-meta">
+                    <span>{shortHash(branch.headHash)}</span>
+                    <span>{branchTrackLabel(branch)}</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="git-branch-delete"
+                    disabled={branch.isCurrent}
+                    title={
+                      branch.isCurrent
+                        ? language === "ko"
+                          ? "현재 브랜치는 삭제할 수 없습니다"
+                          : "Cannot delete the current branch"
+                        : language === "ko"
+                          ? "브랜치 삭제"
+                          : "Delete branch"
+                    }
+                    onClick={() =>
+                      setConfirmingBranch(isConfirming ? null : branch.branchName)
+                    }
+                  >
+                    {language === "ko" ? "삭제" : "Delete"}
+                  </button>
+                </div>
+                {isConfirming ? (
+                  <div className="git-branch-confirm">
+                    <span>
+                      {language === "ko"
+                        ? `'${branch.branchName}' 를 어떻게 삭제할까요?`
+                        : `How should '${branch.branchName}' be deleted?`}
+                    </span>
+                    <div className="git-branch-confirm-actions">
+                      <button
+                        type="button"
+                        disabled={isDeleting}
+                        onClick={() => handleDelete(branch.branchName, false)}
+                      >
+                        {language === "ko" ? "로컬만 삭제" : "Local only"}
+                      </button>
+                      {branch.upstream ? (
+                        <button
+                          type="button"
+                          className="danger"
+                          disabled={isDeleting}
+                          onClick={() => handleDelete(branch.branchName, true)}
+                        >
+                          {language === "ko" ? "로컬 + 원격 삭제" : "Local + remote"}
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        disabled={isDeleting}
+                        onClick={() => setConfirmingBranch(null)}
+                      >
+                        {language === "ko" ? "취소" : "Cancel"}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
         </ul>
       )}
+      {deleteError ? <div className="git-inline-error">{deleteError}</div> : null}
     </section>
   );
 }

@@ -297,7 +297,10 @@ export interface JiraIssueSummary {
   assignee: string;
   url: string;
   updatedAt: string;
+  relations: JiraRelation[];
 }
+
+export type JiraRelation = "assignee" | "reporter" | "watcher";
 
 export interface JiraConfig {
   enabled: boolean;
@@ -432,6 +435,8 @@ export interface GitBranchSummary {
   ahead: number | null;
   behind: number | null;
   isCurrent: boolean;
+  authorName: string;
+  committedAt: string;
 }
 
 export type GitGraphCellKind =

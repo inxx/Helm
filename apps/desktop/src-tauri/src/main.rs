@@ -6,20 +6,18 @@ mod jira;
 mod models;
 
 use crate::models::{
-    AppendTaskInstructionInput,
     AgentRunSummary, AgentSessionSummary, AiConnectionCheckResult, AiModelRefreshResult,
-    AppSettings, ApprovalSummary, CommandError, CommandResult, CoordinationExportSummary,
-    CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput, DecidePlanDraftInput,
-    EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary, GitFileDiff, GitFileStatus,
-    GitRepositoryState, JiraIssueSummary, NodeRuntimeSummary, OrchestratorSettings,
-    PlannerConversationInput,
-    PlannerConversationResult, PlanningMaterializationSummary, PlanningSessionDetail,
-    PlanningSessionSummary, ProjectContext, ProjectSettingsPatch, ProjectSnapshot, ProjectSummary,
-    PullRequestSummary, RunEventSummary, RunnerCheckResult, RunnerTemplateSummary,
-    SavePlanDraftRevisionInput,
-    SaveTerminalScriptInput, TaskCompletionGitSummary, TaskGraphConflictSummary,
-    TaskGraphExportSummary, TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
-    TerminalCommandResult, TerminalDirectoryEntry, TerminalSavedScriptSummary,
+    AppSettings, AppendTaskInstructionInput, ApprovalSummary, CommandError, CommandResult,
+    CoordinationExportSummary, CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput,
+    DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary,
+    GitFileDiff, GitFileStatus, GitRepositoryState, JiraIssueSummary, NodeRuntimeSummary,
+    OrchestratorSettings, PlannerConversationInput, PlannerConversationResult,
+    PlanningMaterializationSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectContext,
+    ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, PullRequestSummary, RunEventSummary,
+    RunnerCheckResult, RunnerTemplateSummary, SavePlanDraftRevisionInput, SaveTerminalScriptInput,
+    TaskCompletionGitSummary, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
+    TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
+    TerminalSavedScriptSummary,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -762,7 +760,8 @@ fn check_connection_with_cwd(
                     message: "Antigravity CLI chat command를 실행할 수 있습니다.".to_string(),
                     available_models: None,
                     model_refresh_message: Some(
-                        "Antigravity CLI는 응답을 stdout이 아니라 IDE chat 세션에서 처리합니다.".to_string(),
+                        "Antigravity CLI는 응답을 stdout이 아니라 IDE chat 세션에서 처리합니다."
+                            .to_string(),
                     ),
                 });
             }
@@ -1217,7 +1216,10 @@ fn jira_token_status(project_id: String) -> CommandResult<bool> {
 #[tauri::command]
 fn open_external(url: String) -> CommandResult<()> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(CommandError::new("InvalidUrl", "http(s) 링크만 열 수 있습니다."));
+        return Err(CommandError::new(
+            "InvalidUrl",
+            "http(s) 링크만 열 수 있습니다.",
+        ));
     }
     // ponytail: macOS `open`; the backend already depends on unix-only APIs.
     Command::new("open")
@@ -1301,6 +1303,23 @@ fn switch_git_branch(
     let conn = db::open_existing_db(&context.db_path)?;
     let project = db::get_project(&conn, &project_id)?;
     project_snapshot(&conn, &context.root_path, project)
+}
+
+#[tauri::command]
+fn delete_local_branch(
+    project_id: String,
+    branch_name: String,
+    delete_remote: bool,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<GitBranchSummary>> {
+    let branch_name = branch_name.trim();
+    if branch_name.is_empty() {
+        return Err(CommandError::validation("삭제할 branch를 선택해주세요."));
+    }
+
+    let context = project_context(&state, &project_id)?;
+    git::delete_branch(&context.root_path, branch_name, delete_remote)?;
+    git::local_branches(&context.root_path)
 }
 
 #[tauri::command]
@@ -4097,13 +4116,60 @@ fn ensure_hermes_oneshot_args(args: Vec<String>) -> Vec<String> {
 }
 
 const HERMES_SUBCOMMANDS: &[&str] = &[
-    "chat", "model", "fallback", "secrets", "migrate", "gateway", "proxy", "lsp", "setup",
-    "postinstall", "whatsapp", "whatsapp-cloud", "slack", "send", "login", "logout", "auth",
-    "status", "cron", "webhook", "portal", "kanban", "hooks", "doctor", "security", "dump",
-    "debug", "backup", "checkpoints", "import", "config", "pairing", "skills", "bundles",
-    "plugins", "curator", "memory", "tools", "computer-use", "mcp", "sessions", "insights",
-    "claw", "version", "update", "uninstall", "acp", "profile", "completion", "dashboard",
-    "desktop", "gui", "logs", "prompt-size",
+    "chat",
+    "model",
+    "fallback",
+    "secrets",
+    "migrate",
+    "gateway",
+    "proxy",
+    "lsp",
+    "setup",
+    "postinstall",
+    "whatsapp",
+    "whatsapp-cloud",
+    "slack",
+    "send",
+    "login",
+    "logout",
+    "auth",
+    "status",
+    "cron",
+    "webhook",
+    "portal",
+    "kanban",
+    "hooks",
+    "doctor",
+    "security",
+    "dump",
+    "debug",
+    "backup",
+    "checkpoints",
+    "import",
+    "config",
+    "pairing",
+    "skills",
+    "bundles",
+    "plugins",
+    "curator",
+    "memory",
+    "tools",
+    "computer-use",
+    "mcp",
+    "sessions",
+    "insights",
+    "claw",
+    "version",
+    "update",
+    "uninstall",
+    "acp",
+    "profile",
+    "completion",
+    "dashboard",
+    "desktop",
+    "gui",
+    "logs",
+    "prompt-size",
 ];
 
 fn is_antigravity_chat_command(command: &[String]) -> bool {
@@ -5401,7 +5467,11 @@ fn connection_env(connection: &Value) -> Vec<(String, String)> {
                 .filter_map(|(key, value)| {
                     let key = key.trim();
                     let value = value.as_str()?;
-                    if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+                    if key.is_empty()
+                        || key.contains('=')
+                        || key.contains('\0')
+                        || value.contains('\0')
+                    {
                         return None;
                     }
                     Some((key.to_string(), value.to_string()))
@@ -5409,7 +5479,10 @@ fn connection_env(connection: &Value) -> Vec<(String, String)> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    add_provider_env_defaults(connection.get("provider").and_then(Value::as_str), &mut entries);
+    add_provider_env_defaults(
+        connection.get("provider").and_then(Value::as_str),
+        &mut entries,
+    );
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     entries
 }
@@ -5444,7 +5517,10 @@ fn provider_env_keys(provider: Option<&str>) -> &'static [&'static str] {
 }
 
 fn login_shell_env_value(key: &str) -> Option<String> {
-    if !key.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_') {
+    if !key
+        .chars()
+        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+    {
         return None;
     }
     let output = Command::new("/bin/zsh")
@@ -6628,6 +6704,7 @@ fn main() {
             get_commit_file_diff,
             get_task_worktree_changed_files,
             switch_git_branch,
+            delete_local_branch,
             list_node_runtimes,
             list_terminal_directories,
             run_terminal_command,

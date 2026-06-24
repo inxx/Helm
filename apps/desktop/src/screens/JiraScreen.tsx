@@ -2,7 +2,9 @@ import { ExternalLink, RefreshCw, Search, Ticket, UserRound } from "lucide-react
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
-import type { JiraIssueSummary, ProjectSnapshot } from "../lib/types";
+import type { JiraIssueSummary, JiraRelation, ProjectSnapshot } from "../lib/types";
+
+type RelationFilter = "all" | JiraRelation;
 
 interface JiraScreenProps {
   snapshot: ProjectSnapshot | null;
@@ -14,6 +16,8 @@ export function JiraScreen({ snapshot, onOpenProject }: JiraScreenProps) {
   const ko = language === "ko";
   const [issues, setIssues] = useState<JiraIssueSummary[]>([]);
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [relationFilter, setRelationFilter] = useState<RelationFilter>("all");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -46,15 +50,29 @@ export function JiraScreen({ snapshot, onOpenProject }: JiraScreenProps) {
     };
   }, [ko, reloadKey, snapshot]);
 
+  const statuses = useMemo(
+    () => Array.from(new Set(issues.map((issue) => issue.status).filter(Boolean))).sort(),
+    [issues],
+  );
+
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    if (!needle) return issues;
-    return issues.filter((issue) =>
-      [issue.key, issue.summary, issue.status, issue.assignee].some((value) =>
+    return issues.filter((issue) => {
+      if (statusFilter !== "all" && issue.status !== statusFilter) return false;
+      if (relationFilter !== "all" && !issue.relations.includes(relationFilter)) return false;
+      if (!needle) return true;
+      return [issue.key, issue.summary, issue.status, issue.assignee].some((value) =>
         value.toLowerCase().includes(needle),
-      ),
-    );
-  }, [issues, search]);
+      );
+    });
+  }, [issues, search, statusFilter, relationFilter]);
+
+  const relationOptions: Array<{ value: RelationFilter; label: string }> = [
+    { value: "all", label: ko ? "전체" : "All" },
+    { value: "assignee", label: ko ? "담당" : "Assignee" },
+    { value: "reporter", label: ko ? "보고자" : "Reporter" },
+    { value: "watcher", label: ko ? "관찰" : "Watcher" },
+  ];
 
   if (!snapshot) {
     return (
@@ -75,8 +93,8 @@ export function JiraScreen({ snapshot, onOpenProject }: JiraScreenProps) {
           <h2>Jira</h2>
           <p>
             {ko
-              ? `${snapshot.project.name} · 진행 중인 Jira 이슈 (statusCategory != Done)`
-              : `${snapshot.project.name} · open Jira issues (statusCategory != Done)`}
+              ? `${snapshot.project.name} · 나와 관련된 Jira 이슈 (담당·보고·관찰)`
+              : `${snapshot.project.name} · my Jira issues (assigned, reported, watched)`}
           </p>
         </div>
       </header>
@@ -94,6 +112,31 @@ export function JiraScreen({ snapshot, onOpenProject }: JiraScreenProps) {
               value={search}
             />
           </label>
+          <div className="git-work-filters" role="group" aria-label={ko ? "관계 필터" : "Relation filter"}>
+            {relationOptions.map((option) => (
+              <button
+                key={option.value}
+                className={relationFilter === option.value ? "active" : undefined}
+                onClick={() => setRelationFilter(option.value)}
+                type="button"
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <select
+            className="jira-status-filter"
+            aria-label={ko ? "상태 필터" : "Status filter"}
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+          >
+            <option value="all">{ko ? "모든 상태" : "All statuses"}</option>
+            {statuses.map((status) => (
+              <option key={status} value={status}>
+                {status}
+              </option>
+            ))}
+          </select>
           <div className="git-work-actions">
             <button
               onClick={() => setReloadKey((key) => key + 1)}

@@ -96,7 +96,12 @@ pub fn list_profiles() -> CommandResult<Vec<HermesProfile>> {
     let mut profiles = Vec::new();
 
     let (model, provider) = read_profile_model(&dir.join("config.yaml"));
-    profiles.push(HermesProfile { name: "default".to_string(), model, provider, is_default: true });
+    profiles.push(HermesProfile {
+        name: "default".to_string(),
+        model,
+        provider,
+        is_default: true,
+    });
 
     if let Ok(entries) = std::fs::read_dir(dir.join("profiles")) {
         let mut names: Vec<String> = entries
@@ -106,8 +111,14 @@ pub fn list_profiles() -> CommandResult<Vec<HermesProfile>> {
             .collect();
         names.sort();
         for name in names {
-            let (model, provider) = read_profile_model(&dir.join("profiles").join(&name).join("config.yaml"));
-            profiles.push(HermesProfile { name, model, provider, is_default: false });
+            let (model, provider) =
+                read_profile_model(&dir.join("profiles").join(&name).join("config.yaml"));
+            profiles.push(HermesProfile {
+                name,
+                model,
+                provider,
+                is_default: false,
+            });
         }
     }
     Ok(profiles)
@@ -263,7 +274,11 @@ fn session_node_from_row(row: &Row) -> rusqlite::Result<HermesSessionNode> {
     let parent: Option<String> = row.get("parent_session_id")?;
     Ok(HermesSessionNode {
         id: row.get("id")?,
-        kind: if parent.is_some() { "child".to_string() } else { "root".to_string() },
+        kind: if parent.is_some() {
+            "child".to_string()
+        } else {
+            "root".to_string()
+        },
         parent_session_id: parent,
         model: row.get("model")?,
         title: row.get("title")?,
@@ -299,7 +314,10 @@ pub fn get_task_tree(task_id: String) -> CommandResult<Vec<HermesSessionNode>> {
         .flatten();
 
     let dir = hermes_dir()?;
-    let state_path = match assignee.as_deref().map(|a| dir.join("profiles").join(a).join("state.db")) {
+    let state_path = match assignee
+        .as_deref()
+        .map(|a| dir.join("profiles").join(a).join("state.db"))
+    {
         Some(profile_db) if profile_db.exists() => profile_db,
         _ => dir.join("state.db"),
     };
@@ -434,7 +452,10 @@ pub struct HermesStageInput {
 
 /// Create a sequential chain of kanban tasks (stage[i+1] depends on stage[i] via --parent).
 /// Each stage is assigned to a profile (= its model). Returns the created task ids in order.
-pub fn create_stage_chain(goal: String, stages: Vec<HermesStageInput>) -> CommandResult<Vec<String>> {
+pub fn create_stage_chain(
+    goal: String,
+    stages: Vec<HermesStageInput>,
+) -> CommandResult<Vec<String>> {
     if stages.is_empty() {
         return Err(CommandError::validation("단계가 비어 있습니다."));
     }
@@ -513,7 +534,10 @@ mod tests {
 
     #[test]
     fn parse_created_id_tolerates_preamble_and_alt_keys() {
-        assert_eq!(parse_created_id("noise\n{\"task_id\":\"t_9\"}").as_deref(), Some("t_9"));
+        assert_eq!(
+            parse_created_id("noise\n{\"task_id\":\"t_9\"}").as_deref(),
+            Some("t_9")
+        );
         assert_eq!(parse_created_id("no json here"), None);
     }
 

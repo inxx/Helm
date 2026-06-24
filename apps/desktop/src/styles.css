@@ -5498,12 +5498,35 @@ textarea {
 }
 
 .git-work-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, auto) minmax(220px, 1fr);
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
   gap: 12px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
   padding: 10px 16px;
+}
+
+.git-work-toolbar .git-work-search {
+  flex: 1 1 auto;
+}
+
+.git-work-toolbar .git-work-filter,
+.git-work-toolbar .git-work-filters,
+.git-work-toolbar .jira-status-filter,
+.git-work-toolbar .git-work-actions {
+  flex: 0 0 auto;
+}
+
+.jira-status-filter {
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--soft);
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .git-work-filters {
@@ -5591,6 +5614,13 @@ textarea {
   font-size: 11px;
   font-style: normal;
   vertical-align: middle;
+}
+
+.pr-author-avatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
 }
 
 .pr-state-tag {
@@ -6479,9 +6509,7 @@ textarea {
 
 .git-branch-list li {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
+  gap: 8px;
   border-bottom: 1px solid var(--line-soft);
   padding: 10px 16px;
 }
@@ -6491,10 +6519,77 @@ textarea {
   background: var(--brand-weak);
 }
 
-.git-branch-list li > div:first-child {
+.git-branch-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.git-branch-identity {
   display: grid;
   gap: 2px;
   min-width: 0;
+}
+
+.git-branch-author {
+  color: var(--text-muted);
+}
+
+.git-branch-delete {
+  flex: none;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.git-branch-delete:hover:not(:disabled) {
+  border-color: var(--danger, oklch(0.62 0.2 27));
+  color: var(--danger, oklch(0.62 0.2 27));
+}
+
+.git-branch-delete:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.git-branch-confirm {
+  display: grid;
+  gap: 8px;
+  border-radius: 6px;
+  background: var(--surface-2, var(--brand-weak));
+  padding: 8px 10px;
+  font-size: 11.5px;
+}
+
+.git-branch-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.git-branch-confirm-actions button {
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.git-branch-confirm-actions button.danger {
+  border-color: var(--danger, oklch(0.62 0.2 27));
+  color: var(--danger, oklch(0.62 0.2 27));
+}
+
+.git-branch-confirm-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .git-branch-list strong {

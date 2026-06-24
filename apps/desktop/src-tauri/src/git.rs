@@ -93,11 +93,19 @@ pub fn pull_requests(root: &Path) -> CommandResult<Vec<PullRequestSummary>> {
 }
 
 pub fn approve_pull_request(root: &Path, number: i64) -> CommandResult<()> {
-    gh_pr_action(root, &["pr", "review", &number.to_string(), "--approve"], "PR 승인에 실패했습니다.")
+    gh_pr_action(
+        root,
+        &["pr", "review", &number.to_string(), "--approve"],
+        "PR 승인에 실패했습니다.",
+    )
 }
 
 pub fn merge_pull_request(root: &Path, number: i64) -> CommandResult<()> {
-    gh_pr_action(root, &["pr", "merge", &number.to_string(), "--merge"], "PR 머지에 실패했습니다.")
+    gh_pr_action(
+        root,
+        &["pr", "merge", &number.to_string(), "--merge"],
+        "PR 머지에 실패했습니다.",
+    )
 }
 
 fn gh_pr_action(root: &Path, args: &[&str], failure: &str) -> CommandResult<()> {
@@ -122,12 +130,24 @@ fn pr_from_json(value: &Value) -> PullRequestSummary {
         project_name: String::new(),
         number: value["number"].as_i64().unwrap_or(0),
         title: value["title"].as_str().unwrap_or_default().to_string(),
-        author: value["author"]["login"].as_str().unwrap_or_default().to_string(),
-        branch: value["headRefName"].as_str().unwrap_or_default().to_string(),
-        base: value["baseRefName"].as_str().unwrap_or_default().to_string(),
+        author: value["author"]["login"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        branch: value["headRefName"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        base: value["baseRefName"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
         state: value["state"].as_str().unwrap_or("OPEN").to_string(),
         is_draft: value["isDraft"].as_bool().unwrap_or(false),
-        review_decision: value["reviewDecision"].as_str().unwrap_or_default().to_string(),
+        review_decision: value["reviewDecision"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
         checks: check_rollup_state(&value["statusCheckRollup"]),
         url: value["url"].as_str().unwrap_or_default().to_string(),
         updated_at: value["updatedAt"].as_str().unwrap_or_default().to_string(),
@@ -420,17 +440,10 @@ pub fn commit_changed_files(root: &Path, commit_hash: &str) -> CommandResult<Vec
         ],
     )?;
 
-    Ok(output
-        .lines()
-        .filter_map(parse_name_status_line)
-        .collect())
+    Ok(output.lines().filter_map(parse_name_status_line).collect())
 }
 
-pub fn commit_file_diff(
-    root: &Path,
-    commit_hash: &str,
-    path: &str,
-) -> CommandResult<GitFileDiff> {
+pub fn commit_file_diff(root: &Path, commit_hash: &str, path: &str) -> CommandResult<GitFileDiff> {
     let commit_hash = resolve_commit_hash(root, commit_hash)?;
     let path = validated_repo_relative_path(path)?;
     let parent_hash = first_parent_or_empty_tree(root, &commit_hash)?;
@@ -473,7 +486,9 @@ pub fn file_diff(root: &Path, path: &str, mode: &str) -> CommandResult<GitFileDi
     let mut command = Command::new("git");
     command.arg("-C").arg(root);
     if mode == "staged" {
-        command.args(["diff", "--no-color", "--cached", "--"]).arg(path);
+        command
+            .args(["diff", "--no-color", "--cached", "--"])
+            .arg(path);
     } else if !root.join(path).exists() {
         command.args(["diff", "--no-color", "--"]).arg(path);
     } else {
@@ -549,7 +564,9 @@ fn validated_repo_relative_path(path: &str) -> CommandResult<&str> {
         return Err(CommandError::validation("diff를 볼 파일을 선택해주세요."));
     }
     if path.starts_with('/') || path.split('/').any(|part| part == "..") {
-        return Err(CommandError::validation("저장소 내부 파일만 diff를 볼 수 있습니다."));
+        return Err(CommandError::validation(
+            "저장소 내부 파일만 diff를 볼 수 있습니다.",
+        ));
     }
     Ok(path)
 }
@@ -560,7 +577,10 @@ fn parse_name_status_line(line: &str) -> Option<GitFileStatus> {
     let status_code = raw_status.chars().next()?;
 
     let (path, renamed_from) = if status_code == 'R' || status_code == 'C' {
-        (fields.get(2)?.to_string(), fields.get(1).map(|value| (*value).to_string()))
+        (
+            fields.get(2)?.to_string(),
+            fields.get(1).map(|value| (*value).to_string()),
+        )
     } else {
         (fields.get(1)?.to_string(), None)
     };
@@ -587,7 +607,7 @@ pub fn local_branches(root: &Path) -> CommandResult<Vec<GitBranchSummary>> {
         root,
         &[
             "for-each-ref",
-            "--format=%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track)",
+            "--format=%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track)%00%(authorname)%00%(committerdate:iso-strict)",
             "refs/heads",
         ],
     )?;
@@ -596,7 +616,7 @@ pub fn local_branches(root: &Path) -> CommandResult<Vec<GitBranchSummary>> {
         .lines()
         .filter_map(|line| {
             let fields: Vec<&str> = line.split('\0').collect();
-            if fields.len() < 4 || fields[0].is_empty() {
+            if fields.len() < 6 || fields[0].is_empty() {
                 return None;
             }
             let (ahead, behind) = parse_track(fields[3]);
@@ -607,9 +627,47 @@ pub fn local_branches(root: &Path) -> CommandResult<Vec<GitBranchSummary>> {
                 ahead,
                 behind,
                 is_current: current.as_deref() == Some(fields[0]),
+                author_name: fields[4].to_string(),
+                committed_at: fields[5].to_string(),
             })
         })
         .collect())
+}
+
+pub fn delete_branch(root: &Path, branch_name: &str, delete_remote: bool) -> CommandResult<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["branch", "-D", branch_name])
+        .output()
+        .map_err(|err| CommandError::io("Git branch 삭제에 실패했습니다.", err))?;
+
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GitCommandFailed",
+            "로컬 branch 삭제에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    if delete_remote {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["push", "origin", "--delete", branch_name])
+            .output()
+            .map_err(|err| CommandError::io("원격 branch 삭제에 실패했습니다.", err))?;
+
+        if !output.status.success() {
+            return Err(CommandError::with_details(
+                "GitCommandFailed",
+                "원격 branch 삭제에 실패했습니다. (로컬 branch는 이미 삭제됨)",
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 pub fn recent_commits(root: &Path, limit: i64) -> CommandResult<Vec<GitCommitSummary>> {

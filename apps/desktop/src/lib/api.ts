@@ -317,6 +317,9 @@ export const api = {
   switchGitBranch(projectId: string, branchName: string) {
     return invoke<ProjectSnapshot>("switch_git_branch", { projectId, branchName });
   },
+  deleteLocalBranch(projectId: string, branchName: string, deleteRemote: boolean) {
+    return invoke<GitBranchSummary[]>("delete_local_branch", { projectId, branchName, deleteRemote });
+  },
   listNodeRuntimes() {
     return invoke<NodeRuntimeSummary[]>("list_node_runtimes");
   },

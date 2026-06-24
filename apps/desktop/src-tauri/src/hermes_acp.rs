@@ -148,7 +148,11 @@ pub fn start_session(app: &AppHandle, cwd: Option<String>) -> CommandResult<(Str
 
     Ok((
         session_id,
-        AcpSession { stdin, child, next_id: AtomicI64::new(3) },
+        AcpSession {
+            stdin,
+            child,
+            next_id: AtomicI64::new(3),
+        },
     ))
 }
 
@@ -167,7 +171,10 @@ fn read_until_response<R: BufRead>(
             .read_line(&mut line)
             .map_err(|err| CommandError::io("ACP 응답을 읽지 못했습니다.", err))?;
         if n == 0 {
-            return Err(CommandError::new("AcpClosed", "ACP 세션이 핸드셰이크 중 종료되었습니다."));
+            return Err(CommandError::new(
+                "AcpClosed",
+                "ACP 세션이 핸드셰이크 중 종료되었습니다.",
+            ));
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -178,7 +185,11 @@ fn read_until_response<R: BufRead>(
         };
         if msg.get("id").and_then(Value::as_i64) == Some(id) && msg.get("method").is_none() {
             if let Some(err) = msg.get("error") {
-                return Err(CommandError::with_details("AcpError", "ACP 오류", err.to_string()));
+                return Err(CommandError::with_details(
+                    "AcpError",
+                    "ACP 오류",
+                    err.to_string(),
+                ));
             }
             return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
         }
@@ -242,7 +253,11 @@ pub fn cancel(session: &AcpSession, session_id: &str) -> CommandResult<()> {
     }))
 }
 
-pub fn respond_permission(session: &AcpSession, request_id: Value, option_id: &str) -> CommandResult<()> {
+pub fn respond_permission(
+    session: &AcpSession,
+    request_id: Value,
+    option_id: &str,
+) -> CommandResult<()> {
     session.write(&json!({
         "jsonrpc": "2.0",
         "id": request_id,

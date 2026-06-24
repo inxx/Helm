@@ -13,6 +13,20 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
+
+// ponytail: GitHub serves avatars at github.com/<login>.png — no API call, no avatarUrl field.
+function AuthorAvatar({ login }: { login: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!login || failed) return <UserRound size={13} />;
+  return (
+    <img
+      className="pr-author-avatar"
+      src={`https://github.com/${encodeURIComponent(login)}.png?size=40`}
+      alt=""
+      onError={() => setFailed(true)}
+    />
+  );
+}
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import type { ProjectSnapshot, PullRequestSummary } from "../lib/types";
@@ -213,7 +227,7 @@ function PrRow({ pr, ko, onSelect }: { pr: PullRequestSummary; ko: boolean; onSe
         </span>
       </span>
       <StatusPill tone="muted">
-        <UserRound size={13} />
+        <AuthorAvatar login={pr.author} />
         {pr.author || "—"}
       </StatusPill>
       <StatusPill tone={review.tone}>{review.label}</StatusPill>
@@ -319,7 +333,7 @@ function PrDetail({
         <div className="pr-detail-meta">
           <StatusPill tone={state.tone}>{state.label}</StatusPill>
           <StatusPill tone="muted">
-            <UserRound size={13} />
+            <AuthorAvatar login={pr.author} />
             {pr.author || "—"}
           </StatusPill>
           <StatusPill tone={review.tone}>{review.label}</StatusPill>
