@@ -1158,29 +1158,36 @@ fn list_pull_requests(
 }
 
 #[tauri::command]
-fn list_all_pull_requests(app: AppHandle) -> CommandResult<Vec<PullRequestSummary>> {
+async fn list_all_pull_requests(app: AppHandle) -> CommandResult<Vec<PullRequestSummary>> {
     // ponytail: sequential gh calls over ≤12 recents; parallelize if it drags.
-    let stored = load_stored_launch_state(&app)?;
-    let mut all = Vec::new();
-    for project in stored.recent_projects {
-        let mut pulls = git::pull_requests(Path::new(&project.root_path))?;
-        for pr in &mut pulls {
-            pr.project_id = project.id.clone();
-            pr.project_name = project.name.clone();
+    // gh shellouts block — keep them off the UI thread so navigating to PRs doesn't freeze.
+    tauri::async_runtime::spawn_blocking(move || {
+        let stored = load_stored_launch_state(&app)?;
+        let mut all = Vec::new();
+        for project in stored.recent_projects {
+            let mut pulls = git::pull_requests(Path::new(&project.root_path))?;
+            for pr in &mut pulls {
+                pr.project_id = project.id.clone();
+                pr.project_name = project.name.clone();
+            }
+            all.append(&mut pulls);
         }
-        all.append(&mut pulls);
-    }
-    Ok(all)
+        Ok(all)
+    })
+    .await
+    .map_err(|err| CommandError::io("PR 조회 thread가 중단되었습니다.", err))?
 }
 
 #[tauri::command]
-fn pull_request_detail(
+async fn pull_request_detail(
     project_id: String,
     number: i64,
     state: State<'_, AppState>,
 ) -> CommandResult<PullRequestDetail> {
     let context = project_context(&state, &project_id)?;
-    git::pull_request_detail(&context.root_path, number)
+    tauri::async_runtime::spawn_blocking(move || git::pull_request_detail(&context.root_path, number))
+        .await
+        .map_err(|err| CommandError::io("PR 상세 조회 thread가 중단되었습니다.", err))?
 }
 
 #[tauri::command]
