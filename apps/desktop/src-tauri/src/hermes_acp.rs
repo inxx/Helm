@@ -55,8 +55,12 @@ fn hermes_bin() -> CommandResult<String> {
 /// agent's workspace. The caller stores the returned `AcpSession` in app state keyed by id.
 pub fn start_session(app: &AppHandle, cwd: Option<String>) -> CommandResult<(String, AcpSession)> {
     let bin = hermes_bin()?;
+    // Scope the agent's workspace at the OS level too — Hermes' file tools resolve relative to
+    // the process cwd, so the ACP session/new cwd param alone leaves grep/glob/read in the wrong dir.
+    let workspace = cwd.clone().unwrap_or_else(|| "/tmp".to_string());
     let mut child = Command::new(&bin)
         .args(["--yolo", "acp", "--accept-hooks"])
+        .current_dir(&workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -113,7 +117,7 @@ pub fn start_session(app: &AppHandle, cwd: Option<String>) -> CommandResult<(Str
     write(
         2,
         "session/new",
-        json!({ "cwd": cwd.unwrap_or_else(|| "/tmp".to_string()), "mcpServers": [] }),
+        json!({ "cwd": workspace, "mcpServers": [] }),
     )?;
     let new_result = read_until_response(&mut reader, 2, app, "init")?;
     let session_id = new_result
