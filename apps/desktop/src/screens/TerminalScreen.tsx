@@ -557,7 +557,7 @@ export const TerminalScreen = memo(function TerminalScreen({
       convertEol: true,
       cursorBlink: true,
       fontFamily:
-        '"Berkeley Mono", "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace',
+        '"JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace',
       fontSize: 12,
       lineHeight: 1.35,
       scrollback: 6000,

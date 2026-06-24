@@ -42,7 +42,7 @@
   --font-sans:
     Inter, "Pretendard Variable", "Pretendard", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono:
-    "Berkeley Mono", "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+    "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
 }
 
 :root {
