@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { GitBranch, GitPullRequest, ListChecks, MessageSquare, Settings, SquareTerminal, Ticket } from "lucide-react";
+import { GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal, Ticket } from "lucide-react";
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
@@ -8,21 +8,19 @@ import { I18nProvider, normalizeLanguage, translate, type AppLanguage, type Mess
 import { loadRecents, saveRecents, upsertRecent, type RecentProject } from "./lib/recents";
 import type { CommandError, ProjectSnapshot } from "./lib/types";
 import { GitScreen } from "./screens/GitScreen";
-import { PrScreen } from "./screens/PrScreen";
 import { JiraScreen } from "./screens/JiraScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { SessionsScreen } from "./screens/SessionsScreen";
 import { TasksScreen } from "./screens/TasksScreen";
 import { TerminalScreen } from "./screens/TerminalScreen";
 
-type Screen = "sessions" | "tasks" | "git" | "pr" | "jira" | "terminal" | "settings";
+type Screen = "sessions" | "tasks" | "git" | "jira" | "terminal" | "settings";
 type BootStatus = "restoring" | "ready";
 
 const navItemDefinitions: Array<{ id: Screen; labelKey: MessageKey; icon: typeof MessageSquare }> = [
   { id: "sessions", labelKey: "nav.chat", icon: MessageSquare },
   { id: "tasks", labelKey: "nav.tasks", icon: ListChecks },
   { id: "git", labelKey: "nav.git", icon: GitBranch },
-  { id: "pr", labelKey: "nav.pr", icon: GitPullRequest },
   { id: "jira", labelKey: "nav.jira", icon: Ticket },
   { id: "terminal", labelKey: "nav.terminal", icon: SquareTerminal },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
@@ -303,9 +301,6 @@ export function App() {
           ) : null}
           {contentScreen === "git" ? (
             <GitScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
-          ) : null}
-          {contentScreen === "pr" ? (
-            <PrScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
           ) : null}
           {contentScreen === "jira" ? (
             <JiraScreen snapshot={snapshot} onOpenProject={() => void openProject()} />

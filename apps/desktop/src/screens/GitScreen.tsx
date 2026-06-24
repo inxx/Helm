@@ -1,10 +1,11 @@
 import type { LucideIcon } from "lucide-react";
-import { Files, GitBranch, GitCommitHorizontal, GitGraph } from "lucide-react";
+import { Files, GitBranch, GitCommitHorizontal, GitGraph, GitPullRequest } from "lucide-react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { useI18n, type AppLanguage } from "../lib/i18n";
 import { shortHash } from "../lib/status";
+import { PrScreen } from "./PrScreen";
 import type {
   GitBranchSummary,
   GitCommitSummary,
@@ -20,7 +21,7 @@ interface GitScreenProps {
   onOpenProject: () => void;
 }
 
-type GitView = "genealogy" | "changes" | "branches";
+type GitView = "genealogy" | "changes" | "branches" | "pr";
 
 type GitGraphRow =
   | {
@@ -50,6 +51,7 @@ const gitViews: Array<{ id: GitView; label: Record<AppLanguage, string>; icon: L
   { id: "genealogy", label: { ko: "History", en: "History" }, icon: GitGraph },
   { id: "changes", label: { ko: "변경", en: "Changes" }, icon: Files },
   { id: "branches", label: { ko: "Branches", en: "Branches" }, icon: GitBranch },
+  { id: "pr", label: { ko: "PR", en: "PR" }, icon: GitPullRequest },
 ];
 
 const graphLaneColors = [
@@ -211,6 +213,7 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
             language={language}
           />
         ) : null}
+        {activeView === "pr" ? <PrScreen snapshot={snapshot} onOpenProject={onOpenProject} /> : null}
       </div>
     </div>
   );
