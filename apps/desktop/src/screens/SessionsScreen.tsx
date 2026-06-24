@@ -158,6 +158,22 @@ export function SessionsScreen({
       unlisteners.forEach((un) => un());
     };
   }, [acpSessionId]);
+
+  // Orchestrator chat bubbles are project-scoped client state with no backing store. Reset them
+  // whenever the active session changes — switching, deleting, starting a new compose, or changing
+  // project — so a previous session's transcript doesn't bleed into the next one. Also abandon any
+  // in-flight conductor turn: left running it would keep streaming into the cleared transcript and
+  // could still materialize tasks for a session the user just left.
+  useEffect(() => {
+    if (orchestratorBusy && acpSessionId) {
+      void api.acpSessionCancel(acpSessionId).catch(() => {});
+      setOrchestratorBusy(false);
+    }
+    turnTextRef.current = "";
+    streamingIdRef.current = null;
+    setOrchestratorMessages([]);
+  }, [activeSessionId]);
+
   const taskById = useMemo(
     () => new Map(snapshot?.tasks.map((task) => [task.id, task]) ?? []),
     [snapshot?.tasks],
@@ -472,8 +488,8 @@ export function SessionsScreen({
   }
 
   // Delete the active work session: removes the task and (via the backend command) its runs,
-  // events, evidence, approvals, plus the on-disk git worktree and local branch. The orchestrator
-  // chat is ephemeral client state, so it clears on its own once the session is gone.
+  // events, evidence, approvals, plus the on-disk git worktree and local branch. Clearing
+  // activeSessionId below also resets the orchestrator chat bubbles via the effect above.
   async function deleteSession() {
     if (!snapshot || !activeTask || deletingSession) return;
     const proceed = window.confirm(
