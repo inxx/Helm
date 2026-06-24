@@ -290,6 +290,25 @@ export interface PullRequestSummary {
   updatedAt: string;
 }
 
+export interface PullRequestDetail {
+  body: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  commits: number;
+  labels: string[];
+  files: { path: string; additions: number; deletions: number }[];
+  comments: PullRequestComment[];
+}
+
+export interface PullRequestComment {
+  author: string;
+  body: string;
+  createdAt: string;
+  /** "comment" for issue comments, or a review state (APPROVED / CHANGES_REQUESTED / COMMENTED). */
+  kind: string;
+}
+
 export interface JiraIssueSummary {
   key: string;
   summary: string;

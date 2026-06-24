@@ -34,6 +34,7 @@ import type {
   PlanningSessionSummary,
   ProjectSettingsPatch,
   ProjectSnapshot,
+  PullRequestDetail,
   PullRequestSummary,
   RunEventSummary,
   RunnerCheckResult,
@@ -280,6 +281,9 @@ export const api = {
   },
   listAllPullRequests() {
     return invoke<PullRequestSummary[]>("list_all_pull_requests");
+  },
+  pullRequestDetail(projectId: string, number: number) {
+    return invoke<PullRequestDetail>("pull_request_detail", { projectId, number });
   },
   approvePullRequest(projectId: string, number: number) {
     return invoke<void>("approve_pull_request", { projectId, number });

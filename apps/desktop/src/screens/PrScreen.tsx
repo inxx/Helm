@@ -4,8 +4,11 @@ import {
   CheckCircle2,
   Clock3,
   ExternalLink,
+  FileDiff,
+  GitCommit,
   GitMerge,
   GitPullRequest,
+  MessageSquare,
   RefreshCw,
   Search,
   ThumbsUp,
@@ -29,7 +32,7 @@ function AuthorAvatar({ login }: { login: string }) {
 }
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
-import type { ProjectSnapshot, PullRequestSummary } from "../lib/types";
+import type { ProjectSnapshot, PullRequestDetail, PullRequestSummary } from "../lib/types";
 
 interface PrScreenProps {
   snapshot: ProjectSnapshot | null;
@@ -173,7 +176,7 @@ export function PrScreen({ snapshot, onOpenProject }: PrScreenProps) {
           <div className="git-work-table pr-cols" role="table" aria-label={ko ? "PR 목록" : "Pull request list"}>
             <div className="git-work-row git-work-head" role="row">
               <span>ID</span>
-              <span>{ko ? "제목 / 브랜치" : "Title / branch"}</span>
+              <span>{ko ? "제목 / 상태" : "Title / status"}</span>
               <span>{ko ? "작성자" : "Author"}</span>
               <span>{ko ? "리뷰" : "Review"}</span>
               <span>{ko ? "검사" : "Checks"}</span>
@@ -290,10 +293,31 @@ function PrDetail({
 }) {
   const [busy, setBusy] = useState<"approve" | "merge" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<PullRequestDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(true);
   const review = reviewView(pr.reviewDecision, ko);
   const checks = checksView(pr.checks, ko);
   const state = stateView(pr.state, ko);
   const isOpen = pr.state.toUpperCase() === "OPEN";
+
+  useEffect(() => {
+    let cancelled = false;
+    setDetailLoading(true);
+    api
+      .pullRequestDetail(pr.projectId, pr.number)
+      .then((data) => {
+        if (!cancelled) setDetail(data);
+      })
+      .catch(() => {
+        if (!cancelled) setDetail(null);
+      })
+      .finally(() => {
+        if (!cancelled) setDetailLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pr.projectId, pr.number]);
 
   async function run(action: "approve" | "merge") {
     setBusy(action);
@@ -373,9 +397,111 @@ function PrDetail({
             {ko ? "GitHub에서 열기" : "Open on GitHub"}
           </button>
         </div>
+
+        {detailLoading ? (
+          <p className="pr-detail-loading">{ko ? "상세를 불러오는 중…" : "Loading details…"}</p>
+        ) : detail ? (
+          <div className="pr-detail-body">
+            <div className="pr-detail-stats">
+              <span>
+                <FileDiff size={14} />
+                {detail.changedFiles} {ko ? "파일" : "files"}
+              </span>
+              <span className="pr-diff-add">+{detail.additions}</span>
+              <span className="pr-diff-del">−{detail.deletions}</span>
+              <span>
+                <GitCommit size={14} />
+                {detail.commits} {ko ? "커밋" : "commits"}
+              </span>
+              <span>
+                <MessageSquare size={14} />
+                {detail.comments.length} {ko ? "댓글" : "comments"}
+              </span>
+            </div>
+
+            {detail.labels.length > 0 ? (
+              <div className="pr-detail-labels">
+                {detail.labels.map((label) => (
+                  <span key={label} className="pr-label-chip">
+                    {label}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="pr-detail-section">
+              <h3>{ko ? "설명" : "Description"}</h3>
+              {detail.body.trim() ? (
+                <pre className="pr-detail-description">{detail.body.trim()}</pre>
+              ) : (
+                <p className="pr-detail-empty">{ko ? "설명이 없습니다." : "No description."}</p>
+              )}
+            </div>
+
+            {detail.files.length > 0 ? (
+              <div className="pr-detail-section">
+                <h3>
+                  {ko ? "변경된 파일" : "Changed files"} ({detail.files.length})
+                </h3>
+                <ul className="pr-file-list">
+                  {detail.files.map((file) => (
+                    <li key={file.path}>
+                      <span className="pr-file-path">{file.path}</span>
+                      <span className="pr-file-stat">
+                        <span className="pr-diff-add">+{file.additions}</span>
+                        <span className="pr-diff-del">−{file.deletions}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            <div className="pr-detail-section">
+              <h3>
+                {ko ? "대화" : "Conversation"} ({detail.comments.length})
+              </h3>
+              {detail.comments.length > 0 ? (
+                <ul className="pr-comment-thread">
+                  {detail.comments.map((comment, index) => {
+                    const tag = commentTag(comment.kind, ko);
+                    return (
+                      <li key={`${comment.author}-${comment.createdAt}-${index}`} className="pr-comment">
+                        <div className="pr-comment-head">
+                          <AuthorAvatar login={comment.author} />
+                          <strong>{comment.author || "—"}</strong>
+                          {tag ? <span className={`pr-comment-tag ${tag.tone}`}>{tag.label}</span> : null}
+                          <span className="pr-comment-date">{relativeDate(comment.createdAt)}</span>
+                        </div>
+                        {comment.body.trim() ? (
+                          <pre className="pr-comment-body">{comment.body.trim()}</pre>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p className="pr-detail-empty">{ko ? "주고받은 코멘트가 없습니다." : "No comments yet."}</p>
+              )}
+            </div>
+          </div>
+        ) : null}
       </section>
     </section>
   );
+}
+
+function commentTag(kind: string, ko: boolean): { tone: Tone; label: string } | null {
+  switch (kind) {
+    case "APPROVED":
+      return { tone: "success", label: ko ? "승인" : "Approved" };
+    case "CHANGES_REQUESTED":
+      return { tone: "danger", label: ko ? "변경 요청" : "Changes requested" };
+    case "COMMENTED":
+      return { tone: "muted", label: ko ? "리뷰" : "Review" };
+    default:
+      return null;
+  }
 }
 
 type Tone = "success" | "warning" | "danger" | "muted";

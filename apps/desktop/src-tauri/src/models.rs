@@ -197,6 +197,37 @@ pub struct PullRequestSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PullRequestDetail {
+    pub body: String,
+    pub additions: i64,
+    pub deletions: i64,
+    pub changed_files: i64,
+    pub commits: i64,
+    pub labels: Vec<String>,
+    pub files: Vec<PullRequestFile>,
+    pub comments: Vec<PullRequestComment>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestComment {
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    /// "comment" for issue comments, or a review state (APPROVED / CHANGES_REQUESTED / COMMENTED).
+    pub kind: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestFile {
+    pub path: String,
+    pub additions: i64,
+    pub deletions: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EpicSummary {
     pub id: String,
     pub project_id: String,

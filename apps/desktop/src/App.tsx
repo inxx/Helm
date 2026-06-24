@@ -1,7 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { GitBranch, ListChecks, MessageSquare, Settings, SquareTerminal, Ticket } from "lucide-react";
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AppShell } from "./components/AppShell";
 import { api } from "./lib/api";
 import { I18nProvider, normalizeLanguage, translate, type AppLanguage, type MessageKey } from "./lib/i18n";
@@ -34,9 +34,10 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
-  const [terminalMounted, setTerminalMounted] = useState(false);
+  // 방문한 화면은 마운트 상태로 유지하고 CSS로만 숨긴다 — 탭 전환 시 무거운 재마운트를
+  // 없애 전환을 즉시 처리하고(비치볼 방지), 로딩은 각 화면이 스스로 보여준다.
+  const [mounted, setMounted] = useState<Set<Screen>>(() => new Set<Screen>(["sessions"]));
   const [language, setLanguage] = useState<AppLanguage>("en");
-  const contentScreen = useDeferredValue(screen);
   const navItems = useMemo(
     () =>
       navItemDefinitions.map((item) => ({
@@ -109,9 +110,7 @@ export function App() {
   }, [snapshot?.project.id]);
 
   useEffect(() => {
-    if (screen === "terminal") {
-      setTerminalMounted(true);
-    }
+    setMounted((prev) => (prev.has(screen) ? prev : new Set(prev).add(screen)));
   }, [screen]);
 
   // 핸드오프 watcher는 외부 프로세스로 Tauri 이벤트 없이 DB를 직접 수정하므로
@@ -270,73 +269,88 @@ export function App() {
         </section>
       ) : (
         <>
-          {contentScreen === "sessions" ? (
-            <SessionsScreen
-              snapshot={snapshot}
-              selectedTaskId={selectedTaskId}
-              onSelectTask={setSelectedTaskId}
-              onOpenProject={() => void openProject()}
-              recents={recents}
-              activeProjectId={snapshot?.project.id ?? null}
-              onSwitchProject={switchProject}
-              onForgetProject={forgetProject}
-              busy={busy}
-              onGoTerminal={() => setScreen("terminal")}
-              onGoSettings={() => setScreen("settings")}
-              onRefresh={refresh}
-            />
+          {mounted.has("sessions") ? (
+            <ScreenHost active={screen === "sessions"}>
+              <SessionsScreen
+                snapshot={snapshot}
+                selectedTaskId={selectedTaskId}
+                onSelectTask={setSelectedTaskId}
+                onOpenProject={() => void openProject()}
+                recents={recents}
+                activeProjectId={snapshot?.project.id ?? null}
+                onSwitchProject={switchProject}
+                onForgetProject={forgetProject}
+                busy={busy}
+                onGoTerminal={() => setScreen("terminal")}
+                onGoSettings={() => setScreen("settings")}
+                onRefresh={refresh}
+              />
+            </ScreenHost>
           ) : null}
-          {contentScreen === "tasks" ? (
-            <TasksScreen
-              snapshot={snapshot}
-              onOpenTaskChat={(taskId) => {
-                setSelectedTaskId(taskId);
-                setScreen("sessions");
-              }}
-              onOpenProject={openProject}
-              onGoGit={() => setScreen("git")}
-              onGoSettings={() => setScreen("settings")}
-              onFocusProjectTask={focusProjectTask}
-            />
+          {mounted.has("tasks") ? (
+            <ScreenHost active={screen === "tasks"}>
+              <TasksScreen
+                snapshot={snapshot}
+                onOpenTaskChat={(taskId) => {
+                  setSelectedTaskId(taskId);
+                  setScreen("sessions");
+                }}
+                onOpenProject={openProject}
+                onGoGit={() => setScreen("git")}
+                onGoSettings={() => setScreen("settings")}
+                onFocusProjectTask={focusProjectTask}
+              />
+            </ScreenHost>
           ) : null}
-          {contentScreen === "git" ? (
-            <GitScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
+          {mounted.has("git") ? (
+            <ScreenHost active={screen === "git"}>
+              <GitScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
+            </ScreenHost>
           ) : null}
-          {contentScreen === "jira" ? (
-            <JiraScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
+          {mounted.has("jira") ? (
+            <ScreenHost active={screen === "jira"}>
+              <JiraScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
+            </ScreenHost>
           ) : null}
-          {terminalMounted ? (
-            <div
-              className={contentScreen === "terminal" ? "screen-host" : "screen-host inactive"}
-              aria-hidden={contentScreen !== "terminal"}
-            >
+          {mounted.has("terminal") ? (
+            <ScreenHost active={screen === "terminal"}>
               <TerminalScreen
                 snapshot={snapshot}
-                isActive={contentScreen === "terminal"}
+                isActive={screen === "terminal"}
                 onOpenProject={() => void openProject({ nextScreen: "terminal" })}
                 recents={recents}
                 activeProjectId={snapshot?.project.id ?? null}
                 onSwitchProject={switchProject}
               />
-            </div>
+            </ScreenHost>
           ) : null}
-          {contentScreen === "settings" ? (
-            <SettingsScreen
-              snapshot={snapshot}
-              onRefresh={refresh}
-              onOpenProject={() => void openProject()}
-              recents={recents}
-              activeProjectId={snapshot?.project.id ?? null}
-              onSwitchProject={switchProject}
-              onForgetProject={forgetProject}
-              busy={busy}
-              onLanguageChange={setLanguage}
-            />
+          {mounted.has("settings") ? (
+            <ScreenHost active={screen === "settings"}>
+              <SettingsScreen
+                snapshot={snapshot}
+                onRefresh={refresh}
+                onOpenProject={() => void openProject()}
+                recents={recents}
+                activeProjectId={snapshot?.project.id ?? null}
+                onSwitchProject={switchProject}
+                onForgetProject={forgetProject}
+                busy={busy}
+                onLanguageChange={setLanguage}
+              />
+            </ScreenHost>
           ) : null}
         </>
       )}
     </AppShell>
     </I18nProvider>
+  );
+}
+
+function ScreenHost({ active, children }: { active: boolean; children: ReactNode }) {
+  return (
+    <div className={active ? "screen-host" : "screen-host inactive"} aria-hidden={!active}>
+      {children}
+    </div>
   );
 }
 

@@ -13,7 +13,8 @@ use crate::models::{
     GitFileDiff, GitFileStatus, GitRepositoryState, JiraIssueSummary, NodeRuntimeSummary,
     OrchestratorSettings, PlannerConversationInput, PlannerConversationResult,
     PlanningMaterializationSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectContext,
-    ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, PullRequestSummary, RunEventSummary,
+    ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, PullRequestDetail, PullRequestSummary,
+    RunEventSummary,
     RunnerCheckResult, RunnerTemplateSummary, SavePlanDraftRevisionInput, SaveTerminalScriptInput,
     TaskCompletionGitSummary, TaskGraphConflictSummary, TaskGraphExportSummary, TaskSummary,
     TaskTimelineEntry, TaskWorktreeSummary, TerminalCommandResult, TerminalDirectoryEntry,
@@ -1170,6 +1171,16 @@ fn list_all_pull_requests(app: AppHandle) -> CommandResult<Vec<PullRequestSummar
         all.append(&mut pulls);
     }
     Ok(all)
+}
+
+#[tauri::command]
+fn pull_request_detail(
+    project_id: String,
+    number: i64,
+    state: State<'_, AppState>,
+) -> CommandResult<PullRequestDetail> {
+    let context = project_context(&state, &project_id)?;
+    git::pull_request_detail(&context.root_path, number)
 }
 
 #[tauri::command]
@@ -6690,6 +6701,7 @@ fn main() {
             get_local_branches,
             list_pull_requests,
             list_all_pull_requests,
+            pull_request_detail,
             approve_pull_request,
             merge_pull_request,
             list_jira_issues,

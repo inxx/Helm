@@ -1,6 +1,7 @@
 use crate::models::{
     CommandError, CommandResult, GitBranchSummary, GitCommitSummary, GitFileDiff, GitFileStatus,
-    GitGraphCell, GitRepositoryState, PullRequestSummary,
+    GitGraphCell, GitRepositoryState, PullRequestComment, PullRequestDetail, PullRequestFile,
+    PullRequestSummary,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -90,6 +91,92 @@ pub fn pull_requests(root: &Path) -> CommandResult<Vec<PullRequestSummary>> {
 
     let parsed: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap_or_default();
     Ok(parsed.iter().map(pr_from_json).collect())
+}
+
+pub fn pull_request_detail(root: &Path, number: i64) -> CommandResult<PullRequestDetail> {
+    // ponytail: one `gh pr view` for the heavy fields the list query skips.
+    let output = Command::new("gh")
+        .current_dir(root)
+        .args([
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "body,additions,deletions,changedFiles,commits,comments,reviews,labels,files",
+        ])
+        .output()
+        .map_err(|err| CommandError::io("PR 상세를 불러오지 못했습니다.", err))?;
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GhCommandFailed",
+            "PR 상세를 불러오지 못했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
+    Ok(PullRequestDetail {
+        body: value["body"].as_str().unwrap_or_default().to_string(),
+        additions: value["additions"].as_i64().unwrap_or(0),
+        deletions: value["deletions"].as_i64().unwrap_or(0),
+        changed_files: value["changedFiles"].as_i64().unwrap_or(0),
+        commits: value["commits"].as_array().map(|a| a.len() as i64).unwrap_or(0),
+        labels: value["labels"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|l| l["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        files: value["files"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|f| PullRequestFile {
+                        path: f["path"].as_str().unwrap_or_default().to_string(),
+                        additions: f["additions"].as_i64().unwrap_or(0),
+                        deletions: f["deletions"].as_i64().unwrap_or(0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        comments: pr_comment_timeline(&value),
+    })
+}
+
+// Merge issue comments and reviews into one chronological thread.
+fn pr_comment_timeline(value: &Value) -> Vec<PullRequestComment> {
+    let mut items = Vec::new();
+    if let Some(comments) = value["comments"].as_array() {
+        for c in comments {
+            items.push(PullRequestComment {
+                author: c["author"]["login"].as_str().unwrap_or_default().to_string(),
+                body: c["body"].as_str().unwrap_or_default().to_string(),
+                created_at: c["createdAt"].as_str().unwrap_or_default().to_string(),
+                kind: "comment".to_string(),
+            });
+        }
+    }
+    if let Some(reviews) = value["reviews"].as_array() {
+        for r in reviews {
+            let body = r["body"].as_str().unwrap_or_default().to_string();
+            let state = r["state"].as_str().unwrap_or_default();
+            // A bare COMMENTED review with no body carries no information — skip it.
+            if body.trim().is_empty() && state == "COMMENTED" {
+                continue;
+            }
+            items.push(PullRequestComment {
+                author: r["author"]["login"].as_str().unwrap_or_default().to_string(),
+                body,
+                created_at: r["submittedAt"].as_str().unwrap_or_default().to_string(),
+                kind: state.to_string(),
+            });
+        }
+    }
+    items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    items
 }
 
 pub fn approve_pull_request(root: &Path, number: i64) -> CommandResult<()> {

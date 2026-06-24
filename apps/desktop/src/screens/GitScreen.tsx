@@ -896,6 +896,9 @@ function IgnoredFilesList({ files, language }: { files: GitFileStatus[]; languag
   );
 }
 
+// 삭제 버튼을 숨길 보호 브랜치. ponytail: 고정 목록, 설정화는 필요해지면.
+const PROTECTED_BRANCHES = new Set(["main", "develop", "qa"]);
+
 function BranchesView({
   branches,
   projectId,
@@ -941,6 +944,7 @@ function BranchesView({
           {branches.map((branch) => {
             const isConfirming = confirmingBranch === branch.branchName;
             const isDeleting = deletingBranch === branch.branchName;
+            const isProtected = PROTECTED_BRANCHES.has(branch.branchName);
             return (
               <li className={branch.isCurrent ? "current" : ""} key={branch.branchName}>
                 <div className="git-branch-row">
@@ -955,25 +959,27 @@ function BranchesView({
                     <span>{shortHash(branch.headHash)}</span>
                     <span>{branchTrackLabel(branch)}</span>
                   </div>
-                  <button
-                    type="button"
-                    className="git-branch-delete"
-                    disabled={branch.isCurrent}
-                    title={
-                      branch.isCurrent
-                        ? language === "ko"
-                          ? "현재 브랜치는 삭제할 수 없습니다"
-                          : "Cannot delete the current branch"
-                        : language === "ko"
-                          ? "브랜치 삭제"
-                          : "Delete branch"
-                    }
-                    onClick={() =>
-                      setConfirmingBranch(isConfirming ? null : branch.branchName)
-                    }
-                  >
-                    {language === "ko" ? "삭제" : "Delete"}
-                  </button>
+                  {isProtected ? null : (
+                    <button
+                      type="button"
+                      className="git-branch-delete"
+                      disabled={branch.isCurrent}
+                      title={
+                        branch.isCurrent
+                          ? language === "ko"
+                            ? "현재 브랜치는 삭제할 수 없습니다"
+                            : "Cannot delete the current branch"
+                          : language === "ko"
+                            ? "브랜치 삭제"
+                            : "Delete branch"
+                      }
+                      onClick={() =>
+                        setConfirmingBranch(isConfirming ? null : branch.branchName)
+                      }
+                    >
+                      {language === "ko" ? "삭제" : "Delete"}
+                    </button>
+                  )}
                 </div>
                 {isConfirming ? (
                   <div className="git-branch-confirm">
