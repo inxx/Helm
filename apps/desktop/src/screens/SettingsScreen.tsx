@@ -1472,17 +1472,17 @@ export function SettingsScreen({
                     </label>
                     <button
                       className="secondary-button"
-                      disabled={!snapshot}
+                      disabled={!snapshot || (!jiraToken.trim() && !jiraTokenSet)}
                       onClick={() => void saveJiraToken()}
                       type="button"
                     >
-                      {jiraToken.trim()
+                      {!jiraToken.trim() && jiraTokenSet
                         ? language === "ko"
-                          ? "토큰 저장"
-                          : "Save token"
-                        : language === "ko"
                           ? "토큰 삭제"
-                          : "Clear token"}
+                          : "Clear token"
+                        : language === "ko"
+                          ? "토큰 저장"
+                          : "Save token"}
                     </button>
                   </div>
                   <p className="muted">
