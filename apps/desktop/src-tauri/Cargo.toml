@@ -23,3 +23,5 @@ tauri-plugin-updater = "2"
 thiserror = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+keyring = { version = "3", features = ["apple-native"] }

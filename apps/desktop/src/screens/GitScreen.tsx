@@ -1,7 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import { Files, GitBranch, GitCommitHorizontal, GitGraph } from "lucide-react";
-import type { CSSProperties } from "react";
-import { useEffect, useMemo, useState } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { useI18n, type AppLanguage } from "../lib/i18n";
 import { shortHash } from "../lib/status";
@@ -47,9 +47,9 @@ type GitGraphRow =
 type SelectableGitGraphRow = Exclude<GitGraphRow, { kind: "connector" }>;
 
 const gitViews: Array<{ id: GitView; label: Record<AppLanguage, string>; icon: LucideIcon }> = [
-  { id: "genealogy", label: { ko: "계보", en: "History" }, icon: GitGraph },
+  { id: "genealogy", label: { ko: "History", en: "History" }, icon: GitGraph },
   { id: "changes", label: { ko: "변경", en: "Changes" }, icon: Files },
-  { id: "branches", label: { ko: "브랜치", en: "Branches" }, icon: GitBranch },
+  { id: "branches", label: { ko: "Branches", en: "Branches" }, icon: GitBranch },
 ];
 
 const graphLaneColors = [
@@ -237,11 +237,45 @@ function GenealogyView({
   snapshot,
   language,
 }: GenealogyViewProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  // detail(하단) 패널 높이(px). null이면 CSS 기본값(30%) 사용.
+  const [detailHeight, setDetailHeight] = useState<number | null>(null);
+
+  const onResizeStart = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const container = containerRef.current;
+    if (!container) return;
+    const startY = event.clientY;
+    const startHeight = container.querySelector<HTMLElement>(".git-selected-panel")?.offsetHeight ?? 0;
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const onMove = (moveEvent: PointerEvent) => {
+      // 핸들을 위로 끌면 하단 패널이 커진다.
+      const next = startHeight + (startY - moveEvent.clientY);
+      const max = container.offsetHeight - 140;
+      setDetailHeight(Math.max(140, Math.min(next, max)));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, []);
+
   return (
-    <div className="git-genealogy-view">
+    <div
+      className="git-genealogy-view"
+      ref={containerRef}
+      style={
+        detailHeight === null
+          ? undefined
+          : { gridTemplateRows: `minmax(0, 1fr) 1px ${detailHeight}px` }
+      }
+    >
       <section className="git-panel git-graph-panel">
         <div className="git-panel-title">
-          <span>{language === "ko" ? "계보" : "History"}</span>
+          <span>History</span>
           <strong>{rows.length}</strong>
         </div>
         {rows.length === 0 ? (
@@ -311,6 +345,13 @@ function GenealogyView({
           </div>
         )}
       </section>
+
+      <div
+        className="git-row-resizer"
+        role="separator"
+        aria-orientation="horizontal"
+        onPointerDown={onResizeStart}
+      />
 
       <section className="git-panel git-selected-panel">
         <div className="git-panel-title">

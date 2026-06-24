@@ -23,6 +23,7 @@ import type {
   GitDiffMode,
   GitFileDiff,
   GitFileStatus,
+  JiraIssueSummary,
   EffectiveSettings,
   LaunchState,
   NodeRuntimeSummary,
@@ -33,6 +34,7 @@ import type {
   PlanningSessionSummary,
   ProjectSettingsPatch,
   ProjectSnapshot,
+  PullRequestSummary,
   RunEventSummary,
   RunnerCheckResult,
   RunnerTemplateSummary,
@@ -272,6 +274,30 @@ export const api = {
   },
   getChangedFiles(projectId: string) {
     return invoke<GitFileStatus[]>("get_changed_files", { projectId });
+  },
+  listPullRequests(projectId: string) {
+    return invoke<PullRequestSummary[]>("list_pull_requests", { projectId });
+  },
+  listAllPullRequests() {
+    return invoke<PullRequestSummary[]>("list_all_pull_requests");
+  },
+  approvePullRequest(projectId: string, number: number) {
+    return invoke<void>("approve_pull_request", { projectId, number });
+  },
+  mergePullRequest(projectId: string, number: number) {
+    return invoke<void>("merge_pull_request", { projectId, number });
+  },
+  listJiraIssues(projectId: string) {
+    return invoke<JiraIssueSummary[]>("list_jira_issues", { projectId });
+  },
+  setJiraToken(projectId: string, token: string) {
+    return invoke<void>("set_jira_token", { projectId, token });
+  },
+  jiraTokenStatus(projectId: string) {
+    return invoke<boolean>("jira_token_status", { projectId });
+  },
+  openExternal(url: string) {
+    return invoke<void>("open_external", { url });
   },
   getIgnoredFiles(projectId: string) {
     return invoke<GitFileStatus[]>("get_ignored_files", { projectId });

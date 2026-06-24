@@ -44,7 +44,7 @@ Markdown 작업 파일은 front matter를 선택적으로 지원한다.
 id: admin-bo-product-filter
 title: 상품 필터 추가
 agent: codex
-repoPath: /Users/mediquitous/Desktop/work/nova-frontend/apps/admin-bo
+repoPath: /Users/me/Desktop/work/example-app
 ---
 
 목표:
@@ -70,7 +70,7 @@ JSON 작업 파일도 지원한다.
   "id": "admin-bo-product-filter",
   "title": "상품 필터 추가",
   "agent": "codex",
-  "repoPath": "/Users/mediquitous/Desktop/work/nova-frontend/apps/admin-bo",
+  "repoPath": "/Users/me/Desktop/work/example-app",
   "prompt": "목표와 성공 기준을 포함한 Helm 실행 지시문"
 }
 ```

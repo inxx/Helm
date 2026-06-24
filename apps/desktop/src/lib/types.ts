@@ -274,9 +274,35 @@ export interface PlanningSessionDetail {
   messages: PlanningMessageSummary[];
 }
 
+export interface PullRequestSummary {
+  projectId: string;
+  projectName: string;
+  number: number;
+  title: string;
+  author: string;
+  branch: string;
+  base: string;
+  state: string;
+  isDraft: boolean;
+  reviewDecision: string;
+  checks: "passing" | "failing" | "pending" | "none" | string;
+  url: string;
+  updatedAt: string;
+}
+
+export interface JiraIssueSummary {
+  key: string;
+  summary: string;
+  status: string;
+  assignee: string;
+  url: string;
+  updatedAt: string;
+}
+
 export interface JiraConfig {
   enabled: boolean;
   siteUrl: string | null;
+  email: string | null;
   projectKey: string | null;
   epicIssueType: string | null;
   taskIssueType: string | null;

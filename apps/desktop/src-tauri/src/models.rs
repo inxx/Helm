@@ -165,6 +165,35 @@ pub struct AiModelRefreshResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct JiraIssueSummary {
+    pub key: String,
+    pub summary: String,
+    pub status: String,
+    pub assignee: String,
+    pub url: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestSummary {
+    pub project_id: String,
+    pub project_name: String,
+    pub number: i64,
+    pub title: String,
+    pub author: String,
+    pub branch: String,
+    pub base: String,
+    pub state: String,
+    pub is_draft: bool,
+    pub review_decision: String,
+    pub checks: String,
+    pub url: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EpicSummary {
     pub id: String,
     pub project_id: String,

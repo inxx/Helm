@@ -2,6 +2,7 @@ mod db;
 mod git;
 mod hermes;
 mod hermes_acp;
+mod jira;
 mod models;
 
 use crate::models::{
@@ -10,10 +11,12 @@ use crate::models::{
     AppSettings, ApprovalSummary, CommandError, CommandResult, CoordinationExportSummary,
     CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput, DecidePlanDraftInput,
     EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary, GitFileDiff, GitFileStatus,
-    GitRepositoryState, NodeRuntimeSummary, OrchestratorSettings, PlannerConversationInput,
+    GitRepositoryState, JiraIssueSummary, NodeRuntimeSummary, OrchestratorSettings,
+    PlannerConversationInput,
     PlannerConversationResult, PlanningMaterializationSummary, PlanningSessionDetail,
     PlanningSessionSummary, ProjectContext, ProjectSettingsPatch, ProjectSnapshot, ProjectSummary,
-    RunEventSummary, RunnerCheckResult, RunnerTemplateSummary, SavePlanDraftRevisionInput,
+    PullRequestSummary, RunEventSummary, RunnerCheckResult, RunnerTemplateSummary,
+    SavePlanDraftRevisionInput,
     SaveTerminalScriptInput, TaskCompletionGitSummary, TaskGraphConflictSummary,
     TaskGraphExportSummary, TaskSummary, TaskTimelineEntry, TaskWorktreeSummary,
     TerminalCommandResult, TerminalDirectoryEntry, TerminalSavedScriptSummary,
@@ -1143,6 +1146,85 @@ fn get_changed_files(
 ) -> CommandResult<Vec<GitFileStatus>> {
     let context = project_context(&state, &project_id)?;
     git::changed_files(&context.root_path)
+}
+
+#[tauri::command]
+fn list_pull_requests(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<PullRequestSummary>> {
+    let context = project_context(&state, &project_id)?;
+    git::pull_requests(&context.root_path)
+}
+
+#[tauri::command]
+fn list_all_pull_requests(app: AppHandle) -> CommandResult<Vec<PullRequestSummary>> {
+    // ponytail: sequential gh calls over ≤12 recents; parallelize if it drags.
+    let stored = load_stored_launch_state(&app)?;
+    let mut all = Vec::new();
+    for project in stored.recent_projects {
+        let mut pulls = git::pull_requests(Path::new(&project.root_path))?;
+        for pr in &mut pulls {
+            pr.project_id = project.id.clone();
+            pr.project_name = project.name.clone();
+        }
+        all.append(&mut pulls);
+    }
+    Ok(all)
+}
+
+#[tauri::command]
+fn approve_pull_request(
+    project_id: String,
+    number: i64,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let context = project_context(&state, &project_id)?;
+    git::approve_pull_request(&context.root_path, number)
+}
+
+#[tauri::command]
+fn merge_pull_request(
+    project_id: String,
+    number: i64,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let context = project_context(&state, &project_id)?;
+    git::merge_pull_request(&context.root_path, number)
+}
+
+#[tauri::command]
+fn list_jira_issues(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<JiraIssueSummary>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    let settings = db::effective_settings(&conn, &project_id)?;
+    jira::list_issues(&project_id, &settings.jira_config)
+}
+
+#[tauri::command]
+fn set_jira_token(project_id: String, token: String) -> CommandResult<()> {
+    jira::set_token(&project_id, &token)
+}
+
+#[tauri::command]
+fn jira_token_status(project_id: String) -> CommandResult<bool> {
+    jira::token_status(&project_id)
+}
+
+#[tauri::command]
+fn open_external(url: String) -> CommandResult<()> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(CommandError::new("InvalidUrl", "http(s) 링크만 열 수 있습니다."));
+    }
+    // ponytail: macOS `open`; the backend already depends on unix-only APIs.
+    Command::new("open")
+        .arg(&url)
+        .spawn()
+        .map_err(|err| CommandError::io("링크를 열지 못했습니다.", err))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -3249,7 +3331,7 @@ fn gemini_role_presets() -> Value {
             "label": label,
             "provider": "gemini",
             "commandArgs": [
-                "/Users/mediquitous/.local/bin/antigravity",
+                "antigravity",
                 "chat",
                 "--mode",
                 "agent",
@@ -3267,21 +3349,21 @@ fn gemini_ai_connections() -> Value {
             "label": "Gemini (Antigravity CLI)",
             "provider": "gemini",
             "commandArgs": [
-                "/Users/mediquitous/.local/bin/antigravity",
+                "antigravity",
                 "chat",
                 "--mode",
                 "agent",
                 "Read {contextPackPath}, follow the role contract and any Role Policy section for {roleId}, then write {summaryPath} and {resultPath} following {schemaPath}."
             ],
             "planningCommandArgs": [
-                "/Users/mediquitous/.local/bin/antigravity",
+                "antigravity",
                 "chat",
                 "--mode",
                 "ask",
                 "{planPrompt}"
             ],
             "planningMode": "native_plan",
-            "healthCheckArgs": ["/Users/mediquitous/.local/bin/antigravity", "--version"],
+            "healthCheckArgs": ["antigravity", "--version"],
             "timeoutSeconds": 1800,
             "planningTimeoutSeconds": 600,
             "planningModel": null,
@@ -3842,6 +3924,7 @@ fn inject_planning_provider_options(
 }
 
 fn normalize_planning_cli_args(args: Vec<String>, provider: Option<&str>) -> Vec<String> {
+    let args = ensure_hermes_oneshot_args(args);
     if provider != Some("codex") {
         return args;
     }
@@ -3989,6 +4072,39 @@ fn command_output_message(output: &ShellOutput) -> String {
 fn smoke_output_contains_sentinel(output: &ShellOutput) -> bool {
     output.stdout.contains(AI_CLI_SMOKE_SENTINEL) || output.stderr.contains(AI_CLI_SMOKE_SENTINEL)
 }
+
+/// Hermes takes a one-shot prompt via `-z PROMPT`; a bare positional prompt is parsed as a
+/// subcommand and fails with exit code 2. Rewrite `hermes <prompt>` to `hermes -z <prompt>`.
+fn ensure_hermes_oneshot_args(args: Vec<String>) -> Vec<String> {
+    let Some(program) = args.first() else {
+        return args;
+    };
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program);
+    if name != "hermes" || args.len() < 2 {
+        return args;
+    }
+    // Already a oneshot or an explicit subcommand invocation — leave untouched.
+    if args[1..].iter().any(|arg| arg == "-z") || HERMES_SUBCOMMANDS.contains(&args[1].as_str()) {
+        return args;
+    }
+    let mut out = args;
+    let prompt_idx = out.len() - 1; // prompt is the trailing positional
+    out.insert(prompt_idx, "-z".to_string());
+    out
+}
+
+const HERMES_SUBCOMMANDS: &[&str] = &[
+    "chat", "model", "fallback", "secrets", "migrate", "gateway", "proxy", "lsp", "setup",
+    "postinstall", "whatsapp", "whatsapp-cloud", "slack", "send", "login", "logout", "auth",
+    "status", "cron", "webhook", "portal", "kanban", "hooks", "doctor", "security", "dump",
+    "debug", "backup", "checkpoints", "import", "config", "pairing", "skills", "bundles",
+    "plugins", "curator", "memory", "tools", "computer-use", "mcp", "sessions", "insights",
+    "claw", "version", "update", "uninstall", "acp", "profile", "completion", "dashboard",
+    "desktop", "gui", "logs", "prompt-size",
+];
 
 fn is_antigravity_chat_command(command: &[String]) -> bool {
     let Some(program) = command.first() else {
@@ -6269,6 +6385,37 @@ fn truncate_output(value: String) -> String {
 mod tests {
     use super::*;
 
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn hermes_oneshot_rewrite() {
+        // bare positional prompt -> -z prompt
+        assert_eq!(
+            ensure_hermes_oneshot_args(v(&["hermes", "do a thing"])),
+            v(&["hermes", "-z", "do a thing"])
+        );
+        // works with absolute path and leading static flags
+        assert_eq!(
+            ensure_hermes_oneshot_args(v(&["/x/hermes", "--safe-mode", "prompt"])),
+            v(&["/x/hermes", "--safe-mode", "-z", "prompt"])
+        );
+        // already explicit -z, subcommand invocation, and non-hermes left untouched
+        assert_eq!(
+            ensure_hermes_oneshot_args(v(&["hermes", "-z", "p"])),
+            v(&["hermes", "-z", "p"])
+        );
+        assert_eq!(
+            ensure_hermes_oneshot_args(v(&["hermes", "chat"])),
+            v(&["hermes", "chat"])
+        );
+        assert_eq!(
+            ensure_hermes_oneshot_args(v(&["codex", "exec", "p"])),
+            v(&["codex", "exec", "p"])
+        );
+    }
+
     fn shell_output(stdout: &str, stderr: &str, exit_code: i32) -> ShellOutput {
         ShellOutput {
             stdout: stdout.to_string(),
@@ -6465,6 +6612,14 @@ fn main() {
             list_audit_logs,
             get_repository_state,
             get_local_branches,
+            list_pull_requests,
+            list_all_pull_requests,
+            approve_pull_request,
+            merge_pull_request,
+            list_jira_issues,
+            set_jira_token,
+            jira_token_status,
+            open_external,
             get_recent_commits,
             get_changed_files,
             get_ignored_files,

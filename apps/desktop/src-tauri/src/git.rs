@@ -1,7 +1,8 @@
 use crate::models::{
     CommandError, CommandResult, GitBranchSummary, GitCommitSummary, GitFileDiff, GitFileStatus,
-    GitGraphCell, GitRepositoryState,
+    GitGraphCell, GitRepositoryState, PullRequestSummary,
 };
+use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -69,6 +70,98 @@ pub fn resolve_git_root(path: &Path) -> CommandResult<PathBuf> {
     }
 
     Ok(PathBuf::from(root))
+}
+
+pub fn pull_requests(root: &Path) -> CommandResult<Vec<PullRequestSummary>> {
+    // ponytail: reuse the already-authed `gh` CLI instead of an in-app GitHub client.
+    let output = Command::new("gh")
+        .current_dir(root)
+        .args([
+            "pr", "list", "--state", "all", "--limit", "50", "--json",
+            "number,title,author,headRefName,baseRefName,state,isDraft,reviewDecision,statusCheckRollup,url,updatedAt",
+        ])
+        .output();
+
+    // No gh, no GitHub remote, or not authed -> empty list; the screen renders its empty state.
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        _ => return Ok(Vec::new()),
+    };
+
+    let parsed: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap_or_default();
+    Ok(parsed.iter().map(pr_from_json).collect())
+}
+
+pub fn approve_pull_request(root: &Path, number: i64) -> CommandResult<()> {
+    gh_pr_action(root, &["pr", "review", &number.to_string(), "--approve"], "PR 승인에 실패했습니다.")
+}
+
+pub fn merge_pull_request(root: &Path, number: i64) -> CommandResult<()> {
+    gh_pr_action(root, &["pr", "merge", &number.to_string(), "--merge"], "PR 머지에 실패했습니다.")
+}
+
+fn gh_pr_action(root: &Path, args: &[&str], failure: &str) -> CommandResult<()> {
+    let output = Command::new("gh")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|err| CommandError::io(failure, err))?;
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GhCommandFailed",
+            failure,
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    Ok(())
+}
+
+fn pr_from_json(value: &Value) -> PullRequestSummary {
+    PullRequestSummary {
+        project_id: String::new(),
+        project_name: String::new(),
+        number: value["number"].as_i64().unwrap_or(0),
+        title: value["title"].as_str().unwrap_or_default().to_string(),
+        author: value["author"]["login"].as_str().unwrap_or_default().to_string(),
+        branch: value["headRefName"].as_str().unwrap_or_default().to_string(),
+        base: value["baseRefName"].as_str().unwrap_or_default().to_string(),
+        state: value["state"].as_str().unwrap_or("OPEN").to_string(),
+        is_draft: value["isDraft"].as_bool().unwrap_or(false),
+        review_decision: value["reviewDecision"].as_str().unwrap_or_default().to_string(),
+        checks: check_rollup_state(&value["statusCheckRollup"]),
+        url: value["url"].as_str().unwrap_or_default().to_string(),
+        updated_at: value["updatedAt"].as_str().unwrap_or_default().to_string(),
+    }
+}
+
+fn check_rollup_state(value: &Value) -> String {
+    let Some(items) = value.as_array() else {
+        return "none".to_string();
+    };
+    if items.is_empty() {
+        return "none".to_string();
+    }
+    let mut pending = false;
+    for item in items {
+        let conclusion = item["conclusion"].as_str().unwrap_or_default();
+        let status = item["status"].as_str().unwrap_or_default();
+        let state = item["state"].as_str().unwrap_or_default(); // legacy commit-status checks
+        if matches!(
+            conclusion,
+            "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ERROR" | "STARTUP_FAILURE"
+        ) || matches!(state, "FAILURE" | "ERROR")
+        {
+            return "failing".to_string();
+        }
+        if (!status.is_empty() && status != "COMPLETED") || state == "PENDING" {
+            pending = true;
+        }
+    }
+    if pending {
+        "pending".to_string()
+    } else {
+        "passing".to_string()
+    }
 }
 
 pub fn repository_state(root: &Path) -> CommandResult<GitRepositoryState> {

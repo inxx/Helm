@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && node scripts/vite-build.mjs",
+    "build": "tsc --noEmit && vite build",
     "test": "node --test --experimental-strip-types src/lib/*.test.ts",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"

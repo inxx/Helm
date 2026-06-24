@@ -15,14 +15,15 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const helmRoot = resolve(here, "..");
 
-const VAULT = "/Users/mediquitous/Documents/Obsidian Vault/Claude";
-const templatePath = join(VAULT, "templates", "Session-Template.md");
-
 const args = parseArgs(process.argv.slice(2));
+const VAULT =
+  args.vault ?? process.env.HELM_OBSIDIAN_VAULT ?? join(homedir(), "Documents", "Obsidian Vault");
+const templatePath = join(VAULT, "templates", "Session-Template.md");
 const reportsPath = resolve(args.reports ?? join(helmRoot, ".helm", "outbox", "reports"));
 const statePath = resolve(args.state ?? join(helmRoot, ".helm", "outbox", ".obsidian-sync.json"));
 const projectsRoot = join(VAULT, "projects");
@@ -328,6 +329,8 @@ function parseArgs(argv) {
     else if (arg?.startsWith("--reports=")) parsed.reports = arg.slice("--reports=".length);
     else if (arg === "--state") parsed.state = argv[++i];
     else if (arg?.startsWith("--state=")) parsed.state = arg.slice("--state=".length);
+    else if (arg === "--vault") parsed.vault = argv[++i];
+    else if (arg?.startsWith("--vault=")) parsed.vault = arg.slice("--vault=".length);
   }
   return parsed;
 }

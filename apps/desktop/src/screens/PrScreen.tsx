@@ -1,0 +1,392 @@
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  Clock3,
+  ExternalLink,
+  GitMerge,
+  GitPullRequest,
+  RefreshCw,
+  Search,
+  ThumbsUp,
+  UserRound,
+} from "lucide-react";
+import type { ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { api } from "../lib/api";
+import { useI18n } from "../lib/i18n";
+import type { ProjectSnapshot, PullRequestSummary } from "../lib/types";
+
+interface PrScreenProps {
+  snapshot: ProjectSnapshot | null;
+  onOpenProject: () => void;
+}
+
+export function PrScreen({ snapshot, onOpenProject }: PrScreenProps) {
+  const { language } = useI18n();
+  const ko = language === "ko";
+  const [pulls, setPulls] = useState<PullRequestSummary[]>([]);
+  const [search, setSearch] = useState("");
+  const [projectFilter, setProjectFilter] = useState("all");
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [selected, setSelected] = useState<PullRequestSummary | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!snapshot) {
+      setPulls([]);
+      setLoadError(null);
+      return;
+    }
+    setLoading(true);
+    setLoadError(null);
+    api
+      .listAllPullRequests()
+      .then((rows) => {
+        if (cancelled) return;
+        setPulls(rows);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setLoadError(messageFromError(error, ko ? "PR을 불러오지 못했습니다." : "Failed to load pull requests."));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ko, reloadKey, snapshot]);
+
+  const projects = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const pr of pulls) {
+      if (pr.projectId && !seen.has(pr.projectId)) seen.set(pr.projectId, pr.projectName);
+    }
+    return [...seen].map(([id, name]) => ({ id, name }));
+  }, [pulls]);
+
+  const filtered = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return pulls.filter((pr) => {
+      if (projectFilter !== "all" && pr.projectId !== projectFilter) return false;
+      if (!needle) return true;
+      return [`#${pr.number}`, pr.title, pr.branch, pr.author, pr.projectName].some((value) =>
+        value.toLowerCase().includes(needle),
+      );
+    });
+  }, [pulls, search, projectFilter]);
+
+  if (!snapshot) {
+    return (
+      <section className="empty-state">
+        <h2>{ko ? "프로젝트 없음" : "No project open"}</h2>
+        <p>{ko ? "프로젝트를 열면 GitHub PR이 표시됩니다." : "Open a project to see GitHub pull requests."}</p>
+        <button className="primary-button" onClick={onOpenProject} type="button">
+          {ko ? "프로젝트 열기" : "Open project"}
+        </button>
+      </section>
+    );
+  }
+
+  if (selected) {
+    return (
+      <PrDetail
+        pr={selected}
+        ko={ko}
+        onBack={() => setSelected(null)}
+        onDone={() => {
+          setSelected(null);
+          setReloadKey((key) => key + 1);
+        }}
+      />
+    );
+  }
+
+  return (
+    <section className="issues-layout">
+      <header className="issues-header">
+        <div>
+          <h2>{ko ? "Pull Requests" : "Pull Requests"}</h2>
+          <p>
+            {ko
+              ? `전체 프로젝트 · gh CLI로 가져온 열린 PR`
+              : `All projects · open PRs via gh CLI`}
+          </p>
+        </div>
+      </header>
+
+      {loadError ? <div className="git-inline-error">{loadError}</div> : null}
+
+      <section className="git-work-dashboard">
+        <div className="git-work-toolbar">
+          <label className="git-work-search">
+            <Search size={15} />
+            <input
+              aria-label={ko ? "PR 검색" : "Search PRs"}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder={ko ? "제목, 브랜치, 작성자" : "title, branch, author"}
+              value={search}
+            />
+          </label>
+          <select
+            aria-label={ko ? "프로젝트 필터" : "Filter by project"}
+            className="git-work-filter"
+            onChange={(event) => setProjectFilter(event.target.value)}
+            value={projectFilter}
+          >
+            <option value="all">{ko ? "전체 프로젝트" : "All projects"}</option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+          <div className="git-work-actions">
+            <button
+              onClick={() => setReloadKey((key) => key + 1)}
+              title={ko ? "새로고침" : "Refresh"}
+              type="button"
+            >
+              <RefreshCw size={15} />
+            </button>
+          </div>
+        </div>
+
+        <div className="git-work-table-shell">
+          <div className="git-work-table pr-cols" role="table" aria-label={ko ? "PR 목록" : "Pull request list"}>
+            <div className="git-work-row git-work-head" role="row">
+              <span>ID</span>
+              <span>{ko ? "제목 / 브랜치" : "Title / branch"}</span>
+              <span>{ko ? "작성자" : "Author"}</span>
+              <span>{ko ? "리뷰" : "Review"}</span>
+              <span>{ko ? "검사" : "Checks"}</span>
+              <span>{ko ? "업데이트됨" : "Updated"}</span>
+            </div>
+            {filtered.length === 0 ? (
+              <div className="git-work-empty">
+                {loading
+                  ? ko
+                    ? "불러오는 중…"
+                    : "Loading…"
+                  : ko
+                    ? "열린 PR이 없거나 GitHub에 연결되지 않았습니다."
+                    : "No open PRs, or this repo is not connected to GitHub."}
+              </div>
+            ) : (
+              filtered.map((pr) => (
+                <PrRow
+                  key={`${pr.projectId}#${pr.number}`}
+                  pr={pr}
+                  ko={ko}
+                  onSelect={() => setSelected(pr)}
+                />
+              ))
+            )}
+          </div>
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function PrRow({ pr, ko, onSelect }: { pr: PullRequestSummary; ko: boolean; onSelect: () => void }) {
+  const review = reviewView(pr.reviewDecision, ko);
+  const checks = checksView(pr.checks, ko);
+  const state = stateView(pr.state, ko);
+  return (
+    <div className="git-work-row git-work-row-link" role="row" onClick={onSelect}>
+      <span className="git-pr-id">
+        <GitPullRequest size={13} />#{pr.number}
+      </span>
+      <span className="git-work-titlecell">
+        <strong>
+          {pr.projectName ? <em className="pr-project-tag">{pr.projectName}</em> : null}
+          {pr.title}
+        </strong>
+        <span>
+          <em className={`pr-state-tag ${state.tone}`}>{state.label}</em>
+          {pr.branch} → {pr.base}
+          {pr.isDraft ? <i className="draft">{ko ? "초안" : "draft"}</i> : null}
+        </span>
+      </span>
+      <StatusPill tone="muted">
+        <UserRound size={13} />
+        {pr.author || "—"}
+      </StatusPill>
+      <StatusPill tone={review.tone}>{review.label}</StatusPill>
+      <StatusPill tone={checks.tone}>
+        {checks.icon}
+        {checks.label}
+      </StatusPill>
+      <span className="git-work-updated">{relativeDate(pr.updatedAt)}</span>
+    </div>
+  );
+}
+
+function reviewView(decision: string, ko: boolean): { tone: Tone; label: string } {
+  switch (decision) {
+    case "APPROVED":
+      return { tone: "success", label: ko ? "승인됨" : "Approved" };
+    case "CHANGES_REQUESTED":
+      return { tone: "danger", label: ko ? "변경 요청" : "Changes requested" };
+    case "REVIEW_REQUIRED":
+      return { tone: "warning", label: ko ? "리뷰 필요" : "Review required" };
+    default:
+      return { tone: "muted", label: ko ? "리뷰 없음" : "No review" };
+  }
+}
+
+function checksView(checks: string, ko: boolean): { tone: Tone; label: string; icon: ReactNode } {
+  switch (checks) {
+    case "passing":
+      return { tone: "success", label: ko ? "통과" : "Passing", icon: <CheckCircle2 size={13} /> };
+    case "failing":
+      return { tone: "danger", label: ko ? "실패" : "Failing", icon: <AlertTriangle size={13} /> };
+    case "pending":
+      return { tone: "warning", label: ko ? "진행 중" : "Pending", icon: <Clock3 size={13} /> };
+    default:
+      return { tone: "muted", label: ko ? "검사 없음" : "No checks", icon: <Clock3 size={13} /> };
+  }
+}
+
+function stateView(state: string, ko: boolean): { tone: Tone; label: string } {
+  switch (state.toUpperCase()) {
+    case "MERGED":
+      return { tone: "success", label: ko ? "머지됨" : "Merged" };
+    case "CLOSED":
+      return { tone: "danger", label: ko ? "닫힘" : "Closed" };
+    default:
+      return { tone: "warning", label: ko ? "열림" : "Open" };
+  }
+}
+
+function PrDetail({
+  pr,
+  ko,
+  onBack,
+  onDone,
+}: {
+  pr: PullRequestSummary;
+  ko: boolean;
+  onBack: () => void;
+  onDone: () => void;
+}) {
+  const [busy, setBusy] = useState<"approve" | "merge" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const review = reviewView(pr.reviewDecision, ko);
+  const checks = checksView(pr.checks, ko);
+  const state = stateView(pr.state, ko);
+  const isOpen = pr.state.toUpperCase() === "OPEN";
+
+  async function run(action: "approve" | "merge") {
+    setBusy(action);
+    setError(null);
+    try {
+      if (action === "approve") await api.approvePullRequest(pr.projectId, pr.number);
+      else await api.mergePullRequest(pr.projectId, pr.number);
+      onDone();
+    } catch (err) {
+      setError(messageFromError(err, ko ? "작업에 실패했습니다." : "Action failed."));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section className="issues-layout">
+      <header className="issues-header">
+        <div>
+          <button className="link-back" onClick={onBack} type="button">
+            <ArrowLeft size={15} />
+            {ko ? "목록" : "Back"}
+          </button>
+          <h2>
+            <GitPullRequest size={18} />#{pr.number} {pr.title}
+          </h2>
+          <p>
+            {pr.projectName} · {pr.branch} → {pr.base}
+            {pr.isDraft ? <i className="draft">{ko ? "초안" : "draft"}</i> : null}
+          </p>
+        </div>
+      </header>
+
+      {error ? <div className="git-inline-error">{error}</div> : null}
+
+      <section className="git-work-dashboard pr-detail-card">
+        <div className="pr-detail-meta">
+          <StatusPill tone={state.tone}>{state.label}</StatusPill>
+          <StatusPill tone="muted">
+            <UserRound size={13} />
+            {pr.author || "—"}
+          </StatusPill>
+          <StatusPill tone={review.tone}>{review.label}</StatusPill>
+          <StatusPill tone={checks.tone}>
+            {checks.icon}
+            {checks.label}
+          </StatusPill>
+          <span className="git-work-updated">{relativeDate(pr.updatedAt)}</span>
+        </div>
+
+        <div className="pr-detail-actions">
+          <button
+            className="primary-button"
+            disabled={!isOpen || busy !== null}
+            onClick={() => void run("approve")}
+            type="button"
+          >
+            <ThumbsUp size={15} />
+            {busy === "approve" ? (ko ? "승인 중…" : "Approving…") : ko ? "승인" : "Approve"}
+          </button>
+          <button
+            className="primary-button"
+            disabled={!isOpen || busy !== null}
+            onClick={() => void run("merge")}
+            type="button"
+          >
+            <GitMerge size={15} />
+            {busy === "merge" ? (ko ? "머지 중…" : "Merging…") : ko ? "메인 머지" : "Merge"}
+          </button>
+          <button
+            className="ghost-button"
+            disabled={!pr.url}
+            onClick={() => pr.url && void api.openExternal(pr.url)}
+            type="button"
+          >
+            <ExternalLink size={15} />
+            {ko ? "GitHub에서 열기" : "Open on GitHub"}
+          </button>
+        </div>
+      </section>
+    </section>
+  );
+}
+
+type Tone = "success" | "warning" | "danger" | "muted";
+
+function StatusPill({ children, tone }: { children: ReactNode; tone: Tone }) {
+  return <span className={`git-status-pill ${tone}`}>{children}</span>;
+}
+
+function relativeDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value || "—";
+  const elapsedMs = Date.now() - date.getTime();
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (elapsedMs < hour) return `${Math.max(1, Math.round(elapsedMs / minute))}m ago`;
+  if (elapsedMs < day) return `${Math.round(elapsedMs / hour)}h ago`;
+  return `${Math.round(elapsedMs / day)}d ago`;
+}
+
+function messageFromError(error: unknown, fallback: string): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return fallback;
+}

@@ -119,6 +119,8 @@ export function SettingsScreen({
   const [rolePolicies, setRolePolicies] = useState<RolePolicy[]>([]);
   const [conductorConfig, setConductorConfig] = useState<ConductorConfig>(emptyConductorConfig());
   const [jiraConfig, setJiraConfig] = useState<JiraConfig>(emptyJiraConfig());
+  const [jiraToken, setJiraToken] = useState("");
+  const [jiraTokenSet, setJiraTokenSet] = useState(false);
   const [obsidianVaultPath, setObsidianVaultPath] = useState("");
   const [obsidianArtifactPath, setObsidianArtifactPath] = useState("");
   const [busy, setBusy] = useState(false);
@@ -179,6 +181,11 @@ export function SettingsScreen({
     setConnectionCheckBusyId(null);
     setModelRefreshes({});
     setProjectRuns([]);
+    setJiraToken("");
+    void api
+      .jiraTokenStatus(snapshot.project.id)
+      .then(setJiraTokenSet)
+      .catch(() => setJiraTokenSet(false));
   }, [snapshot]);
 
   useEffect(() => {
@@ -732,6 +739,27 @@ export function SettingsScreen({
 
   function updateJiraConfig(patch: Partial<JiraConfig>) {
     setJiraConfig((current) => normalizeJiraConfig({ ...current, ...patch }));
+  }
+
+  async function saveJiraToken() {
+    if (!snapshot) return;
+    try {
+      await api.setJiraToken(snapshot.project.id, jiraToken);
+      const set = jiraToken.trim().length > 0;
+      setJiraTokenSet(set);
+      setJiraToken("");
+      showToast({
+        tone: "success",
+        title: set ? "Jira 토큰 저장됨" : "Jira 토큰 삭제됨",
+        description: set ? "API 토큰을 OS 키체인에 저장했습니다." : "키체인에서 토큰을 제거했습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "Jira 토큰 저장 실패",
+        description: error instanceof Error ? error.message : "토큰 저장에 실패했습니다.",
+      });
+    }
   }
 
   const activeMeta = visibleCategories.find((category) => category.id === activeCategory) ?? CATEGORIES[0];
@@ -1366,39 +1394,102 @@ export function SettingsScreen({
                   <span className="toggle-switch-track" aria-hidden />
                   <span className="toggle-switch-label">{language === "ko" ? "Jira 연동 정보 사용" : "Use Jira integration info"}</span>
                 </label>
-                <div className="connection-fields">
-                  <label>
-                    <span>Site URL</span>
-                    <input
-                      placeholder="https://nugu.atlassian.net"
-                      value={jiraConfig.siteUrl ?? ""}
-                      onChange={(event) => updateJiraConfig({ siteUrl: nullableText(event.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    <span>Project key</span>
-                    <input
-                      placeholder={language === "ko" ? "예: NC" : "Ex: NC"}
-                      value={jiraConfig.projectKey ?? ""}
-                      onChange={(event) => updateJiraConfig({ projectKey: normalizeJiraProjectKey(event.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    <span>Epic issue type</span>
-                    <input
-                      placeholder="Epic"
-                      value={jiraConfig.epicIssueType ?? ""}
-                      onChange={(event) => updateJiraConfig({ epicIssueType: nullableText(event.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    <span>Task issue type</span>
-                    <input
-                      placeholder="Task"
-                      value={jiraConfig.taskIssueType ?? ""}
-                      onChange={(event) => updateJiraConfig({ taskIssueType: nullableText(event.target.value) })}
-                    />
-                  </label>
+
+                <div className="jira-fieldset">
+                  <h4 className="jira-fieldset-title">{language === "ko" ? "연결" : "Connection"}</h4>
+                  <div className="connection-fields">
+                    <label>
+                      <span>Site URL</span>
+                      <input
+                        placeholder="https://your-domain.atlassian.net"
+                        value={jiraConfig.siteUrl ?? ""}
+                        onChange={(event) => updateJiraConfig({ siteUrl: nullableText(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      <span>{language === "ko" ? "계정 이메일" : "Account email"}</span>
+                      <input
+                        placeholder="you@example.com"
+                        value={jiraConfig.email ?? ""}
+                        onChange={(event) => updateJiraConfig({ email: nullableText(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      <span>Project key</span>
+                      <input
+                        placeholder={language === "ko" ? "예: NC" : "Ex: NC"}
+                        value={jiraConfig.projectKey ?? ""}
+                        onChange={(event) => updateJiraConfig({ projectKey: normalizeJiraProjectKey(event.target.value) })}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="jira-fieldset">
+                  <h4 className="jira-fieldset-title">{language === "ko" ? "이슈 타입" : "Issue types"}</h4>
+                  <div className="connection-fields">
+                    <label>
+                      <span>Epic issue type</span>
+                      <input
+                        placeholder="Epic"
+                        value={jiraConfig.epicIssueType ?? ""}
+                        onChange={(event) => updateJiraConfig({ epicIssueType: nullableText(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      <span>Task issue type</span>
+                      <input
+                        placeholder="Task"
+                        value={jiraConfig.taskIssueType ?? ""}
+                        onChange={(event) => updateJiraConfig({ taskIssueType: nullableText(event.target.value) })}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="jira-fieldset">
+                  <h4 className="jira-fieldset-title">{language === "ko" ? "인증" : "Authentication"}</h4>
+                  <div className="jira-token-row">
+                    <label className="jira-token-field">
+                      <span>
+                        {language === "ko" ? "API 토큰" : "API token"}
+                        {jiraTokenSet ? (
+                          <em className="muted"> · {language === "ko" ? "저장됨" : "saved"}</em>
+                        ) : null}
+                      </span>
+                      <input
+                        type="password"
+                        placeholder={
+                          jiraTokenSet
+                            ? language === "ko"
+                              ? "교체하려면 새 토큰 입력"
+                              : "enter a new token to replace"
+                            : "id.atlassian.com → API token"
+                        }
+                        value={jiraToken}
+                        onChange={(event) => setJiraToken(event.target.value)}
+                      />
+                    </label>
+                    <button
+                      className="secondary-button"
+                      disabled={!snapshot}
+                      onClick={() => void saveJiraToken()}
+                      type="button"
+                    >
+                      {jiraToken.trim()
+                        ? language === "ko"
+                          ? "토큰 저장"
+                          : "Save token"
+                        : language === "ko"
+                          ? "토큰 삭제"
+                          : "Clear token"}
+                    </button>
+                  </div>
+                  <p className="muted">
+                    {language === "ko"
+                      ? "API 토큰은 OS 키체인에 프로젝트별로 저장되며 설정 파일에 평문으로 남지 않습니다."
+                      : "The API token is stored per-project in the OS keychain, never in plaintext settings."}
+                  </p>
                 </div>
                 <p className="muted">
                   {language === "ko" ? "Host runner에는 " : "Passed to host runners as "}
@@ -1463,7 +1554,7 @@ export function SettingsScreen({
                 <label className="settings-field">
                   <span>Obsidian vault path</span>
                   <input
-                    placeholder="/Users/mediquitous/Documents/Obsidian Vault/Claude"
+                    placeholder="/Users/me/Documents/Obsidian Vault"
                     value={obsidianVaultPath}
                     onChange={(event) => setObsidianVaultPath(event.target.value)}
                   />
@@ -1919,6 +2010,7 @@ function emptyJiraConfig(): JiraConfig {
   return {
     enabled: false,
     siteUrl: null,
+    email: null,
     projectKey: null,
     epicIssueType: "Epic",
     taskIssueType: "Task",
@@ -1931,6 +2023,7 @@ function normalizeJiraConfig(value: unknown): JiraConfig {
   return {
     enabled: typeof config.enabled === "boolean" ? config.enabled : false,
     siteUrl: typeof config.siteUrl === "string" && config.siteUrl.trim() ? config.siteUrl.trim() : null,
+    email: typeof config.email === "string" && config.email.trim() ? config.email.trim() : null,
     projectKey:
       typeof config.projectKey === "string" && config.projectKey.trim()
         ? normalizeJiraProjectKey(config.projectKey)
@@ -2266,7 +2359,7 @@ function firstNonEmpty(values: Array<string | null | undefined>): string | null 
 function defaultCliPath(provider: string): string {
   if (provider === "codex") return "codex";
   if (provider === "claude") return "claude";
-  if (provider === "gemini") return "/Users/mediquitous/.local/bin/antigravity";
+  if (provider === "gemini") return "antigravity";
   if (provider === "fixture") return "node";
   return "llm";
 }
@@ -2385,7 +2478,7 @@ function claudeConnection(cliPath = "claude"): AiConnection {
   };
 }
 
-function geminiConnection(cliPath = "/Users/mediquitous/.local/bin/antigravity"): AiConnection {
+function geminiConnection(cliPath = "antigravity"): AiConnection {
   return {
     id: "gemini-local",
     label: "Gemini (Antigravity CLI)",

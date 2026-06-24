@@ -6,7 +6,8 @@ export type MessageKey =
   | "nav.chat"
   | "nav.tasks"
   | "nav.git"
-  | "nav.issues"
+  | "nav.pr"
+  | "nav.jira"
   | "nav.terminal"
   | "nav.hermes"
   | "nav.settings"
@@ -186,7 +187,8 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "nav.chat": "Chat",
     "nav.tasks": "Tasks",
     "nav.git": "Git",
-    "nav.issues": "Issues",
+    "nav.pr": "Pull Requests",
+    "nav.jira": "Jira",
     "nav.terminal": "Terminal",
     "nav.hermes": "Hermes",
     "nav.settings": "Settings",
@@ -362,10 +364,11 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "sessions.emptyChat.description": "Send a new task instruction or select a session to inspect detailed progress.",
   },
   ko: {
-    "nav.chat": "채팅",
-    "nav.tasks": "태스크",
-    "nav.git": "깃",
-    "nav.issues": "이슈",
+    "nav.chat": "대화",
+    "nav.tasks": "보드",
+    "nav.git": "git",
+    "nav.pr": "PR",
+    "nav.jira": "jira",
     "nav.terminal": "터미널",
     "nav.hermes": "Hermes",
     "nav.settings": "설정",
