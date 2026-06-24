@@ -9112,10 +9112,14 @@ fn role_dossier_heading(role_id: &str) -> String {
 }
 
 fn role_dossier_contract_markdown(role_id: &str) -> String {
-    match role_id {
+    // 상류 dossier는 Context Pack에 6000자로 truncate되어 다음 역할에 주입된다.
+    // 그래서 모든 역할은 핵심 핸드오프를 문서 맨 위에 먼저 쓰도록 강제한다.
+    let handoff = "- 최상단에 `## 다음 역할 핸드오프` 섹션을 먼저 쓴다: 다음 역할이 알아야 할 핵심 3~5줄(현재 상태, 핵심 판정/결정, 남은 위험, 다음 행동). 상류 dossier는 6000자에서 잘리므로 핵심을 맨 위에 둔다.";
+    let body = match role_id {
         "planner" => vec![
             "- 파일명: `plan.md`",
             "- 포함: 목표, 범위, 제외 범위, 실행 단계, acceptance criteria, 검증 계획, 위험, open questions",
+            "- scope는 목록으로 고정한다: `touched paths`(수정 허용 경로), `out-of-scope paths`(수정 금지 경로), acceptance criteria는 체크리스트로 작성해 plan_verifier가 범위 밖 변경을 객관적으로 판정할 수 있게 한다.",
             "- 금지: 승인 전 구현 지시를 확정 상태처럼 기록하지 않는다.",
         ],
         "coder" => vec![
@@ -9143,8 +9147,11 @@ fn role_dossier_contract_markdown(role_id: &str) -> String {
             "- 포함: 역할 목표, 수행한 작업, 근거, 결과, 다음 행동",
             "- 금지: structured-result.json과 충돌하는 결론을 기록하지 않는다.",
         ],
-    }
-    .join("\n")
+    };
+    std::iter::once(handoff)
+        .chain(body)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn queued_role_dossier(role_id: &str, status: &str) -> String {
