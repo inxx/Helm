@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runCommand } from "../core/process.ts";
 import { getSessionStore, listSessions, type SessionRecord } from "../session/store.ts";
 import { formatStatusEntries, readBranch, readHead, readStatus } from "../workspace/git.ts";
 
@@ -83,7 +84,19 @@ export type UiSnapshot = {
     count: number;
     tone: string;
   }[];
+  actions: UiActionRun[];
   sessions: UiSession[];
+};
+
+export type UiActionRun = {
+  id: number;
+  name: string;
+  title: string;
+  status: string;
+  conclusion: string | null;
+  branch: string;
+  createdAt: string;
+  url: string;
 };
 
 const STATIC_ROOT = join(dirname(fileURLToPath(import.meta.url)), "static");
@@ -124,8 +137,45 @@ export function createUiSnapshot(repoPath: string, now = new Date()): UiSnapshot
       { key: "ship", label: "Ship", count: totals.readyToShip, tone: totals.readyToShip > 0 ? "ok" : "muted" },
       { key: "pullRequest", label: "PR", count: totals.withPullRequest, tone: totals.withPullRequest > 0 ? "accent" : "muted" },
     ],
+    actions: readActions(repoPath),
     sessions,
   };
+}
+
+// ponytail: gh CLI 재사용 — 인증/페이지네이션은 gh가 처리. gh 없거나 실패하면 빈 배열.
+function readActions(repoPath: string): UiActionRun[] {
+  const result = runCommand(
+    "gh",
+    [
+      "run",
+      "list",
+      "--limit",
+      "10",
+      "--json",
+      "databaseId,workflowName,displayTitle,status,conclusion,headBranch,createdAt,url",
+    ],
+    { cwd: repoPath },
+  );
+
+  if (result.code !== 0) {
+    return [];
+  }
+
+  try {
+    const rows = JSON.parse(result.stdout) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: Number(row.databaseId ?? 0),
+      name: String(row.workflowName ?? "-"),
+      title: String(row.displayTitle ?? "-"),
+      status: String(row.status ?? "-"),
+      conclusion: row.conclusion ? String(row.conclusion) : null,
+      branch: String(row.headBranch ?? "-"),
+      createdAt: String(row.createdAt ?? ""),
+      url: String(row.url ?? ""),
+    }));
+  } catch {
+    return [];
+  }
 }
 
 export function startUiServer(options: UiServerOptions): Promise<UiServerHandle> {

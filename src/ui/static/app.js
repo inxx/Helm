@@ -80,6 +80,8 @@ const refs = {
   gitChangesList: $("#git-changes-list"),
   gitCommitsCount: $("#git-commits-count"),
   gitCommitsList: $("#git-commits-list"),
+  gitActionsCount: $("#git-actions-count"),
+  gitActionsList: $("#git-actions-list"),
 
   // Terminal
   terminalStatus: $("#terminal-status-output"),
@@ -569,6 +571,60 @@ function renderGit() {
       }),
     );
   }
+
+  // GitHub Actions — 배포 상태 (gh run list 기반)
+  const actions = state.snapshot.actions ?? [];
+  refs.gitActionsCount.textContent = actions.length;
+
+  if (actions.length === 0) {
+    refs.gitActionsList.replaceChildren(
+      emptyState("실행 없음", "gh로 가져온 Actions 실행이 없습니다."),
+    );
+  } else {
+    refs.gitActionsList.replaceChildren(
+      ...actions.map((run) => {
+        const row = document.createElement(run.url ? "a" : "div");
+        row.className = "action-row";
+        if (run.url) {
+          row.href = run.url;
+          row.target = "_blank";
+          row.rel = "noopener";
+        }
+
+        const dot = document.createElement("span");
+        dot.className = `action-dot ${actionTone(run)}`;
+        dot.title = run.conclusion ?? run.status;
+
+        const body = document.createElement("span");
+        body.className = "action-body";
+
+        const title = document.createElement("span");
+        title.className = "action-title";
+        title.textContent = run.name;
+        title.title = run.title;
+
+        const sub = document.createElement("span");
+        sub.className = "action-sub";
+        sub.textContent = `${run.conclusion ?? run.status} · ${run.branch}`;
+
+        body.append(title, sub);
+
+        const meta = document.createElement("span");
+        meta.className = "action-meta";
+        meta.textContent = formatDateTime(run.createdAt);
+
+        row.append(dot, body, meta);
+        return row;
+      }),
+    );
+  }
+}
+
+function actionTone(run) {
+  if (run.status !== "completed") return "running";
+  if (run.conclusion === "success") return "ok";
+  if (run.conclusion === "failure" || run.conclusion === "timed_out") return "error";
+  return "";
 }
 
 function codeClass(code) {
