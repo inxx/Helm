@@ -1,9 +1,10 @@
 import type { LucideIcon } from "lucide-react";
-import { Files, GitBranch, GitCommitHorizontal, GitGraph, GitPullRequest } from "lucide-react";
+import { ChevronDown, Files, FolderOpen, GitBranch, GitCommitHorizontal, GitGraph, GitPullRequest } from "lucide-react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { useI18n, type AppLanguage } from "../lib/i18n";
+import { shortenPath, type RecentProject } from "../lib/recents";
 import { shortHash } from "../lib/status";
 import { PrScreen } from "./PrScreen";
 import type {
@@ -19,6 +20,8 @@ import type {
 interface GitScreenProps {
   snapshot: ProjectSnapshot | null;
   onOpenProject: () => void;
+  recents: RecentProject[];
+  onSwitchProject: (projectId: string) => void;
 }
 
 type GitView = "genealogy" | "changes" | "branches" | "pr";
@@ -69,7 +72,7 @@ const graphLaneColors = [
 const worktreeGraphColorIndex = 8;
 const graphCellWidth = 10;
 
-export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
+export function GitScreen({ snapshot, onOpenProject, recents, onSwitchProject }: GitScreenProps) {
   const { language } = useI18n();
   const [activeView, setActiveView] = useState<GitView>("genealogy");
   const [branches, setBranches] = useState<GitBranchSummary[]>([]);
@@ -155,10 +158,13 @@ export function GitScreen({ snapshot, onOpenProject }: GitScreenProps) {
   return (
     <div className="git-layout">
       <header className="git-screen-header">
-        <div className="git-repo-title">
-          <h2>{snapshot.project.name}</h2>
-          <p title={snapshot.project.rootPath}>{snapshot.project.rootPath}</p>
-        </div>
+        <ProjectSwitcher
+          snapshot={snapshot}
+          recents={recents}
+          onSwitchProject={onSwitchProject}
+          onOpenProject={onOpenProject}
+          language={language}
+        />
         <div className="git-head-summary" aria-label={language === "ko" ? "저장소 상태" : "Repository status"}>
           <GitMetric label="branch" value={snapshot.repository.currentBranch ?? "detached"} />
           <GitMetric label="head" value={shortHash(snapshot.repository.head)} />
@@ -224,6 +230,81 @@ function GitMetric({ label, value }: { label: string; value: string | number }) 
     <div>
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ProjectSwitcher({
+  snapshot,
+  recents,
+  onSwitchProject,
+  onOpenProject,
+  language,
+}: {
+  snapshot: ProjectSnapshot;
+  recents: RecentProject[];
+  onSwitchProject: (projectId: string) => void;
+  onOpenProject: () => void;
+  language: AppLanguage;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  return (
+    <div className="git-repo-switcher" ref={wrapRef}>
+      <button
+        className="git-repo-title"
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="git-repo-title-text">
+          <h2>{snapshot.project.name}</h2>
+          <p title={snapshot.project.rootPath}>{snapshot.project.rootPath}</p>
+        </span>
+        <ChevronDown size={16} aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="git-repo-menu" role="menu">
+          {recents.map((project) => (
+            <button
+              key={project.id}
+              type="button"
+              role="menuitem"
+              className={project.id === snapshot.project.id ? "active" : ""}
+              onClick={() => {
+                setOpen(false);
+                if (project.id !== snapshot.project.id) onSwitchProject(project.id);
+              }}
+            >
+              <strong>{project.name}</strong>
+              <span>{shortenPath(project.rootPath)}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            role="menuitem"
+            className="git-repo-menu-open"
+            onClick={() => {
+              setOpen(false);
+              onOpenProject();
+            }}
+          >
+            <FolderOpen size={14} aria-hidden="true" />
+            <span>{language === "ko" ? "프로젝트 열기" : "Open project"}</span>
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -5152,12 +5152,103 @@ textarea {
   background: var(--surface);
 }
 
+.git-repo-switcher {
+  position: relative;
+  min-width: 0;
+  display: grid;
+}
+
 .git-repo-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 20px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.git-repo-title:hover {
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
+.git-repo-title-text {
   display: grid;
   align-content: center;
   gap: 2px;
   min-width: 0;
-  padding: 10px 20px;
+  flex: 1;
+}
+
+.git-repo-title svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.git-repo-menu {
+  position: absolute;
+  top: 100%;
+  left: 12px;
+  z-index: 20;
+  min-width: 240px;
+  max-height: 360px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.git-repo-menu button {
+  display: grid;
+  gap: 1px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.git-repo-menu button:hover {
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
+.git-repo-menu button.active {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.12));
+}
+
+.git-repo-menu button strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.git-repo-menu button span {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.git-repo-menu-open {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line) !important;
+  border-radius: 0 0 6px 6px;
+}
+
+.git-repo-menu-open span {
+  font-family: inherit !important;
+  font-size: 12px !important;
+  color: inherit !important;
 }
 
 .git-repo-title h2 {
@@ -5677,8 +5768,11 @@ textarea {
 
 .pr-detail-card {
   display: grid;
+  grid-template-rows: none;
+  align-content: start;
   gap: 18px;
   padding: 18px 20px;
+  overflow-y: auto;
 }
 
 .pr-detail-meta {
@@ -5759,18 +5853,100 @@ textarea {
 
 .pr-detail-description {
   margin: 0;
-  max-height: 320px;
-  overflow: auto;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
-  background: var(--surface-2);
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 12px;
+  background: #fff;
+  color: #1f2328;
+  font-size: 13px;
   line-height: 1.6;
-  white-space: pre-wrap;
   word-break: break-word;
+}
+
+.pr-detail-description > :first-child {
+  margin-top: 0;
+}
+
+.pr-detail-description > :last-child {
+  margin-bottom: 0;
+}
+
+.pr-detail-description h1,
+.pr-detail-description h2,
+.pr-detail-description h3 {
+  margin: 16px 0 8px;
+  line-height: 1.3;
+}
+
+.pr-detail-description h1 {
+  font-size: 17px;
+}
+
+.pr-detail-description h2 {
+  font-size: 15px;
+}
+
+.pr-detail-description h3 {
+  font-size: 13.5px;
+}
+
+.pr-detail-description p,
+.pr-detail-description ul,
+.pr-detail-description ol,
+.pr-detail-description blockquote {
+  margin: 8px 0;
+}
+
+.pr-detail-description ul,
+.pr-detail-description ol {
+  padding-left: 22px;
+}
+
+.pr-detail-description li {
+  margin: 3px 0;
+}
+
+.pr-detail-description a {
+  color: var(--accent, #2563eb);
+  word-break: break-all;
+}
+
+.pr-detail-description code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: #eff1f3;
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+.pr-detail-description pre {
+  margin: 8px 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #f6f8fa;
+  overflow-x: auto;
+}
+
+.pr-detail-description pre code {
+  padding: 0;
+  background: none;
+}
+
+.pr-detail-description blockquote {
+  padding-left: 12px;
+  border-left: 3px solid #d0d7de;
+  color: #57606a;
+}
+
+.pr-detail-description table {
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+.pr-detail-description th,
+.pr-detail-description td {
+  border: 1px solid var(--line-soft);
+  padding: 5px 10px;
 }
 
 .pr-file-list {
@@ -5953,7 +6129,8 @@ textarea {
   border-radius: 0;
 }
 
-.git-work-dashboard:has(.pr-cols) .git-work-toolbar {
+.git-work-dashboard:has(.pr-cols) .git-work-toolbar,
+.git-work-dashboard:has(.jira-cols) .git-work-toolbar {
   border-bottom: 0;
 }
 
@@ -5976,6 +6153,9 @@ textarea {
 
 .git-work-row-link {
   cursor: pointer;
+  /* ponytail: skip layout/paint for off-screen rows — native CSS instead of list virtualization */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 58px;
 }
 
 .git-work-row-link:hover {
@@ -6120,7 +6300,7 @@ textarea {
 
 .git-genealogy-view {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 1px minmax(190px, 30%);
+  grid-template-rows: minmax(0, 1fr) 1px minmax(190px, 1fr);
   min-height: 0;
   height: 100%;
   overflow: hidden;
@@ -7675,9 +7855,9 @@ textarea {
   height: 30px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: var(--surface-2);
+  background-color: var(--surface-2);
   color: var(--text);
-  padding: 0 7px;
+  padding: 0 24px 0 7px;
   font-family: var(--mono);
   font-size: 11px;
 }
@@ -10342,7 +10522,7 @@ textarea {
   }
 
   .git-genealogy-view {
-    grid-template-rows: minmax(0, 1fr) 1px minmax(240px, 40%);
+    grid-template-rows: minmax(0, 1fr) 1px minmax(240px, 1fr);
   }
 
   .planning-body {

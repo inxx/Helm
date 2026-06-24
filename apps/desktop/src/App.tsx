@@ -304,7 +304,12 @@ export function App() {
           ) : null}
           {mounted.has("git") ? (
             <ScreenHost active={screen === "git"}>
-              <GitScreen snapshot={snapshot} onOpenProject={() => void openProject()} />
+              <GitScreen
+                snapshot={snapshot}
+                onOpenProject={() => void openProject()}
+                recents={recents}
+                onSwitchProject={switchProject}
+              />
             </ScreenHost>
           ) : null}
           {mounted.has("jira") ? (
