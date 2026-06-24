@@ -11203,12 +11203,17 @@ textarea {
 }
 
 .editor-tree {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   border-right: 1px solid var(--border);
-  overflow-y: auto;
   padding: 8px;
 }
 
 .editor-entry-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   list-style: none;
   margin: 0;
   padding: 0;
