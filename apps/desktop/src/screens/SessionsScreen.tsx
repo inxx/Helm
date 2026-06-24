@@ -1187,14 +1187,32 @@ function SessionMessage(props: {
 }
 
 function OrchestratorPending({ language }: { language: AppLanguage }) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
   return (
     <SessionMessage role="assistant" icon="bot" title={language === "ko" ? "응답 대기 중" : "Waiting for reply"} timestamp={null} language={language}>
       <div className="session-working-indicator">
         <span className="session-working-spinner" aria-hidden="true" />
-        <strong>{language === "ko" ? "오케스트레이터가 응답을 작성 중입니다…" : "The orchestrator is composing a reply…"}</strong>
+        <div>
+          <strong>
+            {language === "ko" ? "오케스트레이터가 응답을 작성 중입니다" : "The orchestrator is composing a reply"}
+            <span className="session-working-dots" aria-hidden="true" />
+          </strong>
+          <p>{formatElapsed(seconds, language)}</p>
+        </div>
       </div>
     </SessionMessage>
   );
+}
+
+function formatElapsed(seconds: number, language: AppLanguage): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (language === "ko") return m > 0 ? `${m}분 ${s}초 경과` : `${s}초 경과`;
+  return m > 0 ? `${m}m ${s}s elapsed` : `${s}s elapsed`;
 }
 
 function SessionWorkingIndicator({
