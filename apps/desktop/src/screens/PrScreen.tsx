@@ -176,7 +176,8 @@ export function PrScreen({ snapshot, onOpenProject }: PrScreenProps) {
           <div className="git-work-table pr-cols" role="table" aria-label={ko ? "PR 목록" : "Pull request list"}>
             <div className="git-work-row git-work-head" role="row">
               <span>ID</span>
-              <span>{ko ? "제목 / 상태" : "Title / status"}</span>
+              <span>{ko ? "제목" : "Title"}</span>
+              <span>{ko ? "상태" : "Status"}</span>
               <span>{ko ? "작성자" : "Author"}</span>
               <span>{ko ? "리뷰" : "Review"}</span>
               <span>{ko ? "검사" : "Checks"}</span>
@@ -219,16 +220,13 @@ function PrRow({ pr, ko, onSelect }: { pr: PullRequestSummary; ko: boolean; onSe
         <GitPullRequest size={13} />#{pr.number}
       </span>
       <span className="git-work-titlecell">
-        <strong>
-          {pr.projectName ? <em className="pr-project-tag">{pr.projectName}</em> : null}
-          {pr.title}
-        </strong>
+        <strong>{pr.title}</strong>
         <span>
-          <em className={`pr-state-tag ${state.tone}`}>{state.label}</em>
           {pr.branch} → {pr.base}
           {pr.isDraft ? <i className="draft">{ko ? "초안" : "draft"}</i> : null}
         </span>
       </span>
+      <StatusPill tone={state.tone}>{state.label}</StatusPill>
       <StatusPill tone="muted">
         <AuthorAvatar login={pr.author} />
         {pr.author || "—"}

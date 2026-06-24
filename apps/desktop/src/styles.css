@@ -6117,7 +6117,7 @@ textarea {
 }
 
 .git-work-table.pr-cols .git-work-row {
-  grid-template-columns: 86px minmax(260px, 1.8fr) minmax(122px, 0.6fr) minmax(104px, 0.42fr) minmax(100px, 0.4fr) 92px;
+  grid-template-columns: 86px minmax(220px, 1.8fr) minmax(92px, 0.42fr) minmax(122px, 0.6fr) minmax(104px, 0.42fr) minmax(100px, 0.4fr) 92px;
   justify-items: center;
 }
 
