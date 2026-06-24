@@ -2219,7 +2219,8 @@ fn conductor_allows_queued_run_result(
     }
 
     let task = db::get_task(&conn, &run.task_id)?;
-    match run_conductor_gate(config, connection, context, run, &task) {
+    let language = load_app_settings(app)?.language;
+    match run_conductor_gate(config, connection, context, run, &task, &language) {
         Ok(decision) => {
             let hold = conductor_decision_is_hold(&decision);
             append_and_emit_system_run_event(
@@ -2422,9 +2423,10 @@ fn run_conductor_gate(
     context: &ProjectContext,
     run: &AgentRunSummary,
     task: &TaskSummary,
+    language: &str,
 ) -> CommandResult<Value> {
     let provider = connection.get("provider").and_then(Value::as_str);
-    let prompt = build_conductor_prompt(context, run, task);
+    let prompt = build_conductor_prompt(context, run, task, language);
     let mut placeholders = HashMap::new();
     placeholders.insert(
         "projectRoot".to_string(),
@@ -2484,6 +2486,7 @@ fn build_conductor_prompt(
     context: &ProjectContext,
     run: &AgentRunSummary,
     task: &TaskSummary,
+    language: &str,
 ) -> String {
     format!(
         r#"너는 Helm의 백그라운드 지휘자 AI다.
@@ -2492,6 +2495,8 @@ fn build_conductor_prompt(
 
 반환 JSON:
 {{"decision":"run"|"hold","reason":"string","nextAction":"string"}}
+
+reason과 nextAction은 항상 {language_name}로 작성한다.
 
 판단 기준:
 - 사용자 승인 대기나 계획 수정이 필요하면 hold.
@@ -2510,6 +2515,10 @@ Queued run:
 - id: {run_id}
 - role: {role_id}
 "#,
+        language_name = match language {
+            "ko" => "한국어",
+            _ => "English",
+        },
         root = context.root_path.to_string_lossy(),
         task_id = task.id,
         title = task.title,
