@@ -295,6 +295,7 @@ export interface JiraIssueSummary {
   summary: string;
   status: string;
   assignee: string;
+  assigneeAvatar: string | null;
   url: string;
   updatedAt: string;
   relations: JiraRelation[];

@@ -170,6 +170,7 @@ pub struct JiraIssueSummary {
     pub summary: String,
     pub status: String,
     pub assignee: String,
+    pub assignee_avatar: Option<String>,
     pub url: String,
     pub updated_at: String,
     /// Any of "assignee", "reporter", "watcher" — how the current user relates to this issue.

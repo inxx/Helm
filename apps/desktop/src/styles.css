@@ -5769,7 +5769,7 @@ textarea {
 }
 
 .git-work-table.jira-cols .git-work-row {
-  grid-template-columns: 120px minmax(260px, 1fr) minmax(120px, 0.55fr) minmax(110px, 0.5fr) 92px;
+  grid-template-columns: 152px minmax(260px, 1fr) minmax(120px, 0.55fr) minmax(88px, 0.36fr) 92px;
 }
 
 .git-work-row-link {
@@ -7306,6 +7306,13 @@ textarea {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.jira-assignee-avatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
 }
 
 .jira-token-row {

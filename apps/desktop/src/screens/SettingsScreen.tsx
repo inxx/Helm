@@ -1461,9 +1461,7 @@ export function SettingsScreen({
                         type="password"
                         placeholder={
                           jiraTokenSet
-                            ? language === "ko"
-                              ? "교체하려면 새 토큰 입력"
-                              : "enter a new token to replace"
+                            ? "••••••••••••"
                             : "id.atlassian.com → API token"
                         }
                         value={jiraToken}

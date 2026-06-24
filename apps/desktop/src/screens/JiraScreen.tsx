@@ -201,7 +201,11 @@ function JiraRowView({ issue, ko }: { issue: JiraIssueSummary; ko: boolean }) {
         ) : null}
       </span>
       <span className="git-status-pill muted">
-        <UserRound size={13} />
+        {issue.assigneeAvatar ? (
+          <img className="jira-assignee-avatar" src={issue.assigneeAvatar} alt="" />
+        ) : (
+          <UserRound size={13} />
+        )}
         {issue.assignee || (ko ? "미지정" : "Unassigned")}
       </span>
       <span className={`git-status-pill ${jiraStatusVariant(issue.status)}`}>{issue.status}</span>

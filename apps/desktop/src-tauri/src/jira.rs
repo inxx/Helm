@@ -211,6 +211,9 @@ fn issue_from_json(issue: &Value, site: &str, my_account_id: Option<&str>) -> Ji
             .as_str()
             .unwrap_or("")
             .to_string(),
+        assignee_avatar: fields["assignee"]["avatarUrls"]["48x48"]
+            .as_str()
+            .map(str::to_string),
         updated_at: fields["updated"].as_str().unwrap_or_default().to_string(),
         url: if key.is_empty() {
             String::new()
