@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsePlanTasks } from "./planParse.ts";
+import { parsePlanTasks, stripPlanJson } from "./planParse.ts";
 
 test("parsePlanTasks reads a fenced json block, ignoring surrounding prose", () => {
   const text = "여기 계획입니다:\n```json\n{\"tasks\":[{\"title\":\"로그인 UI\",\"description\":\"폼 작성\",\"role\":\"coder\"}]}\n```\n끝.";
@@ -28,4 +28,14 @@ test("parsePlanTasks returns null on invalid or empty input", () => {
   assert.equal(parsePlanTasks("계획을 못 세웠어요"), null);
   assert.equal(parsePlanTasks('{"tasks":[]}'), null);
   assert.equal(parsePlanTasks("```json\n{not valid}\n```"), null);
+});
+
+test("stripPlanJson removes a tasks json block but keeps prose and other code", () => {
+  const text = "정리했습니다.\n```json\n{\"tasks\":[{\"title\":\"A\",\"role\":\"planner\"}]}\n```";
+  assert.equal(stripPlanJson(text), "정리했습니다.");
+  // a non-task code block survives
+  const other = "예시:\n```ts\nconst a = 1;\n```";
+  assert.equal(stripPlanJson(other), other);
+  // mid-stream unterminated fence is dropped
+  assert.equal(stripPlanJson("진행합니다.\n```json\n{\"tasks\":[{\"title\":\"A\""), "진행합니다.");
 });

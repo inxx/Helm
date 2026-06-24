@@ -10,7 +10,7 @@ import { api } from "../lib/api";
 import { useI18n, type AppLanguage } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
 import { roleLabel } from "../lib/runnerReadiness";
-import { parsePlanTasks } from "../lib/planParse";
+import { parsePlanTasks, stripPlanJson } from "../lib/planParse";
 import type {
   AgentSessionSummary,
   GitFileStatus,
@@ -186,9 +186,13 @@ export function SessionsScreen({
   const pendingApprovalCount = snapshot?.approvals.filter((approval) => approval.status === "Pending").length ?? 0;
   const activeRunWorking = Boolean(activeSession && isSessionWorking(activeSession));
   const latestActivity = events.at(-1) ?? null;
-  // Orchestrator turn is in flight but no assistant chunk has streamed in yet — show a waiting
-  // bubble so a long Hermes turn doesn't look like a dead screen after the user hits send.
-  const orchestratorPending = orchestratorBusy && orchestratorMessages.at(-1)?.role !== "assistant";
+  // Orchestrator turn is in flight but no *visible* assistant text yet — show a waiting bubble so
+  // a long Hermes turn (or a JSON-only "진행" turn whose block strips to nothing) doesn't blink to
+  // a dead screen after the user hits send.
+  const lastOrchestratorMessage = orchestratorMessages.at(-1);
+  const hasVisibleAssistantReply =
+    lastOrchestratorMessage?.role === "assistant" && stripPlanJson(lastOrchestratorMessage.content).length > 0;
+  const orchestratorPending = orchestratorBusy && !hasVisibleAssistantReply;
 
   useEffect(() => {
     if (!snapshot) {
@@ -208,7 +212,7 @@ export function SessionsScreen({
       .then(([items, ptys]) => {
         if (disposed) return;
         const mergedItems = mergeTaskBackedSessions(items, snapshot.tasks);
-        setSessions(mergedItems);
+        setSessions((prev) => keepIfEqual(prev, mergedItems));
         setTerminalPtys(ptys);
         if (composingNewSession) return;
         if (selectedTaskId) {
@@ -298,20 +302,23 @@ export function SessionsScreen({
           })),
         );
         if (disposed) return;
-        setEvents(perRun.flatMap((entry) => entry.events));
-        setSummaries(
-          perRun
-            .filter((entry) => entry.summary?.trim())
-            .map((entry) => ({ runId: entry.run.id, roleId: entry.run.roleId, text: entry.summary!.trim(), at: entry.run.finishedAt ?? entry.run.updatedAt })),
-        );
+        // Polling re-fetches the whole transcript every few seconds. Bail when the data is
+        // unchanged (return the prev reference) so identical polls don't churn the DOM and make
+        // chat blocks blink/reorder.
+        const nextEvents = perRun.flatMap((entry) => entry.events);
+        setEvents((prev) => keepIfEqual(prev, nextEvents));
+        const nextSummaries = perRun
+          .filter((entry) => entry.summary?.trim())
+          .map((entry) => ({ runId: entry.run.id, roleId: entry.run.roleId, text: entry.summary!.trim(), at: entry.run.finishedAt ?? entry.run.updatedAt }));
+        setSummaries((prev) => keepIfEqual(prev, nextSummaries));
         // Surface the latest run's blocking reason: a NeedsInspection/Failed run leaves the task
         // silently stuck (e.g. coder reported edits that aren't in the worktree diff). Show it.
         const latest = ordered.at(-1);
-        setRunAlert(
+        const nextAlert =
           latest && (latest.status === "NeedsInspection" || latest.status === "Failed")
             ? { roleId: latest.roleId, status: latest.status, failureKind: latest.failureKind, failureReason: latest.failureReason, at: latest.finishedAt ?? latest.updatedAt }
-            : null,
-        );
+            : null;
+        setRunAlert((prev) => keepIfEqual(prev, nextAlert));
       })
       .catch(() => {
         if (!disposed) {
@@ -778,18 +785,22 @@ export function SessionsScreen({
                   </div>
                 </SessionMessage>
               ))}
-              {orchestratorMessages.map((message) => (
-                <SessionMessage
-                  icon={message.role === "user" ? "user" : "bot"}
-                  key={message.id}
-                  role={message.role}
-                  timestamp={null}
-                  title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
-                  language={language}
-                >
-                  <p>{message.content}</p>
-                </SessionMessage>
-              ))}
+              {orchestratorMessages.map((message) => {
+                const text = message.role === "assistant" ? stripPlanJson(message.content) : message.content;
+                if (!text) return null;
+                return (
+                  <SessionMessage
+                    icon={message.role === "user" ? "user" : "bot"}
+                    key={message.id}
+                    role={message.role}
+                    timestamp={null}
+                    title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
+                    language={language}
+                  >
+                    <p>{text}</p>
+                  </SessionMessage>
+                );
+              })}
               {orchestratorPending ? <OrchestratorPending language={language} /> : null}
               {runAlert ? (
                 <SessionMessage
@@ -913,18 +924,22 @@ export function SessionsScreen({
             ) : (
               <div className="session-chat-scroll" ref={chatScrollRef}>
                 <div className="session-chat-thread">
-                  {orchestratorMessages.map((message) => (
-                    <SessionMessage
-                      icon={message.role === "user" ? "user" : "bot"}
-                      key={message.id}
-                      role={message.role}
-                      timestamp={null}
-                      title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
-                      language={language}
-                    >
-                      <p>{message.content}</p>
-                    </SessionMessage>
-                  ))}
+                  {orchestratorMessages.map((message) => {
+                    const text = message.role === "assistant" ? stripPlanJson(message.content) : message.content;
+                    if (!text) return null;
+                    return (
+                      <SessionMessage
+                        icon={message.role === "user" ? "user" : "bot"}
+                        key={message.id}
+                        role={message.role}
+                        timestamp={null}
+                        title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
+                        language={language}
+                      >
+                        <p>{text}</p>
+                      </SessionMessage>
+                    );
+                  })}
                   {orchestratorPending ? <OrchestratorPending language={language} /> : null}
                 </div>
               </div>
@@ -1249,6 +1264,11 @@ function SessionWorkingIndicator({
   latestActivity: RunEventSummary | null;
   session: AgentSessionSummary | null;
 }) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
   const statusLabel = sessionWorkingLabel(session, language);
   const activityLabel = latestActivity
     ? `${latestActivity.kind}: ${latestActivity.message}`
@@ -1259,8 +1279,12 @@ function SessionWorkingIndicator({
     <div className="session-working-indicator">
       <span className="session-working-spinner" aria-hidden="true" />
       <div>
-        <strong>{statusLabel}</strong>
+        <strong>
+          {statusLabel}
+          <span className="session-working-dots" aria-hidden="true" />
+        </strong>
         <p>{activityLabel}</p>
+        <p>{formatElapsed(seconds, language)}</p>
       </div>
     </div>
   );
@@ -1442,6 +1466,13 @@ interface AcpUpdatePayload {
     content?: { text?: string } | { text?: string }[];
     title?: string;
   } | null;
+}
+
+// Keep the previous reference when the freshly-fetched value is deeply equal, so a no-op poll
+// doesn't trigger a re-render. ponytail: JSON.stringify compare — these arrays are small (one
+// task's transcript); swap for a structural compare only if they ever grow large.
+function keepIfEqual<T>(prev: T, next: T): T {
+  return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
 }
 
 function chunkText(update: AcpUpdatePayload["update"]): string {

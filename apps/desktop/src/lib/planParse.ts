@@ -27,6 +27,17 @@ export function parsePlanTasks(text: string): PlanTask[] | null {
   return null;
 }
 
+// Strip the tasks[] JSON from an assistant reply so the chat shows only prose. The block is
+// materialized separately from the raw turn text, so removing it from the display is safe.
+// ponytail: only handles ```json fences (what HERMES_TASK_RULE emits); a bare unfenced object
+// would still show — switch to parse-and-slice if the rule ever drops the fence.
+export function stripPlanJson(text: string): string {
+  return text
+    .replace(/```(?:json)?\s*([\s\S]*?)```/gi, (full, body) => (parsePlanTasks(body) ? "" : full))
+    .replace(/```json\b[\s\S]*$/i, "") // mid-stream: an opened fence not yet closed
+    .trim();
+}
+
 function tryParse(raw: string): PlanTask[] | null {
   if (!raw.trim()) return null;
   let parsed: unknown;
