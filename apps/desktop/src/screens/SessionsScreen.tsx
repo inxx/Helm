@@ -426,7 +426,7 @@ export function SessionsScreen({
     if (!snapshot) return;
     const tasks = parsePlanTasks(turnText);
     if (!tasks) return;
-    const proceed = window.confirm(language === "ko" ? "이 대화를 작업으로 만들까요?" : "Turn this into tasks?");
+    const proceed = window.confirm(language === "ko" ? "이대로 진행할까요? 설계자에게 넘겨 작업을 시작합니다." : "Proceed? This hands the requirement to the planner and starts the task.");
     if (!proceed) return;
     const projectId = snapshot.project.id;
     const created: string[] = [];
@@ -1451,11 +1451,13 @@ function chunkText(update: AcpUpdatePayload["update"]): string {
   return content.text ?? "";
 }
 
-const HERMES_TASK_RULE = `[규칙] 너는 Helm의 계획 파트너야. 평소엔 자연스럽게 대화해. 사용자가 작업/할 일로 만들어 달라고 할 때만, 다른 설명·인사 없이 아래 JSON 코드블록 하나만 출력해:
+const HERMES_TASK_RULE = `[규칙] 너는 Helm의 오케스트레이터야. 초반엔 사용자와 대화하며 요구사항을 분석·구체화하고, 분석이 끝나면 설계자(planner)에게 넘겨 작업을 시작시켜. 그 이후엔 나머지 단계(설계→구현→리뷰→테스트)가 원활히 진행되도록 지켜보고 조율하는 역할이야. 코드를 직접 수정하거나 파일을 만들거나 명령을 실행하지 마 — 실제 작업은 항상 각 단계 담당자에게 맡겨.
+
+먼저 무엇을, 왜, 어떤 제약 아래 만들지 충분히 파악해. 모호하면 질문해서 좁혀. 요구사항이 충분히 모였다고 판단되면 사용자에게 "이대로 진행할까요?"라고 물어. 사용자가 진행을 원하면, 다른 설명·인사 없이 확정된 요구사항을 아래 JSON 코드블록 하나만 출력해:
 \`\`\`json
-{"tasks":[{"title":"한 줄 제목","description":"구체적 작업 지시","role":"coder"}]}
+{"tasks":[{"title":"한 줄 제목","description":"설계자에게 넘길 확정 요구사항 전문","role":"planner"}]}
 \`\`\`
-role은 planner, coder, plan_verifier, code_reviewer, tester 중 하나. 작업은 의존 순서대로 나열. 작업화 요청이 아니면 이 JSON을 절대 출력하지 마.`;
+작업은 딱 하나, role은 항상 "planner". 분석이 끝나기 전이거나 사용자가 진행을 원하지 않으면 이 JSON을 절대 출력하지 마.`;
 
 type OrchestratorMessage = { id: string; role: "user" | "assistant"; content: string };
 
