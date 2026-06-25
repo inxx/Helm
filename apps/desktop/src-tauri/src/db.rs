@@ -7452,6 +7452,15 @@ fn host_runner_placeholders(
                 .to_string_lossy()
                 .to_string(),
         ),
+        (
+            // 역할별 handoff dossier(plan.md/pr-dossier.md 등). finalize_host_run의 dossier
+            // 게이트가 이 파일을 요구하므로 runner 명령 템플릿이 {dossierPath}로 참조할 수 있게 한다.
+            "dossierPath".to_string(),
+            artifact_dir
+                .join(role_dossier_artifact_name(&run.role_id))
+                .to_string_lossy()
+                .to_string(),
+        ),
         ("worktreePath".to_string(), worktree.worktree_path.clone()),
         ("taskId".to_string(), run.task_id.clone()),
         ("roleId".to_string(), run.role_id.clone()),
