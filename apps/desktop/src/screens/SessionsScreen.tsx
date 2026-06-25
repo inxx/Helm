@@ -82,6 +82,7 @@ export function SessionsScreen({
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatScrollFrameRef = useRef<number | null>(null);
+  const pinnedToBottomRef = useRef(true);
   // Orchestrator chat bubbles are project-scoped client state with no backing store. Reset them
   // whenever the active session changes — switching, deleting, starting a new compose, or changing
   // project — so a previous session's transcript doesn't bleed into the next one. Also abandon any
@@ -119,7 +120,6 @@ export function SessionsScreen({
           (approval) => approval.status === "Pending" && activeApprovalEntityIds.includes(approval.entityId),
         ) ?? []
       : [];
-  const activeApprovalCount = activePendingApprovals.length;
   const activeRunWorking = Boolean(activeSession && isSessionWorking(activeSession));
   const latestActivity = events.at(-1) ?? null;
   // Orchestrator turn is in flight but no visible assistant text yet.
@@ -192,17 +192,31 @@ export function SessionsScreen({
     setDraftRoleAssignments(null);
   }, [snapshot?.project.id]);
 
+  // 세션을 바꾸면 항상 최신(맨 아래)으로 점프하고 bottom 고정 상태로 되돌린다.
   useEffect(() => {
+    pinnedToBottomRef.current = true;
     scrollChatToBottom();
-  }, [
-    activeApprovalCount,
-    activeSession?.id,
-    activeTask?.id,
-    events.length,
-    orchestratorMessages.length,
-    orchestratorPending,
-    summaries.length,
-  ]);
+  }, [activeSession?.id, activeTask?.id]);
+
+  // 폴링으로 메시지/요약/승인 카드가 늘어나도 항상 맨 아래로 따라간다. 단, 사용자가
+  // 위로 스크롤해 둔 상태면 방해하지 않는다. 개수 기반 deps는 내용이 in-place로 자라는
+  // 폴링 업데이트를 놓치므로 scroll 컨테이너의 DOM 변경을 직접 관찰한다.
+  useEffect(() => {
+    const node = chatScrollRef.current;
+    if (!node) return;
+    const onScroll = () => {
+      pinnedToBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+    };
+    node.addEventListener("scroll", onScroll, { passive: true });
+    const observer = new MutationObserver(() => {
+      if (pinnedToBottomRef.current) scrollChatToBottom();
+    });
+    observer.observe(node, { childList: true, subtree: true, characterData: true });
+    return () => {
+      node.removeEventListener("scroll", onScroll);
+      observer.disconnect();
+    };
+  }, [activeSession?.id, activeTask?.id]);
 
   useEffect(() => {
     return () => {
@@ -266,52 +280,49 @@ export function SessionsScreen({
     };
   }, [activeTask?.id, activityRefreshKey, snapshot?.project.id]);
 
+  // 전사는 한 task의 모든 role run(planner → coder → plan_verifier → …)을 누적하는데,
+  // run 이벤트는 각자의 run id로 들어온다. 세션의 source run id 하나에만 묶으면 핸드오프
+  // 이후 코더·plan_verifier 신호를 놓쳐 채팅이 얼어붙는다. active task의 run 신호 전부에
+  // 반응하고, 승인 대기처럼 "working" run이 없는 구간을 위해 백업 폴링도 둔다. keepIfEqual이
+  // 동일 폴링을 무비용으로 만든다.
   useEffect(() => {
-    if (!snapshot || !activeSession?.sourceRunId) return;
+    const taskId = activeTask?.id;
+    if (!snapshot || !taskId) return;
     const projectId = snapshot.project.id;
-    const runId = activeSession.sourceRunId;
     let disposed = false;
+    const bump = () => {
+      if (disposed) return;
+      setActivityRefreshKey((value) => value + 1);
+      setReloadKey((value) => value + 1);
+    };
+    const matchesTask = (payload: { projectId?: string; taskId?: string }) =>
+      payload.projectId === projectId && (!payload.taskId || payload.taskId === taskId);
+
     let cleanupEvent: (() => void) | null = null;
     let cleanupUpdated: (() => void) | null = null;
-
     void listen<RunEventSummary>("agent-run://event", (event) => {
-      if (disposed || event.payload.projectId !== projectId || event.payload.runId !== runId) return;
-      setActivityRefreshKey((value) => value + 1);
-      setReloadKey((value) => value + 1);
+      if (!disposed && matchesTask(event.payload)) bump();
     }).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-      } else {
-        cleanupEvent = unlisten;
-      }
+      if (disposed) unlisten();
+      else cleanupEvent = unlisten;
+    });
+    void listen<{ projectId?: string; taskId?: string; runId?: string }>("agent-run://updated", (event) => {
+      if (!disposed && matchesTask(event.payload)) bump();
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else cleanupUpdated = unlisten;
     });
 
-    void listen<{ projectId?: string; runId?: string }>("agent-run://updated", (event) => {
-      if (disposed || event.payload.projectId !== projectId || event.payload.runId !== runId) return;
-      setActivityRefreshKey((value) => value + 1);
-      setReloadKey((value) => value + 1);
-    }).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-      } else {
-        cleanupUpdated = unlisten;
-      }
-    });
-
-    const timer = window.setInterval(() => {
-      if (activeRunWorking) {
-        setActivityRefreshKey((value) => value + 1);
-        setReloadKey((value) => value + 1);
-      }
-    }, 3_000);
+    const settled = activeTask?.status === "Merged" || activeTask?.status === "Done";
+    const timer = settled ? null : window.setInterval(bump, 3_000);
 
     return () => {
       disposed = true;
       cleanupEvent?.();
       cleanupUpdated?.();
-      window.clearInterval(timer);
+      if (timer !== null) window.clearInterval(timer);
     };
-  }, [activeRunWorking, activeSession?.sourceRunId, snapshot?.project.id]);
+  }, [activeTask?.id, activeTask?.status, snapshot?.project.id]);
 
   if (!snapshot) {
     return (
