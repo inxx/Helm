@@ -10615,8 +10615,15 @@ fn diff_consistency_check(
         .filter_map(Value::as_str)
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
+    // 게이트의 목적은 "coder가 보고한 변경이 실제 변경과 맞는가"다. worktree 생성 시
+    // git-lfs/husky 훅이 .husky/_/ 같은 untracked 캐시 파일을 만들어내는데(메인 레포에선
+    // gitignore되지만 worktree엔 그 ignore 파일이 안 따라옴), coder가 건드리지도/보고하지도
+    // 않은 이 노이즈를 mismatch로 잡으면 툴링 있는 모든 레포에서 매 run이 오판된다.
+    // 따라서 coder가 보고하지 않은 untracked 파일은 비교에서 제외한다.
+    // ponytail: tracked 파일 누락/과보고는 그대로 잡는다. 미보고 신규파일만 놓치는데, merge diff에서 드러난다.
     let actual_files = actual_changed_files
         .iter()
+        .filter(|file| file.status != "untracked" || reported_files.contains(&file.path))
         .map(|file| file.path.clone())
         .collect::<BTreeSet<_>>();
 
@@ -13168,6 +13175,33 @@ mod tests {
         let run = reconcile_next_role_gap(&mut conn, &repo.root, &project.id).expect("reconcile");
 
         assert!(run.is_none());
+    }
+
+    #[test]
+    fn diff_consistency_ignores_untracked_unreported_noise() {
+        let result = json!({
+            "status": "pass",
+            "changedFiles": ["src/index.tsx"]
+        });
+        let status = |path: &str, status: &str| GitFileStatus {
+            path: path.to_string(),
+            status: status.to_string(),
+            staged: false,
+            renamed_from: None,
+        };
+        // coder가 보고한 tracked 변경 + 보고 안 한 untracked 툴링 노이즈(.husky/_/*) → 통과해야 함.
+        let actual = vec![
+            status("src/index.tsx", "modified"),
+            status(".husky/_/post-checkout", "untracked"),
+        ];
+        assert!(diff_consistency_check("coder", Some(&result), &actual).is_none());
+
+        // tracked 파일을 보고 없이 바꾸면(스코프 위반) 여전히 잡아야 함.
+        let scope_violation = vec![
+            status("src/index.tsx", "modified"),
+            status("src/secret.ts", "modified"),
+        ];
+        assert!(diff_consistency_check("coder", Some(&result), &scope_violation).is_some());
     }
 
     #[test]
