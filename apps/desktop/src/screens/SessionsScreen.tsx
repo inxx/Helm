@@ -386,6 +386,7 @@ export function SessionsScreen({
     if (!proceed) return;
     const projectId = snapshot.project.id;
     const created: string[] = [];
+    const startFailed: string[] = [];
     for (const task of tasks) {
       try {
         const description = [task.description, task.role ? `(role: ${task.role})` : null].filter(Boolean).join("\n\n") || task.title;
@@ -396,22 +397,30 @@ export function SessionsScreen({
         });
         try {
           await api.startNextRoleRun(projectId, newTask.id);
-        } catch {
-          /* task created; run start is best-effort */
+        } catch (error) {
+          // 첫 역할(planner) kickoff은 한 번만 호출되고 reconcile 안전망은 Planned을 건너뛰므로,
+          // 여기서 실패를 삼키면 태스크가 영구히 "다음 역할 실행 준비 중"에 멈춘다. 반드시 표면화한다.
+          startFailed.push(`${newTask.title}: ${messageFromError(error, language === "ko" ? "역할 실행 시작 실패" : "failed to start the run")}`);
         }
         created.push(newTask.title);
       } catch {
         /* skip a task that failed to create */
       }
     }
+    if (startFailed.length) {
+      setLoadError(language === "ko" ? `일부 작업의 실행을 시작하지 못했습니다:\n- ${startFailed.join("\n- ")}` : `Failed to start some tasks:\n- ${startFailed.join("\n- ")}`);
+    }
     setOrchestratorMessages((items) => [
       ...items,
       {
         id: crypto.randomUUID(),
         role: "assistant",
-        content: created.length
-          ? (language === "ko" ? `${created.length}개 작업을 만들고 실행을 시작했습니다:\n- ${created.join("\n- ")}` : `Created ${created.length} task(s) and started their runs:\n- ${created.join("\n- ")}`)
-          : (language === "ko" ? "작업 생성에 실패했습니다." : "Failed to create tasks."),
+        content: (created.length
+          ? (language === "ko" ? `${created.length}개 작업을 만들었습니다:\n- ${created.join("\n- ")}` : `Created ${created.length} task(s):\n- ${created.join("\n- ")}`)
+          : (language === "ko" ? "작업 생성에 실패했습니다." : "Failed to create tasks."))
+          + (startFailed.length
+            ? (language === "ko" ? `\n\n⚠️ 실행을 시작하지 못한 작업:\n- ${startFailed.join("\n- ")}` : `\n\n⚠️ Failed to start:\n- ${startFailed.join("\n- ")}`)
+            : ""),
       },
     ]);
     setOrchestratorBusy(false);

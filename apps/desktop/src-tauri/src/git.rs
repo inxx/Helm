@@ -514,6 +514,12 @@ fn parse_worktree_porcelain(output: &str) -> Vec<(String, Option<String>)> {
     worktrees
 }
 
+// 디스크에서 사라진 worktree의 admin 엔트리(.git/worktrees/*)를 정리한다. stale 엔트리가
+// 남으면 같은 경로의 worktree add나 branch -D가 실패하므로 cleanup 경로에서 best-effort로 호출한다.
+pub fn prune_worktrees(root: &Path) {
+    let _ = git_output_allow_fail(root, &["worktree", "prune"]);
+}
+
 pub fn remove_worktree(root: &Path, worktree_path: &Path) -> CommandResult<()> {
     let output = Command::new("git")
         .arg("-C")
@@ -1602,7 +1608,10 @@ mod tests {
             parsed,
             vec![
                 ("/repo".to_string(), Some("main".to_string())),
-                ("/repo/.helm/worktrees/feat".to_string(), Some("feature/x".to_string())),
+                (
+                    "/repo/.helm/worktrees/feat".to_string(),
+                    Some("feature/x".to_string())
+                ),
                 ("/repo/detached".to_string(), None),
             ]
         );

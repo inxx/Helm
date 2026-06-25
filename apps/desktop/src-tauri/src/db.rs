@@ -1664,6 +1664,8 @@ pub fn ensure_task_worktree(
             CommandError::validation("worktree 기준이 되는 Git HEAD를 찾을 수 없습니다.")
         })?;
     let worktree_root = resolve_worktree_root(root, settings.worktree_root.as_deref());
+    // 이전 시도가 남긴 stale worktree admin 엔트리를 먼저 정리한다(없으면 no-op).
+    git::prune_worktrees(root);
     let slug = task_slug(&task.title, &task.id);
     let worktree_path = worktree_root.join(&slug);
     if worktree_path.exists() {
@@ -1675,7 +1677,14 @@ pub fn ensure_task_worktree(
     let branch_name = unique_task_branch(root, &slug)?;
     fs::create_dir_all(&worktree_root)
         .map_err(|err| CommandError::io("worktree 루트 폴더를 만들지 못했습니다.", err))?;
-    git::add_worktree(root, &worktree_path, &branch_name, &base_ref)?;
+    // worktree add는 브랜치 생성+체크아웃+admin 등록의 비원자적 조합이라, 중간에 실패하면
+    // 브랜치 ref만 남아 다음 시도(unique_task_branch)와 정리를 막는다 — 실패 시 직접 롤백한다.
+    if let Err(err) = git::add_worktree(root, &worktree_path, &branch_name, &base_ref) {
+        let _ = git::remove_worktree(root, &worktree_path);
+        git::prune_worktrees(root);
+        let _ = git::delete_branch(root, &branch_name, false);
+        return Err(err);
+    }
 
     let id = new_id();
     let timestamp = now();
@@ -12556,9 +12565,14 @@ mod tests {
         ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
 
         // 승인 전: 코드 리뷰어 준비가 리뷰 진행 승인 게이트에서 막힌다.
-        let err =
-            prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "code_reviewer")
-                .expect_err("review approval 전에는 막혀야 한다");
+        let err = prepare_role_context(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &task.id,
+            "code_reviewer",
+        )
+        .expect_err("review approval 전에는 막혀야 한다");
         assert!(
             err.message.contains("리뷰 진행 승인"),
             "unexpected error: {}",
@@ -12576,9 +12590,13 @@ mod tests {
             params![new_id(), &project.id, &task.id, timestamp],
         )
         .expect("insert review approval");
-        if let Err(err) =
-            prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "code_reviewer")
-        {
+        if let Err(err) = prepare_role_context(
+            &mut conn,
+            &repo.root,
+            &project.id,
+            &task.id,
+            "code_reviewer",
+        ) {
             assert!(
                 !err.message.contains("리뷰 진행 승인"),
                 "승인 후에는 게이트를 통과해야 한다: {}",

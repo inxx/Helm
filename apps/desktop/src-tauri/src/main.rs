@@ -1048,6 +1048,8 @@ fn delete_task(
     // best-effort로 정리해 고아 worktree/브랜치가 남지 않게 한다(실패해도 삭제는 이미 확정).
     if let Some(worktree) = worktree {
         let _ = git::remove_worktree(&context.root_path, Path::new(&worktree.worktree_path));
+        // worktree admin 엔트리가 남으면 branch -D가 "checked out"으로 거부되므로 prune 후 삭제한다.
+        git::prune_worktrees(&context.root_path);
         let _ = git::delete_branch(&context.root_path, &worktree.branch_name, false);
     }
     Ok(())
@@ -2094,13 +2096,7 @@ fn ensure_merge_pr_for_code_review(
 ) {
     let log = |message: &str, payload: Value| {
         append_and_emit_system_run_event(
-            app,
-            conn,
-            project_id,
-            task_id,
-            log_run_id,
-            message,
-            payload,
+            app, conn, project_id, task_id, log_run_id, message, payload,
         );
     };
 
@@ -2179,8 +2175,7 @@ fn ensure_merge_pr_for_code_review(
         Ok(url) => {
             let number = parse_pr_number(&url);
             if let Some(number) = number {
-                if let Err(error) = db::insert_pr_ref(conn, project_id, task_id, &url, number)
-                {
+                if let Err(error) = db::insert_pr_ref(conn, project_id, task_id, &url, number) {
                     log(
                         "code_review.pr_ref_save_failed",
                         json!({ "url": url, "error": command_error_summary(&error) }),
