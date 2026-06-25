@@ -949,6 +949,32 @@ fn approve_task_completion_with_git(
             "테스트를 통과해 머지 대기 상태인 태스크만 완료 승인할 수 있습니다.",
         ));
     }
+
+    // PR이 있으면(CodeReview에서 생성됨) 사용자 트리거 머지 → Merged.
+    // 머지는 GitHub 측에서 일어나고 로컬 main HEAD는 직접 건드리지 않는다.
+    if let Some((_url, number)) = db::find_pr_ref(&conn, &task_id)? {
+        git::merge_pull_request(Path::new(&context.root_path), number)?;
+        let branch_name = db::get_task_worktree(&conn, &project_id, &task_id)?
+            .map(|worktree| worktree.branch_name)
+            .unwrap_or_default();
+        let updated_task = db::update_task_status(
+            &mut conn,
+            &project_id,
+            &task_id,
+            "Merged",
+            Some(format!("사용자 PR #{number} 머지")),
+        )?;
+        return Ok(TaskCompletionGitSummary {
+            task: updated_task,
+            branch_name,
+            commit_hash: String::new(),
+            pushed: false,
+            pr_number: Some(number),
+            merged: true,
+        });
+    }
+
+    // 폴백: PR이 없으면(변경 없음 등으로 CodeReview에서 PR 미생성) 기존 commit+push → Done.
     let worktree = db::get_task_worktree(&conn, &project_id, &task_id)?
         .ok_or_else(|| CommandError::validation("완료 승인할 task worktree를 찾을 수 없습니다."))?;
     let worktree_path = Path::new(&worktree.worktree_path);
@@ -982,6 +1008,8 @@ fn approve_task_completion_with_git(
         branch_name,
         commit_hash,
         pushed: true,
+        pr_number: None,
+        merged: false,
     })
 }
 
@@ -1933,6 +1961,16 @@ fn queue_next_role_after_success(
         return;
     }
 
+    // PR 연동(best-effort): plan_verifier 통과 → CodeReview 진입 시 메인 머지 PR 생성,
+    // code_reviewer/arbiter 통과 시 그 판정을 PR 코멘트로 남긴다. 실패해도 인계는 막지 않는다.
+    match run.role_id.as_str() {
+        "plan_verifier" => ensure_merge_pr_for_code_review(app, conn, project_id, run),
+        "code_reviewer" | "arbiter" => {
+            post_review_comment_to_pr(app, conn, context, project_id, run)
+        }
+        _ => {}
+    }
+
     if run.role_id == "planner" {
         match auto_approve_plan_approval(conn, project_id, &run.task_id) {
             Ok(Some(approval_id)) => {
@@ -2010,6 +2048,173 @@ fn queue_next_role_after_success(
             }
         }
     }
+}
+
+/// On entry to CodeReview, commit+push the task's feature branch and open a PR into main.
+/// Best-effort: any failure is logged and swallowed so the role pipeline keeps moving.
+/// NEVER pushes to main directly — push targets the feature branch, the PR only *targets* main.
+fn ensure_merge_pr_for_code_review(
+    app: &AppHandle,
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    run: &AgentRunSummary,
+) {
+    let log = |message: &str, payload: Value| {
+        append_and_emit_system_run_event(
+            app,
+            conn,
+            project_id,
+            &run.task_id,
+            &run.id,
+            message,
+            payload,
+        );
+    };
+
+    let task = match db::get_task(conn, &run.task_id) {
+        Ok(task) if task.status == "CodeReview" => task,
+        _ => return, // 아직 CodeReview가 아니면(게이트 보류 등) PR 만들지 않는다.
+    };
+
+    match db::find_pr_ref(conn, &run.task_id) {
+        Ok(Some(_)) => return, // 이미 PR 있음 — 멱등.
+        Ok(None) => {}
+        Err(error) => {
+            log(
+                "PR ref lookup failed",
+                json!({ "error": command_error_summary(&error) }),
+            );
+            return;
+        }
+    }
+
+    let worktree = match db::get_task_worktree(conn, project_id, &run.task_id) {
+        Ok(Some(worktree)) => worktree,
+        _ => {
+            log(
+                "code_review.pr_skipped_no_worktree",
+                json!({ "source": "pr-automation" }),
+            );
+            return;
+        }
+    };
+    let worktree_path = Path::new(&worktree.worktree_path);
+    let branch = match git::current_branch(worktree_path) {
+        Some(branch) => branch,
+        None => {
+            log(
+                "code_review.pr_skipped_detached_head",
+                json!({ "source": "pr-automation" }),
+            );
+            return;
+        }
+    };
+
+    match git::changed_files(worktree_path) {
+        Ok(files) if files.is_empty() => {
+            log(
+                "code_review.pr_skipped_no_changes",
+                json!({ "branch": branch }),
+            );
+            return;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log(
+                "code_review.pr_create_failed",
+                json!({ "stage": "changed_files", "error": command_error_summary(&error) }),
+            );
+            return;
+        }
+    }
+
+    let title = format_task_completion_commit_message(&task.title);
+    let body = if task.description.trim().is_empty() {
+        format!("Helm task `{}`", task.id)
+    } else {
+        format!("Helm task `{}`\n\n{}", task.id, task.description.trim())
+    };
+
+    let result = (|| -> CommandResult<String> {
+        git::stage_all(worktree_path)?;
+        git::commit_staged(worktree_path, &title)?;
+        git::push_branch(worktree_path, &branch)?;
+        git::create_pull_request(worktree_path, "main", &branch, &title, &body)
+    })();
+
+    match result {
+        Ok(url) => {
+            let number = parse_pr_number(&url);
+            if let Some(number) = number {
+                if let Err(error) = db::insert_pr_ref(conn, project_id, &run.task_id, &url, number)
+                {
+                    log(
+                        "code_review.pr_ref_save_failed",
+                        json!({ "url": url, "error": command_error_summary(&error) }),
+                    );
+                    return;
+                }
+            }
+            log(
+                "code_review.pr_created",
+                json!({ "url": url, "number": number, "base": "main", "head": branch }),
+            );
+        }
+        Err(error) => {
+            log(
+                "code_review.pr_create_failed",
+                json!({ "stage": "gh", "branch": branch, "error": command_error_summary(&error) }),
+            );
+        }
+    }
+}
+
+/// After a reviewer/arbiter run passes, post its verdict to the task's PR as a comment.
+/// Best-effort; the internal gate (db::apply_successful_role_result) remains the source of truth.
+fn post_review_comment_to_pr(
+    app: &AppHandle,
+    conn: &rusqlite::Connection,
+    context: &ProjectContext,
+    project_id: &str,
+    run: &AgentRunSummary,
+) {
+    let (_url, number) = match db::find_pr_ref(conn, &run.task_id) {
+        Ok(Some(pr)) => pr,
+        _ => return, // PR이 없으면(변경 없음/생성 실패) 코멘트 대상 없음.
+    };
+    let root = Path::new(&context.root_path);
+
+    let body = if run.role_id == "arbiter" {
+        format!(
+            "✅ 중재자(arbiter) sign-off — 리뷰완료{}",
+            db::build_reviewer_verdicts_markdown(conn, root, project_id, &run.task_id)
+        )
+    } else {
+        format!(
+            "🤖 코드리뷰\n{}",
+            db::build_single_run_verdict_markdown(conn, root, &run.id)
+        )
+    };
+
+    if let Err(error) = git::comment_pull_request(root, number, &body) {
+        append_and_emit_system_run_event(
+            app,
+            conn,
+            project_id,
+            &run.task_id,
+            &run.id,
+            "code_review.pr_comment_failed",
+            json!({ "number": number, "roleId": run.role_id, "error": command_error_summary(&error) }),
+        );
+    }
+}
+
+/// Extract the trailing PR number from a `gh pr create` URL like `.../pull/123`.
+fn parse_pr_number(url: &str) -> Option<i64> {
+    url.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .and_then(|segment| segment.parse::<i64>().ok())
 }
 
 fn auto_approve_plan_approval(
@@ -6511,6 +6716,21 @@ fn truncate_output(value: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_pr_number_handles_gh_create_url() {
+        assert_eq!(
+            parse_pr_number("https://github.com/owner/repo/pull/123"),
+            Some(123)
+        );
+        // gh sometimes prints a trailing newline/slash; trimming happens upstream + here.
+        assert_eq!(
+            parse_pr_number("https://github.com/owner/repo/pull/7/"),
+            Some(7)
+        );
+        assert_eq!(parse_pr_number("not-a-url"), None);
+        assert_eq!(parse_pr_number(""), None);
+    }
 
     fn shell_output(stdout: &str, stderr: &str, exit_code: i32) -> ShellOutput {
         ShellOutput {

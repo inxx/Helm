@@ -119,7 +119,10 @@ pub fn pull_request_detail(root: &Path, number: i64) -> CommandResult<PullReques
         additions: value["additions"].as_i64().unwrap_or(0),
         deletions: value["deletions"].as_i64().unwrap_or(0),
         changed_files: value["changedFiles"].as_i64().unwrap_or(0),
-        commits: value["commits"].as_array().map(|a| a.len() as i64).unwrap_or(0),
+        commits: value["commits"]
+            .as_array()
+            .map(|a| a.len() as i64)
+            .unwrap_or(0),
         labels: value["labels"]
             .as_array()
             .map(|items| {
@@ -169,7 +172,10 @@ fn pr_comment_timeline(value: &Value) -> Vec<PullRequestComment> {
     if let Some(comments) = value["comments"].as_array() {
         for c in comments {
             items.push(PullRequestComment {
-                author: c["author"]["login"].as_str().unwrap_or_default().to_string(),
+                author: c["author"]["login"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 body: c["body"].as_str().unwrap_or_default().to_string(),
                 created_at: c["createdAt"].as_str().unwrap_or_default().to_string(),
                 kind: "comment".to_string(),
@@ -185,7 +191,10 @@ fn pr_comment_timeline(value: &Value) -> Vec<PullRequestComment> {
                 continue;
             }
             items.push(PullRequestComment {
-                author: r["author"]["login"].as_str().unwrap_or_default().to_string(),
+                author: r["author"]["login"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 body,
                 created_at: r["submittedAt"].as_str().unwrap_or_default().to_string(),
                 kind: state.to_string(),
@@ -209,6 +218,40 @@ pub fn merge_pull_request(root: &Path, number: i64) -> CommandResult<()> {
         root,
         &["pr", "merge", &number.to_string(), "--merge"],
         "PR 머지에 실패했습니다.",
+    )
+}
+
+/// Open a PR from `head` into `base`. Returns the PR URL printed on stdout.
+/// `--head` is explicit so the PR never originates from `base` (e.g. main).
+pub fn create_pull_request(
+    root: &Path,
+    base: &str,
+    head: &str,
+    title: &str,
+    body: &str,
+) -> CommandResult<String> {
+    let output = Command::new("gh")
+        .current_dir(root)
+        .args([
+            "pr", "create", "--base", base, "--head", head, "--title", title, "--body", body,
+        ])
+        .output()
+        .map_err(|err| CommandError::io("PR 생성에 실패했습니다.", err))?;
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GhCommandFailed",
+            "PR 생성에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn comment_pull_request(root: &Path, number: i64, body: &str) -> CommandResult<()> {
+    gh_pr_action(
+        root,
+        &["pr", "comment", &number.to_string(), "--body", body],
+        "PR 코멘트 작성에 실패했습니다.",
     )
 }
 

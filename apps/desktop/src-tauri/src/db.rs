@@ -6745,6 +6745,52 @@ fn list_external_refs(
     collect_rows(rows, "외부 참조를 읽지 못했습니다.")
 }
 
+/// The merge PR opened for a task, if one was already created. Returns (url, number).
+/// PRs are stored as a `ref_type='Url'` external ref titled `PullRequest #<n>`.
+pub fn find_pr_ref(conn: &Connection, task_id: &str) -> CommandResult<Option<(String, i64)>> {
+    let row = conn
+        .query_row(
+            "SELECT ref_value, ref_title FROM task_external_refs
+             WHERE task_id = ?1 AND ref_type = 'Url' AND ref_title LIKE 'PullRequest %'
+             ORDER BY created_at DESC LIMIT 1",
+            params![task_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|err| CommandError::database("PR 참조를 읽지 못했습니다.", err))?;
+    Ok(row.and_then(|(url, title)| {
+        title
+            .trim_start_matches("PullRequest #")
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .map(|number| (url, number))
+    }))
+}
+
+pub fn insert_pr_ref(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    url: &str,
+    number: i64,
+) -> CommandResult<()> {
+    conn.execute(
+        "INSERT INTO task_external_refs (id, project_id, task_id, ref_type, ref_value, ref_title, created_at)
+         VALUES (?1, ?2, ?3, 'Url', ?4, ?5, ?6)",
+        params![
+            new_id(),
+            project_id,
+            task_id,
+            url,
+            format!("PullRequest #{number}"),
+            now()
+        ],
+    )
+    .map_err(|err| CommandError::database("PR 참조를 저장하지 못했습니다.", err))?;
+    Ok(())
+}
+
 fn map_epic(row: &rusqlite::Row<'_>) -> rusqlite::Result<EpicSummary> {
     Ok(EpicSummary {
         id: row.get(0)?,
@@ -9613,7 +9659,62 @@ fn build_upstream_dossiers_markdown(
 /// 중재자(arbiter) Context Pack에 붙일 "리뷰어 판정 요약" 섹션을 만든다.
 /// 각 code_reviewer run의 structured-result.json을 best-effort로 읽어 connection/provider,
 /// 판정(status), summary, blockers를 요약한다. 파일이 없거나 깨져도 안전하게 건너뛴다.
-fn build_reviewer_verdicts_markdown(
+/// Format one reviewer run row (connection/provider/status + parsed summary/blockers)
+/// into the markdown bullet shared by the aggregate and single-run views.
+fn format_reviewer_verdict_entry(
+    root: &Path,
+    connection_id: Option<&str>,
+    provider: Option<&str>,
+    result_status: Option<&str>,
+    artifact_dir: &str,
+    result_path: &str,
+) -> String {
+    let reviewer = match (connection_id, provider) {
+        (Some(connection), Some(provider)) => format!("{connection} ({provider})"),
+        (Some(connection), None) => connection.to_string(),
+        (None, Some(provider)) => provider.to_string(),
+        (None, None) => "알 수 없는 리뷰어".to_string(),
+    };
+    let status = result_status.unwrap_or("미상");
+
+    let result_file = root.join(artifact_dir).join(result_path);
+    let parsed = fs::read_to_string(&result_file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let (summary, blockers) = match parsed.as_ref() {
+        Some(value) => {
+            let summary = value
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(|item| truncate_for_context(item, 600))
+                .unwrap_or_else(|| "요약 없음".to_string());
+            let blockers = value
+                .get("gateResult")
+                .and_then(|gate| gate.get("blockers"))
+                .map(|item| string_list_from_json(item))
+                .unwrap_or_default();
+            (summary, blockers)
+        }
+        None => (
+            "structured-result.json을 읽지 못했습니다.".to_string(),
+            Vec::new(),
+        ),
+    };
+    let blockers_md = if blockers.is_empty() {
+        "  - blockers: 없음".to_string()
+    } else {
+        blockers
+            .iter()
+            .map(|item| format!("  - blocker: {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!("- {reviewer} · status={status}\n  - summary: {summary}\n{blockers_md}")
+}
+
+pub(crate) fn build_reviewer_verdicts_markdown(
     conn: &Connection,
     root: &Path,
     project_id: &str,
@@ -9646,50 +9747,13 @@ fn build_reviewer_verdicts_markdown(
     let mut entries: Vec<String> = Vec::new();
     for row in rows.flatten() {
         let (connection_id, provider, result_status, artifact_dir, result_path) = row;
-        let reviewer = match (connection_id.as_deref(), provider.as_deref()) {
-            (Some(connection), Some(provider)) => format!("{connection} ({provider})"),
-            (Some(connection), None) => connection.to_string(),
-            (None, Some(provider)) => provider.to_string(),
-            (None, None) => "알 수 없는 리뷰어".to_string(),
-        };
-        let status = result_status.as_deref().unwrap_or("미상");
-
-        let result_file = root.join(&artifact_dir).join(&result_path);
-        let parsed = fs::read_to_string(&result_file)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-        let (summary, blockers) = match parsed.as_ref() {
-            Some(value) => {
-                let summary = value
-                    .get("summary")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                    .map(|item| truncate_for_context(item, 600))
-                    .unwrap_or_else(|| "요약 없음".to_string());
-                let blockers = value
-                    .get("gateResult")
-                    .and_then(|gate| gate.get("blockers"))
-                    .map(|item| string_list_from_json(item))
-                    .unwrap_or_default();
-                (summary, blockers)
-            }
-            None => (
-                "structured-result.json을 읽지 못했습니다.".to_string(),
-                Vec::new(),
-            ),
-        };
-        let blockers_md = if blockers.is_empty() {
-            "  - blockers: 없음".to_string()
-        } else {
-            blockers
-                .iter()
-                .map(|item| format!("  - blocker: {item}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        entries.push(format!(
-            "- {reviewer} · status={status}\n  - summary: {summary}\n{blockers_md}"
+        entries.push(format_reviewer_verdict_entry(
+            root,
+            connection_id.as_deref(),
+            provider.as_deref(),
+            result_status.as_deref(),
+            &artifact_dir,
+            &result_path,
         ));
     }
 
@@ -9697,6 +9761,39 @@ fn build_reviewer_verdicts_markdown(
         return String::new();
     }
     format!("\n\n## 리뷰어 판정 요약\n\n{}\n", entries.join("\n"))
+}
+
+/// Same verdict bullet as the aggregate view, but for a single run — used as the
+/// body of that reviewer's PR comment. Empty string if the run can't be read.
+pub fn build_single_run_verdict_markdown(conn: &Connection, root: &Path, run_id: &str) -> String {
+    conn.query_row(
+        "SELECT connection_id, provider, result_status, artifact_dir, result_path
+           FROM agent_runs WHERE id = ?1",
+        params![run_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        },
+    )
+    .ok()
+    .map(
+        |(connection_id, provider, result_status, artifact_dir, result_path)| {
+            format_reviewer_verdict_entry(
+                root,
+                connection_id.as_deref(),
+                provider.as_deref(),
+                result_status.as_deref(),
+                &artifact_dir,
+                &result_path,
+            )
+        },
+    )
+    .unwrap_or_default()
 }
 
 fn repair_allowed_scope(affected_files: &Value) -> String {
