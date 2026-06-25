@@ -924,24 +924,36 @@ h3 {
 
 .session-orchestrator-composer button {
   align-self: stretch;
-  min-height: 72px;
+  min-height: 0;
+  flex: 1;
 }
 
 .composer-buttons {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   align-items: stretch;
 }
 
 .composer-worktree-toggle {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  margin-right: auto;
   font-size: 12px;
-  opacity: 0.85;
   cursor: pointer;
   user-select: none;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--background);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.composer-worktree-toggle input {
+  margin: 0;
+  cursor: pointer;
 }
 
 .session-message {
