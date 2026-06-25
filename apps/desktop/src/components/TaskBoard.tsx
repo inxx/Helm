@@ -147,8 +147,9 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
               {columnTasks.map((task) => {
                 const externalRef = task.externalRefs[0];
                 const activeRun = activeRunForTask(taskRuns[task.id] ?? []);
-                const flowLabel = activeRun ? runFlowLabel(activeRun) : stage.next;
-                const flowCaption = activeRun ? t("tasks.card.run") : t("tasks.card.next");
+                // 활성 run이 있으면 run 박스가 역할·상태를 보여주므로 flow 줄은 idle일 때만 쓴다.
+                const flowLabel = stage.next;
+                const flowCaption = t("tasks.card.next");
                 const taskAriaLabel = taskCardAriaLabel(task, activeRun, flowLabel, t);
                 const projectLabel = projectLabels?.[task.projectId];
                 return (
@@ -180,10 +181,12 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
                         <small>{runHint(activeRun, t)}</small>
                       </div>
                     ) : null}
-                    <div className="task-card-flow">
-                      <span>{flowCaption}</span>
-                      <strong>{flowLabel}</strong>
-                    </div>
+                    {!activeRun ? (
+                      <div className="task-card-flow">
+                        <span>{flowCaption}</span>
+                        <strong>{flowLabel}</strong>
+                      </div>
+                    ) : null}
                     {task.statusReason ? <span className="task-card-reason">{task.statusReason}</span> : null}
                     {externalRef ? (
                       <small className="task-card-ref">
@@ -204,11 +207,6 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
 
 function activeRunForTask(runs: AgentRunSummary[]): AgentRunSummary | null {
   return selectVisibleRun(runs);
-}
-
-function runFlowLabel(run: AgentRunSummary): string {
-  const live = deriveRunLiveState(run);
-  return `${roleLabel(run.roleId)} · ${live.label}`;
 }
 
 function runHint(run: AgentRunSummary, t: ReturnType<typeof useI18n>["t"]): string {
