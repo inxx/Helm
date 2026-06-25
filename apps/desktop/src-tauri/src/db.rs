@@ -7256,6 +7256,11 @@ fn validate_role_id(role_id: &str) -> CommandResult<()> {
     Err(CommandError::validation("지원하지 않는 역할입니다."))
 }
 
+/// 리뷰 단계 역할(코드 리뷰어/중재자)은 읽기 위주이므로 실행 승인 없이 진행시킨다.
+fn is_review_role(role_id: &str) -> bool {
+    matches!(role_id, "code_reviewer" | "arbiter")
+}
+
 fn role_policy_role_ids() -> [&'static str; 6] {
     [
         "planner",
@@ -8701,6 +8706,26 @@ fn bridge_codex_server_request(
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
     ) {
         return Ok(json!({ "decision": "decline" }));
+    }
+    // 리뷰 단계 역할은 승인 게이트 없이 진행한다(읽기 위주 리뷰).
+    if is_review_role(&run.role_id) {
+        append_and_emit_run_event(
+            conn,
+            project_id,
+            &run.task_id,
+            &run.id,
+            "approval",
+            "RunApproval AutoApproved (review role)",
+            json!({
+                "approvalType": "RunApproval",
+                "status": "AutoApproved",
+                "roleId": run.role_id,
+                "rpcMethod": method,
+                "params": params
+            }),
+            event_sink,
+        )?;
+        return Ok(json!({ "decision": "accept" }));
     }
     let approval = create_run_approval(
         conn,
@@ -12505,6 +12530,14 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("obsidian session files");
         assert_eq!(session_notes.len(), 5);
+    }
+
+    #[test]
+    fn review_roles_skip_run_approval() {
+        assert!(is_review_role("code_reviewer"));
+        assert!(is_review_role("arbiter"));
+        assert!(!is_review_role("coder"));
+        assert!(!is_review_role("planner"));
     }
 
     #[test]
