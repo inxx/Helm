@@ -46,6 +46,7 @@ export function PrScreen({ snapshot, onOpenProject }: PrScreenProps) {
   const ko = language === "ko";
   const [pulls, setPulls] = useState<PullRequestSummary[]>([]);
   const [search, setSearch] = useState("");
+  const [stateFilter, setStateFilter] = useState<"all" | "open" | "closed" | "merged">("all");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -78,15 +79,30 @@ export function PrScreen({ snapshot, onOpenProject }: PrScreenProps) {
     };
   }, [ko, reloadKey, snapshot]);
 
+  const counts = useMemo(() => {
+    const c = { all: pulls.length, open: 0, closed: 0, merged: 0 };
+    for (const pr of pulls) {
+      const s = pr.state.toUpperCase();
+      if (s === "MERGED") c.merged += 1;
+      else if (s === "CLOSED") c.closed += 1;
+      else c.open += 1;
+    }
+    return c;
+  }, [pulls]);
+
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return pulls.filter((pr) => {
+      const s = pr.state.toUpperCase();
+      if (stateFilter === "open" && !(s !== "MERGED" && s !== "CLOSED")) return false;
+      if (stateFilter === "closed" && s !== "CLOSED") return false;
+      if (stateFilter === "merged" && s !== "MERGED") return false;
       if (!needle) return true;
       return [`#${pr.number}`, pr.title, pr.branch, pr.author, pr.projectName].some((value) =>
         value.toLowerCase().includes(needle),
       );
     });
-  }, [pulls, search]);
+  }, [pulls, search, stateFilter]);
 
   if (!snapshot) {
     return (
@@ -121,8 +137,8 @@ export function PrScreen({ snapshot, onOpenProject }: PrScreenProps) {
           <h2>{ko ? "Pull Requests" : "Pull Requests"}</h2>
           <p>
             {ko
-              ? `전체 프로젝트 · gh CLI로 가져온 열린 PR`
-              : `All projects · open PRs via gh CLI`}
+              ? `전체 프로젝트 · gh CLI로 가져온 PR`
+              : `All projects · PRs via gh CLI`}
           </p>
         </div>
       </header>
@@ -140,6 +156,28 @@ export function PrScreen({ snapshot, onOpenProject }: PrScreenProps) {
               value={search}
             />
           </label>
+          <div className="git-work-filters" role="tablist" aria-label={ko ? "PR 상태 필터" : "PR state filter"}>
+            {(
+              [
+                ["all", ko ? "전체" : "All"],
+                ["open", ko ? "열림" : "Open"],
+                ["closed", ko ? "닫힘" : "Closed"],
+                ["merged", ko ? "머지됨" : "Merged"],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                className={stateFilter === key ? "active" : undefined}
+                role="tab"
+                aria-selected={stateFilter === key}
+                onClick={() => setStateFilter(key)}
+                type="button"
+              >
+                {label}
+                <strong>{counts[key]}</strong>
+              </button>
+            ))}
+          </div>
           <div className="git-work-actions">
             <button
               onClick={() => setReloadKey((key) => key + 1)}
