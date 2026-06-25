@@ -4,15 +4,16 @@ import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Bot, Check, FileText, Folder, Loader2, MessageSquare, MoreHorizontal, Pencil, Plus, Send, Square, Trash2, User, X } from "lucide-react";
-import { ApprovalInbox } from "../components/ApprovalInbox";
 import { collapseSessionsByTask } from "../lib/agentSessions";
 import { api } from "../lib/api";
 import { useI18n, type AppLanguage } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
 import { roleLabel } from "../lib/runnerReadiness";
 import { parsePlanTasks, stripPlanJson } from "../lib/planParse";
+import { parseApprovalDecision } from "../lib/approvalIntent";
 import type {
   AgentSessionSummary,
+  ApprovalSummary,
   GitFileStatus,
   ProjectSnapshot,
   RoleAssignment,
@@ -110,13 +111,13 @@ export function SessionsScreen({
   const selectedTask = selectedTaskId ? taskById.get(selectedTaskId) ?? null : null;
   const activeTask = activeSession?.taskId ? taskById.get(activeSession.taskId) ?? selectedTask : selectedTask;
   const activeApprovalEntityIds = [activeTask?.id, activeSession?.sourceRunId].filter(Boolean) as string[];
-  const activeApprovalCount =
+  const activePendingApprovals =
     activeApprovalEntityIds.length > 0
       ? snapshot?.approvals.filter(
           (approval) => approval.status === "Pending" && activeApprovalEntityIds.includes(approval.entityId),
-        ).length ?? 0
-      : 0;
-  const pendingApprovalCount = snapshot?.approvals.filter((approval) => approval.status === "Pending").length ?? 0;
+        ) ?? []
+      : [];
+  const activeApprovalCount = activePendingApprovals.length;
   const activeRunWorking = Boolean(activeSession && isSessionWorking(activeSession));
   const latestActivity = events.at(-1) ?? null;
   // Orchestrator turn is in flight but no visible assistant text yet.
@@ -329,6 +330,13 @@ export function SessionsScreen({
     setOrchestratorInput("");
     setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "user", content: goalText }]);
 
+    // 승인 대기가 있으면 채팅 입력을 승인/반려 결정으로 먼저 해석한다 (버튼 대신 대화로 결정).
+    const decision = parseApprovalDecision(goalText);
+    if (decision && activePendingApprovals.length > 0) {
+      await decideApprovalFromChat(activePendingApprovals[0], decision.decision, decision.reason);
+      return;
+    }
+
     if (!pendingOrchestratorRequirement || !isConfirmationMessage(goalText)) {
       const nextRequirement = [pendingOrchestratorRequirement, goalText].filter(Boolean).join("\n\n추가 요구사항:\n");
       setPendingOrchestratorRequirement(nextRequirement);
@@ -367,6 +375,46 @@ export function SessionsScreen({
       await maybeMaterializeTasks(reply);
     } catch (error) {
       setLoadError(messageFromError(error, language === "ko" ? "오케스트레이터에 지시를 전달하지 못했습니다." : "Failed to send the instruction to the orchestrator."));
+    } finally {
+      setOrchestratorBusy(false);
+    }
+  }
+
+  async function decideApprovalFromChat(
+    approval: ApprovalSummary,
+    decision: "approve" | "reject",
+    reason: string,
+  ) {
+    if (!snapshot) return;
+    const decisionReason = reason.trim() || (decision === "approve" ? "확인 완료" : "반려");
+    setOrchestratorBusy(true);
+    try {
+      if (decision === "approve") {
+        await api.approveApproval(snapshot.project.id, approval.id, decisionReason);
+        // ApprovalInbox.decide와 동일한 후속 실행 — 빠지면 승인 후 파이프라인이 멈춘다.
+        if (approval.approvalType === "PlanApproval" && approval.entityType === "Task") {
+          await api.startNextRoleRun(snapshot.project.id, approval.entityId).catch(() => undefined);
+        } else if (approval.approvalType === "RunApproval" && approval.entityType === "AgentRun") {
+          await api.runHostRole(snapshot.project.id, approval.entityId).catch(() => undefined);
+        }
+      } else {
+        await api.rejectApproval(snapshot.project.id, approval.id, decisionReason);
+      }
+      await onRefresh();
+      setReloadKey((value) => value + 1);
+      setOrchestratorMessages((items) => [
+        ...items,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content:
+            decision === "approve"
+              ? `${approvalLabel(approval.approvalType, language)} 승인을 반영했습니다.`
+              : `${approvalLabel(approval.approvalType, language)} 반려를 반영했습니다.`,
+        },
+      ]);
+    } catch (error) {
+      setLoadError(messageFromError(error, language === "ko" ? "승인 상태를 변경하지 못했습니다." : "Failed to update the approval."));
     } finally {
       setOrchestratorBusy(false);
     }
@@ -748,16 +796,19 @@ export function SessionsScreen({
                   <p>{t("sessions.noLinkedRun")}</p>
                 </SessionMessage>
               )}
-              {activeApprovalCount > 0 ? (
-                <SessionMessage role="assistant" icon="bot" title={t("sessions.approvalTitle")} timestamp={activeSession?.lastSignalAt ?? activeTask?.updatedAt ?? null} language={language}>
-                  <ApprovalInbox
-                    compact
-                    entityIds={activeApprovalEntityIds}
-                    onRefresh={onRefresh}
-                    snapshot={snapshot}
-                  />
+              {activePendingApprovals.map((approval) => (
+                <SessionMessage key={approval.id} role="assistant" icon="bot" title={t("sessions.approvalTitle")} timestamp={activeSession?.lastSignalAt ?? activeTask?.updatedAt ?? null} language={language}>
+                  <p>
+                    <strong>{approvalLabel(approval.approvalType, language)}</strong>
+                    {approval.requestedReason ? ` — ${approval.requestedReason}` : ""}
+                  </p>
+                  <p>
+                    {language === "ko"
+                      ? '아래 입력창에 "승인" 또는 "반려"를 입력하세요. 뒤에 결정 사유를 덧붙일 수 있습니다.'
+                      : 'Type "approve" or "reject" in the box below. You can add a reason after it.'}
+                  </p>
                 </SessionMessage>
-              ) : null}
+              ))}
               {events.filter(isContentEvent).map((event) => (
                 <SessionMessage
                   icon={event.kind === "artifact" ? "file" : "bot"}
@@ -983,11 +1034,6 @@ export function SessionsScreen({
 
       <aside className="session-context-panel" aria-label={language === "ko" ? "환경" : "Environment"}>
         <h3>Environment</h3>
-        {pendingApprovalCount > 0 ? (
-          <div className="session-context-approval">
-            <ApprovalInbox compact snapshot={snapshot} onRefresh={onRefresh} />
-          </div>
-        ) : null}
         <ContextRow className="full-value" label="Branch" value={activeSession?.branch ?? snapshot.repository.currentBranch ?? "-"} />
         <ContextRow className="full-value" label="Worktree" value={activeSession?.worktreePath ?? "-"} />
         <ContextRow label="Changed files" value={changedFileCountLabel(changedFiles, activeSession)} />
@@ -1460,6 +1506,15 @@ function messageFromError(error: unknown, fallback: string): string {
 
 function isConfirmationMessage(text: string): boolean {
   return /^(확인|진행|시작|좋아|오케이|ok|okay|yes|y|go|proceed)$/i.test(text.trim());
+}
+
+function approvalLabel(type: string, language: AppLanguage): string {
+  const ko = language === "ko";
+  if (type === "PlanApproval") return ko ? "계획 승인" : "Plan approval";
+  if (type === "ReviewApproval") return ko ? "리뷰 진행 승인" : "Review approval";
+  if (type === "RunApproval") return ko ? "실행 승인" : "Run approval";
+  if (type === "ManualStatusChange") return ko ? "수동 상태 변경" : "Manual status change";
+  return type;
 }
 
 function requirementConfirmationText(requirement: string, language: AppLanguage): string {
