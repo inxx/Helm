@@ -272,11 +272,24 @@ export const api = {
   jiraTokenStatus(projectId: string) {
     return invoke<boolean>("jira_token_status", { projectId });
   },
-  setGithubAppCredentials(projectId: string, appId: string, privateKey: string) {
-    return invoke<void>("set_github_app_credentials", { projectId, appId, privateKey });
+  setGithubAppCredentials(
+    projectId: string,
+    appId: string,
+    privateKey: string,
+    connectionId?: string,
+  ) {
+    return invoke<void>("set_github_app_credentials", {
+      projectId,
+      connectionId: connectionId ?? null,
+      appId,
+      privateKey,
+    });
   },
-  githubAppCredentialsStatus(projectId: string) {
-    return invoke<boolean>("github_app_credentials_status", { projectId });
+  githubAppCredentialsStatus(projectId: string, connectionId?: string) {
+    return invoke<boolean>("github_app_credentials_status", {
+      projectId,
+      connectionId: connectionId ?? null,
+    });
   },
   openExternal(url: string) {
     return invoke<void>("open_external", { url });

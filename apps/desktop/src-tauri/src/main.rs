@@ -1320,15 +1320,19 @@ fn jira_token_status(project_id: String) -> CommandResult<bool> {
 #[tauri::command]
 fn set_github_app_credentials(
     project_id: String,
+    connection_id: Option<String>,
     app_id: String,
     private_key: String,
 ) -> CommandResult<()> {
-    github_app::set_credentials(&project_id, &app_id, &private_key)
+    github_app::set_credentials(&project_id, connection_id.as_deref(), &app_id, &private_key)
 }
 
 #[tauri::command]
-fn github_app_credentials_status(project_id: String) -> CommandResult<bool> {
-    github_app::credentials_status(&project_id)
+fn github_app_credentials_status(
+    project_id: String,
+    connection_id: Option<String>,
+) -> CommandResult<bool> {
+    github_app::credentials_status(&project_id, connection_id.as_deref())
 }
 
 #[tauri::command]
@@ -2241,7 +2245,7 @@ fn post_review_comment_to_pr(
     // Post under the GitHub App identity when configured; otherwise fall back to
     // the default `gh` account. Token-mint failures degrade to the fallback so a
     // misconfigured App never silently drops the review comment.
-    let app_token = match github_app::installation_token(root, project_id) {
+    let app_token = match github_app::installation_token(root, project_id, run.connection_id.as_deref()) {
         Ok(token) => token,
         Err(error) => {
             append_and_emit_system_run_event(

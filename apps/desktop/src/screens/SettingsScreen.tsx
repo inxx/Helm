@@ -126,6 +126,8 @@ export function SettingsScreen({
   const [githubAppId, setGithubAppId] = useState("");
   const [githubAppKey, setGithubAppKey] = useState("");
   const [githubAppSet, setGithubAppSet] = useState(false);
+  // "" = 프로젝트 기본 봇, 그 외 = 해당 리뷰어 connection의 봇.
+  const [githubAppTarget, setGithubAppTarget] = useState("");
   const [obsidianVaultPath, setObsidianVaultPath] = useState("");
   const [obsidianArtifactPath, setObsidianArtifactPath] = useState("");
   const [busy, setBusy] = useState(false);
@@ -191,13 +193,19 @@ export function SettingsScreen({
       .jiraTokenStatus(snapshot.project.id)
       .then(setJiraTokenSet)
       .catch(() => setJiraTokenSet(false));
+    setGithubAppTarget("");
+  }, [snapshot]);
+
+  // 선택된 봇 대상(프로젝트 기본 또는 리뷰어 connection)의 저장 상태를 조회한다.
+  useEffect(() => {
+    if (!snapshot) return;
     setGithubAppId("");
     setGithubAppKey("");
     void api
-      .githubAppCredentialsStatus(snapshot.project.id)
+      .githubAppCredentialsStatus(snapshot.project.id, githubAppTarget || undefined)
       .then(setGithubAppSet)
       .catch(() => setGithubAppSet(false));
-  }, [snapshot]);
+  }, [snapshot, githubAppTarget]);
 
   useEffect(() => {
     if (!snapshot || activeCategory !== "usage") return;
@@ -237,6 +245,18 @@ export function SettingsScreen({
     () => aiConnections.filter((connection) => connection.enabled),
     [aiConnections],
   );
+
+  // 봇을 매칭할 수 있는 리뷰어 목록: code_reviewer에 배정된 connection들.
+  const reviewerBotTargets = useMemo(() => {
+    const assignment = normalizeRoleAssignments(roleAssignments).find(
+      (item) => item.roleId === "code_reviewer",
+    );
+    return (assignment?.selections ?? []).map((selection) => ({
+      id: selection.connectionId,
+      label: aiConnections.find((connection) => connection.id === selection.connectionId)?.label ?? selection.connectionId,
+      decider: selection.decider === true,
+    }));
+  }, [roleAssignments, aiConnections]);
 
   async function save() {
     setBusy(true);
@@ -804,7 +824,12 @@ export function SettingsScreen({
   async function saveGithubAppCredentials() {
     if (!snapshot) return;
     try {
-      await api.setGithubAppCredentials(snapshot.project.id, githubAppId, githubAppKey);
+      await api.setGithubAppCredentials(
+        snapshot.project.id,
+        githubAppId,
+        githubAppKey,
+        githubAppTarget || undefined,
+      );
       const set = githubAppId.trim().length > 0;
       setGithubAppSet(set);
       setGithubAppId("");
@@ -1582,12 +1607,27 @@ export function SettingsScreen({
                   <h3>GitHub App</h3>
                   <p className="muted">
                     {language === "ko"
-                      ? "코드리뷰 코멘트를 개인 gh 계정 대신 GitHub App 신원으로 PR에 작성합니다."
-                      : "Post code-review comments to PRs under a GitHub App identity instead of your personal gh account."}
+                      ? "코드리뷰 코멘트를 개인 gh 계정 대신 GitHub App 신원으로 PR에 작성합니다. 리뷰어별로 다른 봇을 매칭할 수 있습니다."
+                      : "Post code-review comments to PRs under a GitHub App identity instead of your personal gh account. You can match a different bot per reviewer."}
                   </p>
                 </div>
                 <div className="jira-fieldset">
                   <h4 className="jira-fieldset-title">{language === "ko" ? "인증" : "Authentication"}</h4>
+                  <label className="settings-field">
+                    <span>{language === "ko" ? "적용 대상" : "Applies to"}</span>
+                    <select
+                      value={githubAppTarget}
+                      onChange={(event) => setGithubAppTarget(event.target.value)}
+                    >
+                      <option value="">{language === "ko" ? "프로젝트 기본 봇" : "Project default bot"}</option>
+                      {reviewerBotTargets.map((target) => (
+                        <option key={target.id} value={target.id}>
+                          {target.label}
+                          {target.decider ? (language === "ko" ? " · 결정권자" : " · decider") : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <label className="settings-field">
                     <span>
                       App ID
@@ -1632,8 +1672,8 @@ export function SettingsScreen({
                   </div>
                   <p className="muted">
                     {language === "ko"
-                      ? "App ID와 private key는 OS 키체인에 프로젝트별로 저장됩니다. App이 대상 저장소에 설치되어 있어야 하며, Pull requests write 권한이 필요합니다. 미설정 시 기존 gh 계정으로 코멘트가 작성됩니다."
-                      : "App ID and private key are stored per-project in the OS keychain. The App must be installed on the target repo with Pull requests write permission. When unset, comments fall back to the default gh account."}
+                      ? "App ID와 private key는 OS 키체인에 대상별로 저장됩니다. App이 대상 저장소에 설치되어 있어야 하며, Pull requests write 권한이 필요합니다. 리뷰어별 봇이 없으면 프로젝트 기본 봇으로, 그것도 없으면 기존 gh 계정으로 폴백합니다."
+                      : "App ID and private key are stored per-target in the OS keychain. The App must be installed on the target repo with Pull requests write permission. A reviewer with no bot falls back to the project default bot, then to the default gh account."}
                   </p>
                 </div>
               </section>

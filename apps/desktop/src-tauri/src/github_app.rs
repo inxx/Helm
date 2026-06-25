@@ -22,15 +22,27 @@ struct Credentials {
     private_key: String,
 }
 
-fn keyring_entry(project_id: &str) -> CommandResult<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, project_id).map_err(|err| {
+/// Keyring username for the credential slot. `connection_id` scopes the slot to
+/// a single reviewer connection (`project::connection`); `None` is the
+/// project-level default bot, keyed exactly as before for backward compat.
+fn keyring_entry(project_id: &str, connection_id: Option<&str>) -> CommandResult<keyring::Entry> {
+    let key = match connection_id {
+        Some(cid) if !cid.is_empty() => format!("{project_id}::{cid}"),
+        _ => project_id.to_string(),
+    };
+    keyring::Entry::new(KEYRING_SERVICE, &key).map_err(|err| {
         CommandError::with_details("KeyringError", "키체인에 접근하지 못했습니다.", err.to_string())
     })
 }
 
 /// Store App ID + private key as one JSON entry. Empty App ID clears the secret.
-pub fn set_credentials(project_id: &str, app_id: &str, private_key: &str) -> CommandResult<()> {
-    let entry = keyring_entry(project_id)?;
+pub fn set_credentials(
+    project_id: &str,
+    connection_id: Option<&str>,
+    app_id: &str,
+    private_key: &str,
+) -> CommandResult<()> {
+    let entry = keyring_entry(project_id, connection_id)?;
     let app_id = app_id.trim();
     let private_key = private_key.trim();
     if app_id.is_empty() {
@@ -59,8 +71,8 @@ pub fn set_credentials(project_id: &str, app_id: &str, private_key: &str) -> Com
     })
 }
 
-pub fn credentials_status(project_id: &str) -> CommandResult<bool> {
-    let entry = keyring_entry(project_id)?;
+pub fn credentials_status(project_id: &str, connection_id: Option<&str>) -> CommandResult<bool> {
+    let entry = keyring_entry(project_id, connection_id)?;
     match entry.get_password() {
         Ok(_) => Ok(true),
         Err(keyring::Error::NoEntry) => Ok(false),
@@ -72,8 +84,11 @@ pub fn credentials_status(project_id: &str) -> CommandResult<bool> {
     }
 }
 
-fn load_credentials(project_id: &str) -> CommandResult<Option<Credentials>> {
-    let entry = keyring_entry(project_id)?;
+fn load_credentials(
+    project_id: &str,
+    connection_id: Option<&str>,
+) -> CommandResult<Option<Credentials>> {
+    let entry = keyring_entry(project_id, connection_id)?;
     match entry.get_password() {
         Ok(raw) => serde_json::from_str(&raw).map(Some).map_err(|err| {
             CommandError::with_details(
@@ -92,11 +107,22 @@ fn load_credentials(project_id: &str) -> CommandResult<Option<Credentials>> {
 }
 
 /// Mint a repo installation access token for `root`'s GitHub repo.
-/// Returns `Ok(None)` when the project has no App credentials configured, so
-/// callers can fall back to the default `gh` auth.
-pub fn installation_token(root: &Path, project_id: &str) -> CommandResult<Option<String>> {
-    let creds = match load_credentials(project_id)? {
+///
+/// `connection_id` selects the reviewer-specific bot; if that connection has no
+/// credentials, it falls back to the project-level default bot. Returns
+/// `Ok(None)` when neither is configured, so callers can fall back to `gh` auth.
+pub fn installation_token(
+    root: &Path,
+    project_id: &str,
+    connection_id: Option<&str>,
+) -> CommandResult<Option<String>> {
+    let creds = match load_credentials(project_id, connection_id)? {
         Some(creds) => creds,
+        // 리뷰어별 봇이 없으면 프로젝트 기본 봇으로 폴백한다(둘 다 없으면 gh 계정).
+        None if connection_id.is_some() => match load_credentials(project_id, None)? {
+            Some(creds) => creds,
+            None => return Ok(None),
+        },
         None => return Ok(None),
     };
     let repo = name_with_owner(root)?;
