@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Download,
   FolderTree,
+  Github,
   Info,
   Layers,
   Loader2,
@@ -52,6 +53,7 @@ type SettingsCategory =
   | "assignments"
   | "usage"
   | "jira"
+  | "github"
   | "worktree"
   | "app"
   | "advanced";
@@ -67,6 +69,7 @@ const CATEGORIES: Array<{
   { id: "assignments", labelKey: "settings.category.assignments.label", hintKey: "settings.category.assignments.hint", icon: Workflow },
   { id: "usage", labelKey: "settings.category.usage.label", hintKey: "settings.category.usage.hint", icon: BarChart3 },
   { id: "jira", labelKey: "settings.category.jira.label", hintKey: "settings.category.jira.hint", icon: CheckCircle2 },
+  { id: "github", labelKey: "settings.category.github.label", hintKey: "settings.category.github.hint", icon: Github },
   { id: "worktree", labelKey: "settings.category.worktree.label", hintKey: "settings.category.worktree.hint", icon: FolderTree },
   { id: "app", labelKey: "settings.category.app.label", hintKey: "settings.category.app.hint", icon: Info },
   { id: "advanced", labelKey: "settings.category.advanced.label", hintKey: "settings.category.advanced.hint", icon: Wrench },
@@ -80,7 +83,6 @@ const ROLE_DEFINITIONS: Array<{
   { roleId: "coder", selectionMode: "single" },
   { roleId: "plan_verifier", selectionMode: "multiple" },
   { roleId: "code_reviewer", selectionMode: "multiple" },
-  { roleId: "arbiter", selectionMode: "single" },
   { roleId: "tester", selectionMode: "multiple" },
 ];
 
@@ -121,6 +123,9 @@ export function SettingsScreen({
   const [jiraConfig, setJiraConfig] = useState<JiraConfig>(emptyJiraConfig());
   const [jiraToken, setJiraToken] = useState("");
   const [jiraTokenSet, setJiraTokenSet] = useState(false);
+  const [githubAppId, setGithubAppId] = useState("");
+  const [githubAppKey, setGithubAppKey] = useState("");
+  const [githubAppSet, setGithubAppSet] = useState(false);
   const [obsidianVaultPath, setObsidianVaultPath] = useState("");
   const [obsidianArtifactPath, setObsidianArtifactPath] = useState("");
   const [busy, setBusy] = useState(false);
@@ -186,6 +191,12 @@ export function SettingsScreen({
       .jiraTokenStatus(snapshot.project.id)
       .then(setJiraTokenSet)
       .catch(() => setJiraTokenSet(false));
+    setGithubAppId("");
+    setGithubAppKey("");
+    void api
+      .githubAppCredentialsStatus(snapshot.project.id)
+      .then(setGithubAppSet)
+      .catch(() => setGithubAppSet(false));
   }, [snapshot]);
 
   useEffect(() => {
@@ -731,7 +742,35 @@ export function SettingsScreen({
         if (assignment.roleId !== roleId) return assignment;
         return withLegacyConnectionIds({
           ...assignment,
-          selections: upsertSelection(assignment.selections, roleSelection(connectionId, model.trim() || null)),
+          // decider 등 기존 selection 플래그를 보존하며 model만 갱신한다.
+          selections: assignment.selections.map((selection) =>
+            selection.connectionId === connectionId
+              ? { ...selection, model: model.trim() || null }
+              : selection,
+          ),
+        });
+      }),
+    );
+  }
+
+  // code_reviewer 다중 선택 중 한 연결을 결정권자로 토글한다(이미 결정권자면 해제, 한 번에 한 명).
+  function setRoleDecider(roleId: RoleAssignment["roleId"], connectionId: string) {
+    setRoleAssignments((current) =>
+      normalizeRoleAssignments(current).map((assignment) => {
+        if (assignment.roleId !== roleId) return assignment;
+        const alreadyDecider = assignment.selections.some(
+          (selection) => selection.connectionId === connectionId && selection.decider,
+        );
+        return withLegacyConnectionIds({
+          ...assignment,
+          selections: assignment.selections.map((selection) => {
+            const next = { ...selection };
+            delete next.decider;
+            if (!alreadyDecider && selection.connectionId === connectionId) {
+              next.decider = true;
+            }
+            return next;
+          }),
         });
       }),
     );
@@ -758,6 +797,30 @@ export function SettingsScreen({
         tone: "error",
         title: "Jira 토큰 저장 실패",
         description: error instanceof Error ? error.message : "토큰 저장에 실패했습니다.",
+      });
+    }
+  }
+
+  async function saveGithubAppCredentials() {
+    if (!snapshot) return;
+    try {
+      await api.setGithubAppCredentials(snapshot.project.id, githubAppId, githubAppKey);
+      const set = githubAppId.trim().length > 0;
+      setGithubAppSet(set);
+      setGithubAppId("");
+      setGithubAppKey("");
+      showToast({
+        tone: "success",
+        title: set ? "GitHub App 자격증명 저장됨" : "GitHub App 자격증명 삭제됨",
+        description: set
+          ? "App ID와 private key를 OS 키체인에 저장했습니다."
+          : "키체인에서 자격증명을 제거했습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "GitHub App 자격증명 저장 실패",
+        description: error instanceof Error ? error.message : "자격증명 저장에 실패했습니다.",
       });
     }
   }
@@ -1329,7 +1392,11 @@ export function SettingsScreen({
                             <span>
                               {roleGroupLabel(role.roleId, language)}
                               <span className="role-mode-pill">
-                                {role.selectionMode === "single" ? (language === "ko" ? "단일" : "Single") : (language === "ko" ? "다중 · all_pass" : "Multiple · all_pass")}
+                                {role.selectionMode === "single"
+                                  ? (language === "ko" ? "단일" : "Single")
+                                  : role.roleId === "code_reviewer" && selections.some((selection) => selection.decider)
+                                    ? (language === "ko" ? "다중 · 결정권자" : "Multiple · decider")
+                                    : (language === "ko" ? "다중 · all_pass" : "Multiple · all_pass")}
                               </span>
                             </span>
                           </div>
@@ -1366,6 +1433,18 @@ export function SettingsScreen({
                                         </option>
                                       ))}
                                     </select>
+                                  ) : null}
+                                  {role.roleId === "code_reviewer" && isSelected ? (
+                                    <label className="inline-check">
+                                      <input
+                                        checked={
+                                          selections.find((selection) => selection.connectionId === connection.id)?.decider === true
+                                        }
+                                        onChange={() => setRoleDecider(role.roleId, connection.id)}
+                                        type="checkbox"
+                                      />
+                                      <span>{language === "ko" ? "결정권자" : "Decider"}</span>
+                                    </label>
                                   ) : null}
                                 </div>
                               );
@@ -1494,6 +1573,69 @@ export function SettingsScreen({
                   <code>HELM_JIRA_PROJECT_KEY</code>, <code>HELM_JIRA_SITE_URL</code>
                   {language === "ko" ? " 등으로 전달됩니다." : ", and related environment variables."}
                 </p>
+              </section>
+            ) : null}
+
+            {activeCategory === "github" ? (
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3>GitHub App</h3>
+                  <p className="muted">
+                    {language === "ko"
+                      ? "코드리뷰 코멘트를 개인 gh 계정 대신 GitHub App 신원으로 PR에 작성합니다."
+                      : "Post code-review comments to PRs under a GitHub App identity instead of your personal gh account."}
+                  </p>
+                </div>
+                <div className="jira-fieldset">
+                  <h4 className="jira-fieldset-title">{language === "ko" ? "인증" : "Authentication"}</h4>
+                  <label className="settings-field">
+                    <span>
+                      App ID
+                      {githubAppSet ? (
+                        <em className="muted"> · {language === "ko" ? "저장됨" : "saved"}</em>
+                      ) : null}
+                    </span>
+                    <input
+                      placeholder={githubAppSet ? "••••••" : "123456"}
+                      value={githubAppId}
+                      onChange={(event) => setGithubAppId(event.target.value)}
+                    />
+                  </label>
+                  <label className="settings-field">
+                    <span>{language === "ko" ? "Private key (PEM)" : "Private key (PEM)"}</span>
+                    <textarea
+                      placeholder={
+                        githubAppSet
+                          ? "••••••••••••"
+                          : "-----BEGIN RSA PRIVATE KEY-----"
+                      }
+                      rows={6}
+                      value={githubAppKey}
+                      onChange={(event) => setGithubAppKey(event.target.value)}
+                    />
+                  </label>
+                  <div className="settings-actions">
+                    <button
+                      className="secondary-button"
+                      disabled={!snapshot || (!githubAppId.trim() && !githubAppSet)}
+                      onClick={() => void saveGithubAppCredentials()}
+                      type="button"
+                    >
+                      {!githubAppId.trim() && githubAppSet
+                        ? language === "ko"
+                          ? "자격증명 삭제"
+                          : "Clear credentials"
+                        : language === "ko"
+                          ? "자격증명 저장"
+                          : "Save credentials"}
+                    </button>
+                  </div>
+                  <p className="muted">
+                    {language === "ko"
+                      ? "App ID와 private key는 OS 키체인에 프로젝트별로 저장됩니다. App이 대상 저장소에 설치되어 있어야 하며, Pull requests write 권한이 필요합니다. 미설정 시 기존 gh 계정으로 코멘트가 작성됩니다."
+                      : "App ID and private key are stored per-project in the OS keychain. The App must be installed on the target repo with Pull requests write permission. When unset, comments fall back to the default gh account."}
+                  </p>
+                </div>
               </section>
             ) : null}
 
@@ -1980,7 +2122,6 @@ function defaultRolePresets() {
     { roleId: "coder", label: "구현자", provider: null },
     { roleId: "plan_verifier", label: "계획 검토자", provider: null },
     { roleId: "code_reviewer", label: "코드 리뷰어", provider: null },
-    { roleId: "arbiter", label: "중재자", provider: null },
     { roleId: "tester", label: "테스트 담당자", provider: null },
   ];
 }
@@ -2181,6 +2322,7 @@ function normalizeSelections(assignment: Partial<RoleAssignment> | undefined) {
         connectionId: item.connectionId,
         model: typeof item.model === "string" ? item.model : null,
         effort: typeof item.effort === "string" ? item.effort : null,
+        ...(item.decider === true ? { decider: true as const } : {}),
       }));
   }
   if (!Array.isArray(assignment?.connectionIds)) return [];
@@ -2299,8 +2441,6 @@ function roleGroupLabel(roleId: RoleAssignment["roleId"], language: AppLanguage)
     case "plan_verifier":
     case "code_reviewer":
       return language === "ko" ? "검수" : "Review";
-    case "arbiter":
-      return language === "ko" ? "중재자" : "Arbiter";
     case "tester":
       return language === "ko" ? "테스트" : "Testing";
     default:

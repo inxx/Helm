@@ -2025,12 +2025,6 @@ pub fn prepare_role_context(
         worktree_setup.as_ref(),
         Some(&role_policy),
     )?;
-    // 중재자는 리뷰어 판정을 종합해야 하므로 Context Pack에 리뷰어 판정 요약을 덧붙인다.
-    if role_id == "arbiter" {
-        context_pack.push_str(&build_reviewer_verdicts_markdown(
-            conn, root, project_id, task_id,
-        ));
-    }
     context_pack.push_str(&build_upstream_dossiers_markdown(
         conn, root, project_id, task_id, role_id,
     ));
@@ -2211,14 +2205,9 @@ pub fn prepare_next_role_context(
     if task.project_id != project_id {
         return Err(CommandError::validation("대상 태스크를 찾을 수 없습니다."));
     }
-    let role_id = if task.status == "CodeReview" {
-        let settings = effective_settings(conn, project_id)?;
-        resolve_code_review_role(conn, &settings, project_id, &task)?
-    } else {
-        next_role_for_task_status(&task.status).ok_or_else(|| {
-            CommandError::validation("현재 태스크 상태에서 자동으로 실행할 role이 없습니다.")
-        })?
-    };
+    let role_id = next_role_for_task_status(&task.status).ok_or_else(|| {
+        CommandError::validation("현재 태스크 상태에서 자동으로 실행할 role이 없습니다.")
+    })?;
     ensure_task_worktree(conn, root, project_id, task_id)?;
     prepare_role_context(conn, root, project_id, task_id, role_id)
 }
@@ -7214,7 +7203,6 @@ fn gate_for_role(role_id: &str) -> Option<&'static str> {
     match role_id {
         "plan_verifier" => Some("plan_verification"),
         "code_reviewer" => Some("code_review"),
-        "arbiter" => Some("code_review"),
         "tester" => Some("test"),
         _ => None,
     }
@@ -7370,25 +7358,24 @@ fn validate_task_status(status: &str) -> CommandResult<()> {
 fn validate_role_id(role_id: &str) -> CommandResult<()> {
     if matches!(
         role_id,
-        "planner" | "coder" | "plan_verifier" | "code_reviewer" | "arbiter" | "tester"
+        "planner" | "coder" | "plan_verifier" | "code_reviewer" | "tester"
     ) {
         return Ok(());
     }
     Err(CommandError::validation("지원하지 않는 역할입니다."))
 }
 
-/// 리뷰 단계 역할(코드 리뷰어/중재자)은 읽기 위주이므로 실행 승인 없이 진행시킨다.
+/// 리뷰 단계 역할(코드 리뷰어)은 읽기 위주이므로 실행 승인 없이 진행시킨다.
 fn is_review_role(role_id: &str) -> bool {
-    matches!(role_id, "code_reviewer" | "arbiter")
+    matches!(role_id, "code_reviewer")
 }
 
-fn role_policy_role_ids() -> [&'static str; 6] {
+fn role_policy_role_ids() -> [&'static str; 5] {
     [
         "planner",
         "coder",
         "plan_verifier",
         "code_reviewer",
-        "arbiter",
         "tester",
     ]
 }
@@ -8063,27 +8050,42 @@ fn count_passed_role_connections(
     Ok(count as usize)
 }
 
-/// CodeReview 단계에서 다음에 실행할 role을 고른다.
-/// 아직 실행되지 않은 리뷰어가 있으면 code_reviewer, 모든 리뷰어가 끝났고 중재자가
-/// 배정되어 있으며 아직 통과하지 않았으면 arbiter, 그 외에는 code_reviewer로 폴백한다.
-/// arbiter가 배정되지 않으면 항상 code_reviewer를 반환해 기존 동작을 그대로 유지한다(opt-in).
-fn resolve_code_review_role(
+/// code_reviewer selections 중 decider=true로 지정된 connectionId를 반환한다.
+/// 지정된 결정권자가 없으면 None을 반환해 기존 all_pass 동작을 유지한다(opt-in).
+fn decider_connection_id(settings: &EffectiveSettings, role_id: &str) -> Option<String> {
+    let assignment = settings
+        .role_assignments
+        .as_array()?
+        .iter()
+        .find(|item| item.get("roleId").and_then(Value::as_str) == Some(role_id))?;
+    assignment
+        .get("selections")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|item| item.get("decider").and_then(Value::as_bool) == Some(true))
+        .and_then(|item| item.get("connectionId").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// 특정 connection이 해당 role에서 통과(Succeeded·pass)했는지 본다. 결정권자 게이트용.
+fn connection_passed_role(
     conn: &Connection,
-    settings: &EffectiveSettings,
     project_id: &str,
-    task: &TaskSummary,
-) -> CommandResult<&'static str> {
-    if pick_pending_role_connection(conn, project_id, &task.id, "code_reviewer", settings)?
-        .is_some()
-    {
-        return Ok("code_reviewer");
-    }
-    if !role_connection_ids(settings, "arbiter").is_empty()
-        && count_passed_role_connections(conn, project_id, &task.id, "arbiter")? == 0
-    {
-        return Ok("arbiter");
-    }
-    Ok("code_reviewer")
+    task_id: &str,
+    role_id: &str,
+    connection_id: &str,
+) -> CommandResult<bool> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_runs
+             WHERE project_id = ?1 AND task_id = ?2 AND role_id = ?3
+               AND connection_id = ?4
+               AND status = 'Succeeded' AND result_status = 'pass'",
+            params![project_id, task_id, role_id, connection_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| CommandError::database("결정권자 통과 여부를 확인하지 못했습니다.", err))?;
+    Ok(count > 0)
 }
 
 fn inject_provider_options(
@@ -9433,47 +9435,49 @@ fn apply_successful_role_result(
     // 같은 role의 다음 connection run을 큐잉하도록 둔다.
     if role_id == "code_reviewer" {
         let settings = effective_settings(conn, project_id)?;
-        let reviewer_ids = role_connection_ids(&settings, "code_reviewer");
-        if reviewer_ids.len() >= 2 {
-            let passed =
-                count_passed_role_connections(conn, project_id, &task.id, "code_reviewer")?;
-            if passed < reviewer_ids.len() {
+        // 결정권자(decider)가 지정돼 있으면 그 연결의 통과가 곧 게이트다.
+        // 다른 리뷰어의 판정은 조언일 뿐 상태 전이를 막지 않는다.
+        if let Some(decider) = decider_connection_id(&settings, "code_reviewer") {
+            if !connection_passed_role(conn, project_id, &task.id, "code_reviewer", &decider)? {
                 insert_audit(
                     conn,
                     project_id,
                     "Task",
                     Some(&task.id),
-                    "code_review.partial",
+                    "code_review.decider_pending",
                     json!({
                         "taskId": task.id,
                         "runId": run_id,
-                        "passed": passed,
-                        "total": reviewer_ids.len(),
-                        "policy": "all_pass"
+                        "decider": decider,
+                        "policy": "decider"
                     }),
                 )?;
                 return Ok(());
             }
-        }
-        // 모든 리뷰어가 통과했어도 중재자(arbiter)가 배정되어 있고 아직 통과하지 않았다면
-        // 상태 전이를 보류한다. CodeReview에 머무르면 auto-handoff가 arbiter run을 큐잉한다.
-        // 중재자가 배정되지 않은 경우 이 분기를 건너뛰어 기존 all_pass → Testing 동작을 유지한다(opt-in).
-        if !role_connection_ids(&settings, "arbiter").is_empty()
-            && count_passed_role_connections(conn, project_id, &task.id, "arbiter")? == 0
-        {
-            insert_audit(
-                conn,
-                project_id,
-                "Task",
-                Some(&task.id),
-                "code_review.arbiter_pending",
-                json!({
-                    "taskId": task.id,
-                    "runId": run_id,
-                    "policy": "arbiter_signoff"
-                }),
-            )?;
-            return Ok(());
+        } else {
+            // 결정권자 미지정 → 기존 all_pass 정책(연결 2개 이상은 모두 통과해야 전이).
+            let reviewer_ids = role_connection_ids(&settings, "code_reviewer");
+            if reviewer_ids.len() >= 2 {
+                let passed =
+                    count_passed_role_connections(conn, project_id, &task.id, "code_reviewer")?;
+                if passed < reviewer_ids.len() {
+                    insert_audit(
+                        conn,
+                        project_id,
+                        "Task",
+                        Some(&task.id),
+                        "code_review.partial",
+                        json!({
+                            "taskId": task.id,
+                            "runId": run_id,
+                            "passed": passed,
+                            "total": reviewer_ids.len(),
+                            "policy": "all_pass"
+                        }),
+                    )?;
+                    return Ok(());
+                }
+            }
         }
     }
 
@@ -9643,6 +9647,7 @@ fn role_context_contract(role_id: &str) -> RoleContextContract {
                 "버그 가능성, 데이터 손실, stale cache, 권한/상태 전이 오류를 우선한다.",
                 "발견 사항은 재현 조건과 파일 단위 근거를 포함한다.",
                 "차단 이슈는 gateResult.blocking=true로 남긴다.",
+                "프론트엔드(UI) 변경이 있고 dev server·스크린샷 도구를 쓸 수 있으면, 영향 화면을 캡쳐해 $HELM_ARTIFACT_DIR/screenshots/ 에 저장하고 리뷰 근거로 참조한다(best-effort: 불가하면 생략, 캡쳐 여부로 차단하지 않는다).",
             ],
             pass_conditions: &[
                 "사용자 요구사항 대비 명백한 결함이 없다.",
@@ -9655,28 +9660,6 @@ fn role_context_contract(role_id: &str) -> RoleContextContract {
             ],
             forbidden: &[
                 "리뷰 중 직접 수정하지 않는다.",
-                "스타일 취향만으로 blocking을 만들지 않는다.",
-            ],
-            gate: Some("code_review"),
-        },
-        "arbiter" => RoleContextContract {
-            objective: "여러 리뷰어의 판정(verdict)을 종합·중재해 단일 최종 판정을 내린다.",
-            focus: &[
-                "리뷰어 간 중복·상충·거짓양성을 정리하고 핵심 blocker만 남긴다.",
-                "리뷰어 dossier와 diff를 함께 보고 실제 머지 가능 여부를 판단한다.",
-                "차단 이슈는 gateResult.blocking=true로 남긴다.",
-            ],
-            pass_conditions: &[
-                "모든 리뷰어 우려가 해소되었거나 기각 사유와 함께 정리되었다.",
-                "남은 위험이 있으면 non-blocking risk로 구분되어 있다.",
-                "머지 가능하면 gateResult.status=pass를 남긴다.",
-            ],
-            blocking_conditions: &[
-                "해소되지 않은 실제 blocker가 남아 있다.",
-                "리뷰어 판정만으로 머지 가능 여부를 확정할 수 없다.",
-            ],
-            forbidden: &[
-                "중재 중 직접 코드를 수정하지 않는다.",
                 "스타일 취향만으로 blocking을 만들지 않는다.",
             ],
             gate: Some("code_review"),
@@ -9963,9 +9946,6 @@ fn build_upstream_dossiers_markdown(
     )
 }
 
-/// 중재자(arbiter) Context Pack에 붙일 "리뷰어 판정 요약" 섹션을 만든다.
-/// 각 code_reviewer run의 structured-result.json을 best-effort로 읽어 connection/provider,
-/// 판정(status), summary, blockers를 요약한다. 파일이 없거나 깨져도 안전하게 건너뛴다.
 /// Format one reviewer run row (connection/provider/status + parsed summary/blockers)
 /// into the markdown bullet shared by the aggregate and single-run views.
 fn format_reviewer_verdict_entry(
@@ -10019,55 +9999,6 @@ fn format_reviewer_verdict_entry(
             .join("\n")
     };
     format!("- {reviewer} · status={status}\n  - summary: {summary}\n{blockers_md}")
-}
-
-pub(crate) fn build_reviewer_verdicts_markdown(
-    conn: &Connection,
-    root: &Path,
-    project_id: &str,
-    task_id: &str,
-) -> String {
-    let mut stmt = match conn.prepare(
-        "SELECT connection_id, provider, result_status, artifact_dir, result_path
-           FROM agent_runs
-          WHERE project_id = ?1 AND task_id = ?2 AND role_id = 'code_reviewer'
-            AND status = 'Succeeded'
-          ORDER BY finished_at ASC, created_at ASC",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return String::new(),
-    };
-    let rows = stmt.query_map(params![project_id, task_id], |row| {
-        Ok((
-            row.get::<_, Option<String>>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-        ))
-    });
-    let rows = match rows {
-        Ok(rows) => rows,
-        Err(_) => return String::new(),
-    };
-
-    let mut entries: Vec<String> = Vec::new();
-    for row in rows.flatten() {
-        let (connection_id, provider, result_status, artifact_dir, result_path) = row;
-        entries.push(format_reviewer_verdict_entry(
-            root,
-            connection_id.as_deref(),
-            provider.as_deref(),
-            result_status.as_deref(),
-            &artifact_dir,
-            &result_path,
-        ));
-    }
-
-    if entries.is_empty() {
-        return String::new();
-    }
-    format!("\n\n## 리뷰어 판정 요약\n\n{}\n", entries.join("\n"))
 }
 
 /// Same verdict bullet as the aggregate view, but for a single run — used as the
@@ -10592,7 +10523,6 @@ fn validate_role_run_state(
         "coder" => task.status == "Ready",
         "plan_verifier" => task.status == "PlanVerification",
         "code_reviewer" => task.status == "CodeReview",
-        "arbiter" => task.status == "CodeReview",
         "tester" => task.status == "Testing",
         _ => false,
     };
@@ -10674,7 +10604,6 @@ fn next_status_for_role(role_id: &str) -> Option<&'static str> {
         "coder" => Some("PlanVerification"),
         "plan_verifier" => Some("CodeReview"),
         "code_reviewer" => Some("Testing"),
-        "arbiter" => Some("Testing"),
         "tester" => Some("MergeWaiting"),
         _ => None,
     }
@@ -10923,7 +10852,6 @@ fn default_role_presets() -> Value {
         { "roleId": "coder", "label": "구현자", "provider": null },
         { "roleId": "plan_verifier", "label": "계획 검토자", "provider": null },
         { "roleId": "code_reviewer", "label": "코드 리뷰어", "provider": null },
-        { "roleId": "arbiter", "label": "중재자", "provider": null },
         { "roleId": "tester", "label": "테스트 담당자", "provider": null }
     ])
 }
@@ -10961,13 +10889,6 @@ fn default_role_assignments() -> Value {
             "connectionIds": [],
             "selections": [],
             "aggregationPolicy": "all_pass"
-        },
-        {
-            "roleId": "arbiter",
-            "selectionMode": "single",
-            "connectionIds": [],
-            "selections": [],
-            "aggregationPolicy": null
         },
         {
             "roleId": "tester",
@@ -12771,7 +12692,6 @@ mod tests {
     #[test]
     fn review_roles_skip_run_approval() {
         assert!(is_review_role("code_reviewer"));
-        assert!(is_review_role("arbiter"));
         assert!(!is_review_role("coder"));
         assert!(!is_review_role("planner"));
     }
@@ -13516,27 +13436,17 @@ mod tests {
     }
 
     #[test]
-    fn arbiter_is_opt_in_when_unassigned() {
-        // 중재자(arbiter)가 배정되지 않은 기본 상태에서는 arbiter connection 목록이 비어 있어야 한다.
-        // 이때 CodeReview 핸드오프는 기존처럼 code_reviewer만 사용해 zero-regression을 보장한다.
-        let settings = EffectiveSettings {
+    fn decider_is_opt_in_among_reviewers() {
+        // 결정권자(decider) 플래그가 없으면 None → 기존 all_pass 동작이 유지된다(opt-in).
+        let base = |selections: Value| EffectiveSettings {
             role_presets: default_role_presets(),
-            ai_connections: json!([
-                {
-                    "id": "claude-a",
-                    "label": "Reviewer A",
-                    "provider": "claude",
-                    "commandArgs": ["claude", "--", "review-a"],
-                    "timeoutSeconds": 120,
-                    "enabled": true
-                }
-            ]),
+            ai_connections: json!([]),
             role_assignments: json!([
                 {
                     "roleId": "code_reviewer",
                     "selectionMode": "multiple",
-                    "connectionIds": ["claude-a"],
-                    "selections": [{ "connectionId": "claude-a" }],
+                    "connectionIds": ["claude-a", "claude-b"],
+                    "selections": selections,
                     "aggregationPolicy": "all_pass"
                 }
             ]),
@@ -13551,41 +13461,31 @@ mod tests {
             artifact_retention_days: Some(30),
         };
 
-        // 중재자 미배정 → arbiter 목록은 비어 있다(opt-in 게이트).
-        assert!(role_connection_ids(&settings, "arbiter").is_empty());
+        // decider 플래그 없음 → None.
+        let without = base(json!([
+            { "connectionId": "claude-a" },
+            { "connectionId": "claude-b" }
+        ]));
+        assert_eq!(decider_connection_id(&without, "code_reviewer"), None);
 
-        // 기본 role assignment 묶음에는 arbiter가 single/빈 목록으로 포함된다.
-        let defaults = default_role_assignments();
-        let arbiter = defaults
-            .as_array()
-            .and_then(|items| {
-                items
-                    .iter()
-                    .find(|item| item.get("roleId").and_then(Value::as_str) == Some("arbiter"))
-            })
-            .expect("default arbiter assignment");
+        // 한 selection에 decider=true → 그 connectionId가 게이트가 된다.
+        let with = base(json!([
+            { "connectionId": "claude-a" },
+            { "connectionId": "claude-b", "decider": true }
+        ]));
         assert_eq!(
-            arbiter.get("selectionMode").and_then(Value::as_str),
-            Some("single")
+            decider_connection_id(&with, "code_reviewer").as_deref(),
+            Some("claude-b")
         );
-        assert!(role_connection_ids(
-            &EffectiveSettings {
-                role_presets: default_role_presets(),
-                ai_connections: json!([]),
-                role_assignments: defaults.clone(),
-                role_policies: default_role_policies(),
-                conductor_config: None,
-                worktree_root: None,
-                worktree_setup: None,
-                jira_config: None,
-                obsidian_vault_path: None,
-                obsidian_artifact_path: None,
-                token_budget: None,
-                artifact_retention_days: Some(30),
-            },
-            "arbiter"
-        )
-        .is_empty());
+
+        // 기본 role assignment 묶음에는 더 이상 arbiter가 없다.
+        let defaults = default_role_assignments();
+        assert!(defaults
+            .as_array()
+            .map(|items| items
+                .iter()
+                .all(|item| item.get("roleId").and_then(Value::as_str) != Some("arbiter")))
+            .unwrap_or(false));
     }
 
     #[test]

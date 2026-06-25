@@ -210,6 +210,7 @@ pub fn approve_pull_request(root: &Path, number: i64) -> CommandResult<()> {
         root,
         &["pr", "review", &number.to_string(), "--approve"],
         "PR 승인에 실패했습니다.",
+        None,
     )
 }
 
@@ -218,6 +219,7 @@ pub fn merge_pull_request(root: &Path, number: i64) -> CommandResult<()> {
         root,
         &["pr", "merge", &number.to_string(), "--merge"],
         "PR 머지에 실패했습니다.",
+        None,
     )
 }
 
@@ -281,18 +283,35 @@ pub fn create_pull_request(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub fn comment_pull_request(root: &Path, number: i64, body: &str) -> CommandResult<()> {
+/// Post a PR comment. When `token` is `Some`, it is injected as `GH_TOKEN` so the
+/// comment is authored by that identity (e.g. a GitHub App installation token)
+/// instead of the default `gh` account.
+pub fn comment_pull_request(
+    root: &Path,
+    number: i64,
+    body: &str,
+    token: Option<&str>,
+) -> CommandResult<()> {
     gh_pr_action(
         root,
         &["pr", "comment", &number.to_string(), "--body", body],
         "PR 코멘트 작성에 실패했습니다.",
+        token,
     )
 }
 
-fn gh_pr_action(root: &Path, args: &[&str], failure: &str) -> CommandResult<()> {
-    let output = Command::new("gh")
-        .current_dir(root)
-        .args(args)
+fn gh_pr_action(
+    root: &Path,
+    args: &[&str],
+    failure: &str,
+    token: Option<&str>,
+) -> CommandResult<()> {
+    let mut command = Command::new("gh");
+    command.current_dir(root).args(args);
+    if let Some(token) = token {
+        command.env("GH_TOKEN", token);
+    }
+    let output = command
         .output()
         .map_err(|err| CommandError::io(failure, err))?;
     if !output.status.success() {

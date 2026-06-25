@@ -1,5 +1,6 @@
 mod db;
 mod git;
+mod github_app;
 mod jira;
 mod models;
 
@@ -1317,6 +1318,20 @@ fn jira_token_status(project_id: String) -> CommandResult<bool> {
 }
 
 #[tauri::command]
+fn set_github_app_credentials(
+    project_id: String,
+    app_id: String,
+    private_key: String,
+) -> CommandResult<()> {
+    github_app::set_credentials(&project_id, &app_id, &private_key)
+}
+
+#[tauri::command]
+fn github_app_credentials_status(project_id: String) -> CommandResult<bool> {
+    github_app::credentials_status(&project_id)
+}
+
+#[tauri::command]
 fn open_external(url: String) -> CommandResult<()> {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err(CommandError::new(
@@ -2001,12 +2016,9 @@ fn queue_next_role_after_success(
         return;
     }
 
-    // code_reviewer/arbiter 통과 시 그 판정을 PR 코멘트로 남긴다(best-effort).
-    match run.role_id.as_str() {
-        "code_reviewer" | "arbiter" => {
-            post_review_comment_to_pr(app, conn, context, project_id, run)
-        }
-        _ => {}
+    // code_reviewer 통과 시 그 판정을 PR 코멘트로 남긴다(best-effort).
+    if run.role_id == "code_reviewer" {
+        post_review_comment_to_pr(app, conn, context, project_id, run);
     }
 
     if run.role_id == "planner" {
@@ -2206,7 +2218,7 @@ fn ensure_merge_pr_for_code_review(
     }
 }
 
-/// After a reviewer/arbiter run passes, post its verdict to the task's PR as a comment.
+/// After a reviewer run passes, post its verdict to the task's PR as a comment.
 /// Best-effort; the internal gate (db::apply_successful_role_result) remains the source of truth.
 fn post_review_comment_to_pr(
     app: &AppHandle,
@@ -2221,19 +2233,31 @@ fn post_review_comment_to_pr(
     };
     let root = Path::new(&context.root_path);
 
-    let body = if run.role_id == "arbiter" {
-        format!(
-            "✅ 중재자(arbiter) sign-off — 리뷰완료{}",
-            db::build_reviewer_verdicts_markdown(conn, root, project_id, &run.task_id)
-        )
-    } else {
-        format!(
-            "🤖 코드리뷰\n{}",
-            db::build_single_run_verdict_markdown(conn, root, &run.id)
-        )
+    let body = format!(
+        "🤖 코드리뷰\n{}",
+        db::build_single_run_verdict_markdown(conn, root, &run.id)
+    );
+
+    // Post under the GitHub App identity when configured; otherwise fall back to
+    // the default `gh` account. Token-mint failures degrade to the fallback so a
+    // misconfigured App never silently drops the review comment.
+    let app_token = match github_app::installation_token(root, project_id) {
+        Ok(token) => token,
+        Err(error) => {
+            append_and_emit_system_run_event(
+                app,
+                conn,
+                project_id,
+                &run.task_id,
+                &run.id,
+                "code_review.app_token_failed",
+                json!({ "number": number, "roleId": run.role_id, "error": command_error_summary(&error) }),
+            );
+            None
+        }
     };
 
-    if let Err(error) = git::comment_pull_request(root, number, &body) {
+    if let Err(error) = git::comment_pull_request(root, number, &body, app_token.as_deref()) {
         append_and_emit_system_run_event(
             app,
             conn,
@@ -7012,6 +7036,8 @@ fn main() {
             set_jira_status,
             set_jira_token,
             jira_token_status,
+            set_github_app_credentials,
+            github_app_credentials_status,
             open_external,
             get_recent_commits,
             get_changed_files,

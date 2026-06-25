@@ -272,6 +272,12 @@ export const api = {
   jiraTokenStatus(projectId: string) {
     return invoke<boolean>("jira_token_status", { projectId });
   },
+  setGithubAppCredentials(projectId: string, appId: string, privateKey: string) {
+    return invoke<void>("set_github_app_credentials", { projectId, appId, privateKey });
+  },
+  githubAppCredentialsStatus(projectId: string) {
+    return invoke<boolean>("github_app_credentials_status", { projectId });
+  },
   openExternal(url: string) {
     return invoke<void>("open_external", { url });
   },

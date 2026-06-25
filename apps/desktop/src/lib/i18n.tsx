@@ -31,6 +31,8 @@ export type MessageKey =
   | "settings.category.usage.hint"
   | "settings.category.jira.label"
   | "settings.category.jira.hint"
+  | "settings.category.github.label"
+  | "settings.category.github.hint"
   | "settings.category.worktree.label"
   | "settings.category.worktree.hint"
   | "settings.category.app.label"
@@ -213,6 +215,8 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "settings.category.usage.hint": "Agent runs, work time, and provider mix",
     "settings.category.jira.label": "Jira",
     "settings.category.jira.hint": "Project key and default issue types",
+    "settings.category.github.label": "GitHub App",
+    "settings.category.github.hint": "Post review comments as a GitHub App",
     "settings.category.worktree.label": "Worktree",
     "settings.category.worktree.hint": "Parallel work directory location",
     "settings.category.app.label": "App",
@@ -394,6 +398,8 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "settings.category.usage.hint": "Agent 실행, 작업 시간, provider 분포",
     "settings.category.jira.label": "Jira",
     "settings.category.jira.hint": "프로젝트 키와 기본 이슈 타입",
+    "settings.category.github.label": "GitHub App",
+    "settings.category.github.hint": "리뷰 코멘트를 GitHub App으로 작성",
     "settings.category.worktree.label": "Worktree",
     "settings.category.worktree.hint": "병렬 작업 디렉터리 위치",
     "settings.category.app.label": "앱",
