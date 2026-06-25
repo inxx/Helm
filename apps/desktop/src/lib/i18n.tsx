@@ -10,7 +10,6 @@ export type MessageKey =
   | "nav.jira"
   | "nav.terminal"
   | "nav.editor"
-  | "nav.hermes"
   | "nav.settings"
   | "shell.domainTabs"
   | "shell.projects"
@@ -193,7 +192,6 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "nav.jira": "Jira",
     "nav.terminal": "Terminal",
     "nav.editor": "Editor",
-    "nav.hermes": "Hermes",
     "nav.settings": "Settings",
     "shell.domainTabs": "Domain tabs",
     "shell.projects": "Projects",
@@ -375,7 +373,6 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "nav.jira": "jira",
     "nav.terminal": "터미널",
     "nav.editor": "에디터",
-    "nav.hermes": "Hermes",
     "nav.settings": "설정",
     "shell.domainTabs": "도메인 탭",
     "shell.projects": "프로젝트",

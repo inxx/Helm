@@ -1,7 +1,5 @@
 mod db;
 mod git;
-mod hermes;
-mod hermes_acp;
 mod jira;
 mod models;
 
@@ -98,7 +96,6 @@ struct AppState {
     terminal_sessions: Mutex<HashMap<String, PtySession>>,
     role_pty_sessions: Mutex<HashMap<String, RolePtySession>>,
     handoff_watcher: Mutex<Option<Child>>,
-    acp_sessions: Mutex<HashMap<String, hermes_acp::AcpSession>>,
 }
 
 struct PtySession {
@@ -952,6 +949,32 @@ fn approve_task_completion_with_git(
             "테스트를 통과해 머지 대기 상태인 태스크만 완료 승인할 수 있습니다.",
         ));
     }
+
+    // PR이 있으면(CodeReview에서 생성됨) 사용자 트리거 머지 → Merged.
+    // 머지는 GitHub 측에서 일어나고 로컬 main HEAD는 직접 건드리지 않는다.
+    if let Some((_url, number)) = db::find_pr_ref(&conn, &task_id)? {
+        git::merge_pull_request(Path::new(&context.root_path), number)?;
+        let branch_name = db::get_task_worktree(&conn, &project_id, &task_id)?
+            .map(|worktree| worktree.branch_name)
+            .unwrap_or_default();
+        let updated_task = db::update_task_status(
+            &mut conn,
+            &project_id,
+            &task_id,
+            "Merged",
+            Some(format!("사용자 PR #{number} 머지")),
+        )?;
+        return Ok(TaskCompletionGitSummary {
+            task: updated_task,
+            branch_name,
+            commit_hash: String::new(),
+            pushed: false,
+            pr_number: Some(number),
+            merged: true,
+        });
+    }
+
+    // 폴백: PR이 없으면(변경 없음 등으로 CodeReview에서 PR 미생성) 기존 commit+push → Done.
     let worktree = db::get_task_worktree(&conn, &project_id, &task_id)?
         .ok_or_else(|| CommandError::validation("완료 승인할 task worktree를 찾을 수 없습니다."))?;
     let worktree_path = Path::new(&worktree.worktree_path);
@@ -985,6 +1008,8 @@ fn approve_task_completion_with_git(
         branch_name,
         commit_hash,
         pushed: true,
+        pr_number: None,
+        merged: false,
     })
 }
 
@@ -1420,6 +1445,24 @@ fn list_terminal_directories(
             path: parent.to_string_lossy().to_string(),
             label: "↑ ..".to_string(),
             kind: "parent".to_string(),
+        });
+    }
+
+    let root_path = context.root_path.to_string_lossy().to_string();
+    for (path, branch) in git::list_worktrees(&context.root_path) {
+        if path == root_path {
+            continue; // 메인 워크트리는 이미 "프로젝트 루트"로 표시된다.
+        }
+        let label = branch.unwrap_or_else(|| {
+            Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone())
+        });
+        entries.push(TerminalDirectoryEntry {
+            path,
+            label: format!("⎇ {label}"),
+            kind: "worktree".to_string(),
         });
     }
 
@@ -1936,6 +1979,30 @@ fn queue_next_role_after_success(
         return;
     }
 
+    // 작업 완료(plan_verifier 통과) 후에는 PR/리뷰를 자동 진행하지 않는다.
+    // ReviewApproval(리뷰 진행 승인)은 apply_successful_role_result에서 생성되고,
+    // 사용자가 승인하면 approve_approval에서 PR 생성 + 코드 리뷰어 실행을 시작한다.
+    if run.role_id == "plan_verifier" {
+        append_and_emit_system_run_event(
+            app,
+            conn,
+            project_id,
+            &run.task_id,
+            &run.id,
+            "Awaiting review approval",
+            json!({ "source": "review-gate", "approvalType": "ReviewApproval" }),
+        );
+        return;
+    }
+
+    // code_reviewer/arbiter 통과 시 그 판정을 PR 코멘트로 남긴다(best-effort).
+    match run.role_id.as_str() {
+        "code_reviewer" | "arbiter" => {
+            post_review_comment_to_pr(app, conn, context, project_id, run)
+        }
+        _ => {}
+    }
+
     if run.role_id == "planner" {
         match auto_approve_plan_approval(conn, project_id, &run.task_id) {
             Ok(Some(approval_id)) => {
@@ -2013,6 +2080,174 @@ fn queue_next_role_after_success(
             }
         }
     }
+}
+
+/// On entry to CodeReview, commit+push the task's feature branch and open a PR into main.
+/// Best-effort: any failure is logged and swallowed so the role pipeline keeps moving.
+/// NEVER pushes to main directly — push targets the feature branch, the PR only *targets* main.
+fn ensure_merge_pr_for_code_review(
+    app: &AppHandle,
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    task_id: &str,
+    log_run_id: &str,
+) {
+    let log = |message: &str, payload: Value| {
+        append_and_emit_system_run_event(
+            app,
+            conn,
+            project_id,
+            task_id,
+            log_run_id,
+            message,
+            payload,
+        );
+    };
+
+    let task = match db::get_task(conn, task_id) {
+        Ok(task) if task.status == "CodeReview" => task,
+        _ => return, // 아직 CodeReview가 아니면(게이트 보류 등) PR 만들지 않는다.
+    };
+
+    match db::find_pr_ref(conn, task_id) {
+        Ok(Some(_)) => return, // 이미 PR 있음 — 멱등.
+        Ok(None) => {}
+        Err(error) => {
+            log(
+                "PR ref lookup failed",
+                json!({ "error": command_error_summary(&error) }),
+            );
+            return;
+        }
+    }
+
+    let worktree = match db::get_task_worktree(conn, project_id, task_id) {
+        Ok(Some(worktree)) => worktree,
+        _ => {
+            log(
+                "code_review.pr_skipped_no_worktree",
+                json!({ "source": "pr-automation" }),
+            );
+            return;
+        }
+    };
+    let worktree_path = Path::new(&worktree.worktree_path);
+    let branch = match git::current_branch(worktree_path) {
+        Some(branch) => branch,
+        None => {
+            log(
+                "code_review.pr_skipped_detached_head",
+                json!({ "source": "pr-automation" }),
+            );
+            return;
+        }
+    };
+
+    match git::changed_files(worktree_path) {
+        Ok(files) if files.is_empty() => {
+            log(
+                "code_review.pr_skipped_no_changes",
+                json!({ "branch": branch }),
+            );
+            return;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log(
+                "code_review.pr_create_failed",
+                json!({ "stage": "changed_files", "error": command_error_summary(&error) }),
+            );
+            return;
+        }
+    }
+
+    let title = format_task_completion_commit_message(&task.title);
+    let body = if task.description.trim().is_empty() {
+        format!("Helm task `{}`", task.id)
+    } else {
+        format!("Helm task `{}`\n\n{}", task.id, task.description.trim())
+    };
+
+    let result = (|| -> CommandResult<String> {
+        git::stage_all(worktree_path)?;
+        git::commit_staged(worktree_path, &title)?;
+        git::push_branch(worktree_path, &branch)?;
+        git::create_pull_request(worktree_path, "main", &branch, &title, &body)
+    })();
+
+    match result {
+        Ok(url) => {
+            let number = parse_pr_number(&url);
+            if let Some(number) = number {
+                if let Err(error) = db::insert_pr_ref(conn, project_id, task_id, &url, number)
+                {
+                    log(
+                        "code_review.pr_ref_save_failed",
+                        json!({ "url": url, "error": command_error_summary(&error) }),
+                    );
+                    return;
+                }
+            }
+            log(
+                "code_review.pr_created",
+                json!({ "url": url, "number": number, "base": "main", "head": branch }),
+            );
+        }
+        Err(error) => {
+            log(
+                "code_review.pr_create_failed",
+                json!({ "stage": "gh", "branch": branch, "error": command_error_summary(&error) }),
+            );
+        }
+    }
+}
+
+/// After a reviewer/arbiter run passes, post its verdict to the task's PR as a comment.
+/// Best-effort; the internal gate (db::apply_successful_role_result) remains the source of truth.
+fn post_review_comment_to_pr(
+    app: &AppHandle,
+    conn: &rusqlite::Connection,
+    context: &ProjectContext,
+    project_id: &str,
+    run: &AgentRunSummary,
+) {
+    let (_url, number) = match db::find_pr_ref(conn, &run.task_id) {
+        Ok(Some(pr)) => pr,
+        _ => return, // PR이 없으면(변경 없음/생성 실패) 코멘트 대상 없음.
+    };
+    let root = Path::new(&context.root_path);
+
+    let body = if run.role_id == "arbiter" {
+        format!(
+            "✅ 중재자(arbiter) sign-off — 리뷰완료{}",
+            db::build_reviewer_verdicts_markdown(conn, root, project_id, &run.task_id)
+        )
+    } else {
+        format!(
+            "🤖 코드리뷰\n{}",
+            db::build_single_run_verdict_markdown(conn, root, &run.id)
+        )
+    };
+
+    if let Err(error) = git::comment_pull_request(root, number, &body) {
+        append_and_emit_system_run_event(
+            app,
+            conn,
+            project_id,
+            &run.task_id,
+            &run.id,
+            "code_review.pr_comment_failed",
+            json!({ "number": number, "roleId": run.role_id, "error": command_error_summary(&error) }),
+        );
+    }
+}
+
+/// Extract the trailing PR number from a `gh pr create` URL like `.../pull/123`.
+fn parse_pr_number(url: &str) -> Option<i64> {
+    url.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .and_then(|segment| segment.parse::<i64>().ok())
 }
 
 fn auto_approve_plan_approval(
@@ -2787,108 +3022,6 @@ fn list_agent_sessions(
 }
 
 #[tauri::command]
-fn list_hermes_board(limit: Option<i64>) -> CommandResult<Vec<hermes::HermesBoardCard>> {
-    hermes::list_board(limit.unwrap_or(120))
-}
-
-#[tauri::command]
-fn get_hermes_task_tree(task_id: String) -> CommandResult<Vec<hermes::HermesSessionNode>> {
-    hermes::get_task_tree(task_id)
-}
-
-#[tauri::command]
-fn create_hermes_stage_chain(
-    goal: String,
-    stages: Vec<hermes::HermesStageInput>,
-) -> CommandResult<Vec<String>> {
-    hermes::create_stage_chain(goal, stages)
-}
-
-#[tauri::command]
-fn get_hermes_task_diff(task_id: String) -> CommandResult<Vec<GitFileDiff>> {
-    hermes::get_task_diff(task_id)
-}
-
-#[tauri::command]
-fn list_hermes_profiles() -> CommandResult<Vec<hermes::HermesProfile>> {
-    hermes::list_profiles()
-}
-
-#[tauri::command]
-fn hermes_kanban_action(
-    action: String,
-    task_id: String,
-    reason: Option<String>,
-) -> CommandResult<()> {
-    hermes::kanban_action(action, task_id, reason)
-}
-
-fn lock_acp<'a>(
-    state: &'a State<'_, AppState>,
-) -> CommandResult<std::sync::MutexGuard<'a, HashMap<String, hermes_acp::AcpSession>>> {
-    state
-        .acp_sessions
-        .lock()
-        .map_err(|_| CommandError::new("IoFailed", "ACP 세션 상태를 사용하지 못했습니다."))
-}
-
-#[tauri::command]
-fn acp_session_new(
-    cwd: Option<String>,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> CommandResult<String> {
-    let (session_id, session) = hermes_acp::start_session(&app, cwd)?;
-    lock_acp(&state)?.insert(session_id.clone(), session);
-    Ok(session_id)
-}
-
-#[tauri::command]
-fn acp_session_prompt(
-    session_id: String,
-    text: String,
-    state: State<'_, AppState>,
-) -> CommandResult<()> {
-    let sessions = lock_acp(&state)?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| CommandError::new("AcpNoSession", "ACP 세션을 찾을 수 없습니다."))?;
-    hermes_acp::prompt(session, &session_id, &text)
-}
-
-#[tauri::command]
-fn acp_session_cancel(session_id: String, state: State<'_, AppState>) -> CommandResult<()> {
-    let sessions = lock_acp(&state)?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| CommandError::new("AcpNoSession", "ACP 세션을 찾을 수 없습니다."))?;
-    hermes_acp::cancel(session, &session_id)
-}
-
-#[tauri::command]
-fn acp_permission_respond(
-    session_id: String,
-    request_id: serde_json::Value,
-    option_id: String,
-    state: State<'_, AppState>,
-) -> CommandResult<()> {
-    let sessions = lock_acp(&state)?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| CommandError::new("AcpNoSession", "ACP 세션을 찾을 수 없습니다."))?;
-    hermes_acp::respond_permission(session, request_id, &option_id)
-}
-
-#[tauri::command]
-fn acp_session_close(session_id: String, state: State<'_, AppState>) -> CommandResult<()> {
-    let session = lock_acp(&state)?.remove(&session_id);
-    if let Some(session) = session {
-        hermes_acp::close(session);
-    }
-    Ok(())
-}
-
-#[tauri::command]
 fn list_task_timeline(
     project_id: String,
     task_id: String,
@@ -2962,10 +3095,30 @@ fn approve_approval(
     approval_id: String,
     reason: String,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> CommandResult<ApprovalSummary> {
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
-    db::decide_approval(&mut conn, &project_id, &approval_id, "Approved", &reason)
+    let approval = db::decide_approval(&mut conn, &project_id, &approval_id, "Approved", &reason)?;
+
+    // 리뷰 진행 승인 → 이제 메인 대상 PR을 만들고 코드 리뷰어 실행을 시작한다.
+    if approval.approval_type == "ReviewApproval" && approval.entity_type == "Task" {
+        let log_run_id = db::list_agent_runs(&conn, &project_id, &approval.entity_id)?
+            .first()
+            .map(|run| run.id.clone())
+            .unwrap_or_default();
+        ensure_merge_pr_for_code_review(&app, &conn, &project_id, &approval.entity_id, &log_run_id);
+        // 코드 리뷰어 run 큐잉(best-effort): 실패해도 reconcile 워커가 다시 시도한다.
+        let _ = db::prepare_next_role_context(
+            &mut conn,
+            &context.root_path,
+            &project_id,
+            &approval.entity_id,
+        );
+        let _ = ensure_project_queue_worker(&app, &state, &project_id);
+    }
+
+    Ok(approval)
 }
 
 #[tauri::command]
@@ -4180,7 +4333,6 @@ fn inject_planning_provider_options(
 }
 
 fn normalize_planning_cli_args(args: Vec<String>, provider: Option<&str>) -> Vec<String> {
-    let args = ensure_hermes_oneshot_args(args);
     if provider != Some("codex") {
         return args;
     }
@@ -4328,86 +4480,6 @@ fn command_output_message(output: &ShellOutput) -> String {
 fn smoke_output_contains_sentinel(output: &ShellOutput) -> bool {
     output.stdout.contains(AI_CLI_SMOKE_SENTINEL) || output.stderr.contains(AI_CLI_SMOKE_SENTINEL)
 }
-
-/// Hermes takes a one-shot prompt via `-z PROMPT`; a bare positional prompt is parsed as a
-/// subcommand and fails with exit code 2. Rewrite `hermes <prompt>` to `hermes -z <prompt>`.
-fn ensure_hermes_oneshot_args(args: Vec<String>) -> Vec<String> {
-    let Some(program) = args.first() else {
-        return args;
-    };
-    let name = Path::new(program)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(program);
-    if name != "hermes" || args.len() < 2 {
-        return args;
-    }
-    // Already a oneshot or an explicit subcommand invocation — leave untouched.
-    if args[1..].iter().any(|arg| arg == "-z") || HERMES_SUBCOMMANDS.contains(&args[1].as_str()) {
-        return args;
-    }
-    let mut out = args;
-    let prompt_idx = out.len() - 1; // prompt is the trailing positional
-    out.insert(prompt_idx, "-z".to_string());
-    out
-}
-
-const HERMES_SUBCOMMANDS: &[&str] = &[
-    "chat",
-    "model",
-    "fallback",
-    "secrets",
-    "migrate",
-    "gateway",
-    "proxy",
-    "lsp",
-    "setup",
-    "postinstall",
-    "whatsapp",
-    "whatsapp-cloud",
-    "slack",
-    "send",
-    "login",
-    "logout",
-    "auth",
-    "status",
-    "cron",
-    "webhook",
-    "portal",
-    "kanban",
-    "hooks",
-    "doctor",
-    "security",
-    "dump",
-    "debug",
-    "backup",
-    "checkpoints",
-    "import",
-    "config",
-    "pairing",
-    "skills",
-    "bundles",
-    "plugins",
-    "curator",
-    "memory",
-    "tools",
-    "computer-use",
-    "mcp",
-    "sessions",
-    "insights",
-    "claw",
-    "version",
-    "update",
-    "uninstall",
-    "acp",
-    "profile",
-    "completion",
-    "dashboard",
-    "desktop",
-    "gui",
-    "logs",
-    "prompt-size",
-];
 
 fn is_antigravity_chat_command(command: &[String]) -> bool {
     let Some(program) = command.first() else {
@@ -6698,35 +6770,19 @@ fn truncate_output(value: String) -> String {
 mod tests {
     use super::*;
 
-    fn v(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
-    fn hermes_oneshot_rewrite() {
-        // bare positional prompt -> -z prompt
+    fn parse_pr_number_handles_gh_create_url() {
         assert_eq!(
-            ensure_hermes_oneshot_args(v(&["hermes", "do a thing"])),
-            v(&["hermes", "-z", "do a thing"])
+            parse_pr_number("https://github.com/owner/repo/pull/123"),
+            Some(123)
         );
-        // works with absolute path and leading static flags
+        // gh sometimes prints a trailing newline/slash; trimming happens upstream + here.
         assert_eq!(
-            ensure_hermes_oneshot_args(v(&["/x/hermes", "--safe-mode", "prompt"])),
-            v(&["/x/hermes", "--safe-mode", "-z", "prompt"])
+            parse_pr_number("https://github.com/owner/repo/pull/7/"),
+            Some(7)
         );
-        // already explicit -z, subcommand invocation, and non-hermes left untouched
-        assert_eq!(
-            ensure_hermes_oneshot_args(v(&["hermes", "-z", "p"])),
-            v(&["hermes", "-z", "p"])
-        );
-        assert_eq!(
-            ensure_hermes_oneshot_args(v(&["hermes", "chat"])),
-            v(&["hermes", "chat"])
-        );
-        assert_eq!(
-            ensure_hermes_oneshot_args(v(&["codex", "exec", "p"])),
-            v(&["codex", "exec", "p"])
-        );
+        assert_eq!(parse_pr_number("not-a-url"), None);
+        assert_eq!(parse_pr_number(""), None);
     }
 
     fn shell_output(stdout: &str, stderr: &str, exit_code: i32) -> ShellOutput {
@@ -6973,17 +7029,6 @@ fn main() {
             list_agent_runs,
             list_project_runs,
             list_agent_sessions,
-            list_hermes_board,
-            get_hermes_task_tree,
-            get_hermes_task_diff,
-            create_hermes_stage_chain,
-            list_hermes_profiles,
-            hermes_kanban_action,
-            acp_session_new,
-            acp_session_prompt,
-            acp_session_cancel,
-            acp_permission_respond,
-            acp_session_close,
             list_task_timeline,
             list_run_events,
             get_agent_run,

@@ -119,7 +119,10 @@ pub fn pull_request_detail(root: &Path, number: i64) -> CommandResult<PullReques
         additions: value["additions"].as_i64().unwrap_or(0),
         deletions: value["deletions"].as_i64().unwrap_or(0),
         changed_files: value["changedFiles"].as_i64().unwrap_or(0),
-        commits: value["commits"].as_array().map(|a| a.len() as i64).unwrap_or(0),
+        commits: value["commits"]
+            .as_array()
+            .map(|a| a.len() as i64)
+            .unwrap_or(0),
         labels: value["labels"]
             .as_array()
             .map(|items| {
@@ -169,7 +172,10 @@ fn pr_comment_timeline(value: &Value) -> Vec<PullRequestComment> {
     if let Some(comments) = value["comments"].as_array() {
         for c in comments {
             items.push(PullRequestComment {
-                author: c["author"]["login"].as_str().unwrap_or_default().to_string(),
+                author: c["author"]["login"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 body: c["body"].as_str().unwrap_or_default().to_string(),
                 created_at: c["createdAt"].as_str().unwrap_or_default().to_string(),
                 kind: "comment".to_string(),
@@ -185,7 +191,10 @@ fn pr_comment_timeline(value: &Value) -> Vec<PullRequestComment> {
                 continue;
             }
             items.push(PullRequestComment {
-                author: r["author"]["login"].as_str().unwrap_or_default().to_string(),
+                author: r["author"]["login"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 body,
                 created_at: r["submittedAt"].as_str().unwrap_or_default().to_string(),
                 kind: state.to_string(),
@@ -209,6 +218,40 @@ pub fn merge_pull_request(root: &Path, number: i64) -> CommandResult<()> {
         root,
         &["pr", "merge", &number.to_string(), "--merge"],
         "PR 머지에 실패했습니다.",
+    )
+}
+
+/// Open a PR from `head` into `base`. Returns the PR URL printed on stdout.
+/// `--head` is explicit so the PR never originates from `base` (e.g. main).
+pub fn create_pull_request(
+    root: &Path,
+    base: &str,
+    head: &str,
+    title: &str,
+    body: &str,
+) -> CommandResult<String> {
+    let output = Command::new("gh")
+        .current_dir(root)
+        .args([
+            "pr", "create", "--base", base, "--head", head, "--title", title, "--body", body,
+        ])
+        .output()
+        .map_err(|err| CommandError::io("PR 생성에 실패했습니다.", err))?;
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GhCommandFailed",
+            "PR 생성에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn comment_pull_request(root: &Path, number: i64, body: &str) -> CommandResult<()> {
+    gh_pr_action(
+        root,
+        &["pr", "comment", &number.to_string(), "--body", body],
+        "PR 코멘트 작성에 실패했습니다.",
     )
 }
 
@@ -441,6 +484,34 @@ pub fn add_worktree(
     }
 
     Ok(())
+}
+
+// (path, branch) for every git worktree of this repo, main worktree included.
+// best-effort: a non-git dir just yields an empty list instead of failing the caller.
+pub fn list_worktrees(root: &Path) -> Vec<(String, Option<String>)> {
+    match git_output_allow_fail(root, &["worktree", "list", "--porcelain"]) {
+        Some(output) => parse_worktree_porcelain(&output),
+        None => Vec::new(),
+    }
+}
+
+fn parse_worktree_porcelain(output: &str) -> Vec<(String, Option<String>)> {
+    let mut worktrees = Vec::new();
+    let mut path: Option<String> = None;
+    let mut branch: Option<String> = None;
+    for line in output.lines().chain(std::iter::once("")) {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            path = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            branch = Some(rest.trim_start_matches("refs/heads/").to_string());
+        } else if line.is_empty() {
+            if let Some(path) = path.take() {
+                worktrees.push((path, branch.take()));
+            }
+            branch = None;
+        }
+    }
+    worktrees
 }
 
 pub fn remove_worktree(root: &Path, worktree_path: &Path) -> CommandResult<()> {
@@ -1522,6 +1593,20 @@ impl GraphColorAssigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_worktree_porcelain_with_and_without_branch() {
+        let output = "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /repo/.helm/worktrees/feat\nHEAD def\nbranch refs/heads/feature/x\n\nworktree /repo/detached\nHEAD 123\ndetached\n";
+        let parsed = parse_worktree_porcelain(output);
+        assert_eq!(
+            parsed,
+            vec![
+                ("/repo".to_string(), Some("main".to_string())),
+                ("/repo/.helm/worktrees/feat".to_string(), Some("feature/x".to_string())),
+                ("/repo/detached".to_string(), None),
+            ]
+        );
+    }
 
     #[test]
     fn truncated_parent_keeps_lane_open_for_next_branch() {

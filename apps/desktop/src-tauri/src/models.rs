@@ -449,6 +449,8 @@ pub struct TaskCompletionGitSummary {
     pub branch_name: String,
     pub commit_hash: String,
     pub pushed: bool,
+    pub pr_number: Option<i64>,
+    pub merged: bool,
 }
 
 #[derive(Debug, Serialize)]

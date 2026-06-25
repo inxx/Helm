@@ -688,7 +688,7 @@ export interface ApprovalSummary {
   projectId: string;
   entityType: "Task" | "AgentRun";
   entityId: string;
-  approvalType: "PlanApproval" | "RunApproval" | "ManualStatusChange";
+  approvalType: "PlanApproval" | "ReviewApproval" | "RunApproval" | "ManualStatusChange";
   status: "Pending" | "Approved" | "Rejected" | "Expired";
   requestedReason: string;
   decisionReason: string | null;
@@ -704,62 +704,3 @@ export interface TaskCompletionGitSummary {
   commitHash: string;
   pushed: boolean;
 }
-
-export interface HermesBoardCard {
-  id: string;
-  title: string;
-  status: string;
-  assignee: string | null;
-  priority: number;
-  branchName: string | null;
-  workspacePath: string | null;
-  sessionId: string | null;
-  modelOverride: string | null;
-  createdAt: number | null;
-  startedAt: number | null;
-  completedAt: number | null;
-  parents: string[];
-  runStatus: string | null;
-  runOutcome: string | null;
-  runSummary: string | null;
-}
-
-export interface HermesToolCall {
-  role: string;
-  toolName: string | null;
-  content: string | null;
-  timestamp: number | null;
-}
-
-export interface HermesSessionNode {
-  id: string;
-  parentSessionId: string | null;
-  kind: string;
-  model: string | null;
-  title: string | null;
-  messageCount: number;
-  toolCallCount: number;
-  inputTokens: number;
-  outputTokens: number;
-  actualCostUsd: number | null;
-  startedAt: number | null;
-  endedAt: number | null;
-  toolCalls: HermesToolCall[];
-}
-
-export interface HermesStageInput {
-  title: string;
-  assignee: string;
-  skills?: string[];
-  workspace?: string | null;
-  branch?: string | null;
-}
-
-export interface HermesProfile {
-  name: string;
-  model: string | null;
-  provider: string | null;
-  isDefault: boolean;
-}
-
-export type HermesKanbanAction = "unblock" | "promote" | "complete" | "block" | "archive";

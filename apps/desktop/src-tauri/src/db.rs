@@ -27,7 +27,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 12;
+const SUPPORTED_SCHEMA_VERSION: i64 = 13;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
@@ -40,6 +40,7 @@ const PHASE9_MIGRATION: &str = include_str!("../migrations/0009_planning_approva
 const PHASE10_MIGRATION: &str = include_str!("../migrations/0010_terminal_orca_parity.sql");
 const PHASE11_MIGRATION: &str = include_str!("../migrations/0011_agent_run_runner_metadata.sql");
 const PHASE12_MIGRATION: &str = include_str!("../migrations/0012_agent_run_host_pid.sql");
+const PHASE13_MIGRATION: &str = include_str!("../migrations/0013_review_approval.sql");
 const TASK_STATUS_ORDER: &[&str] = &[
     "Planned",
     "Ready",
@@ -398,6 +399,9 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
         apply_migration(conn, 12, "phase12_agent_run_host_pid", PHASE12_MIGRATION)?;
     } else if !table_has_column(conn, "agent_runs", "host_pid")? {
         apply_schema_patch(conn, PHASE12_MIGRATION)?;
+    }
+    if current_version < 13 {
+        apply_migration(conn, 13, "phase13_review_approval", PHASE13_MIGRATION)?;
     }
     Ok(())
 }
@@ -2205,6 +2209,12 @@ pub fn reconcile_next_role_gap(
         let Some(role_id) = next_role_for_task_status(&task.status) else {
             continue;
         };
+        // 리뷰 진행 승인 전에는 코드 리뷰어를 자동 큐잉하지 않는다(승인 게이트).
+        if role_id == "code_reviewer"
+            && !has_review_approval(conn, project_id, &task.id, "Approved")?
+        {
+            continue;
+        }
         if has_active_run(conn, project_id, &task.id)? {
             continue;
         }
@@ -5170,14 +5180,16 @@ pub fn decide_approval(
         return Err(CommandError::validation("이미 처리된 승인 요청입니다."));
     }
     let timestamp = now();
-    let next_task_status = if approval.approval_type == "PlanApproval" {
-        Some(if decision == "Approved" {
+    let next_task_status = match approval.approval_type.as_str() {
+        "PlanApproval" => Some(if decision == "Approved" {
             "Ready"
         } else {
             "Blocked"
-        })
-    } else {
-        None
+        }),
+        // 리뷰 진행 승인: 승인 시 CodeReview 유지(approve_approval이 PR 생성+리뷰어 실행),
+        // 반려 시 Blocked로 보내 사용자 결정을 기다린다.
+        "ReviewApproval" if decision == "Rejected" => Some("Blocked"),
+        _ => None,
     };
     let task_before = if next_task_status.is_some() {
         Some(get_task(conn, &approval.entity_id)?)
@@ -5231,7 +5243,7 @@ pub fn decide_approval(
                 "taskId": task.id,
                 "from": task.status,
                 "to": status,
-                "reason": if decision == "Approved" { "PlanApproval approved" } else { "PlanApproval rejected" },
+                "reason": format!("{} {}", approval.approval_type, if decision == "Approved" { "approved" } else { "rejected" }),
                 "source": "approval"
             }),
         )?;
@@ -6743,6 +6755,52 @@ fn list_external_refs(
         })
         .map_err(|err| CommandError::database("외부 참조를 읽지 못했습니다.", err))?;
     collect_rows(rows, "외부 참조를 읽지 못했습니다.")
+}
+
+/// The merge PR opened for a task, if one was already created. Returns (url, number).
+/// PRs are stored as a `ref_type='Url'` external ref titled `PullRequest #<n>`.
+pub fn find_pr_ref(conn: &Connection, task_id: &str) -> CommandResult<Option<(String, i64)>> {
+    let row = conn
+        .query_row(
+            "SELECT ref_value, ref_title FROM task_external_refs
+             WHERE task_id = ?1 AND ref_type = 'Url' AND ref_title LIKE 'PullRequest %'
+             ORDER BY created_at DESC LIMIT 1",
+            params![task_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|err| CommandError::database("PR 참조를 읽지 못했습니다.", err))?;
+    Ok(row.and_then(|(url, title)| {
+        title
+            .trim_start_matches("PullRequest #")
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .map(|number| (url, number))
+    }))
+}
+
+pub fn insert_pr_ref(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    url: &str,
+    number: i64,
+) -> CommandResult<()> {
+    conn.execute(
+        "INSERT INTO task_external_refs (id, project_id, task_id, ref_type, ref_value, ref_title, created_at)
+         VALUES (?1, ?2, ?3, 'Url', ?4, ?5, ?6)",
+        params![
+            new_id(),
+            project_id,
+            task_id,
+            url,
+            format!("PullRequest #{number}"),
+            now()
+        ],
+    )
+    .map_err(|err| CommandError::database("PR 참조를 저장하지 못했습니다.", err))?;
+    Ok(())
 }
 
 fn map_epic(row: &rusqlite::Row<'_>) -> rusqlite::Result<EpicSummary> {
@@ -9189,6 +9247,42 @@ fn apply_successful_role_result(
             }),
         )?;
     }
+
+    // plan_verifier 통과 = 작업자 작업 완료. PR/리뷰를 자동 진행하지 않고, 사용자에게
+    // '리뷰 진행' 승인을 요청한다. 승인되면 approve_approval에서 PR 생성 + 리뷰어 실행을 시작한다.
+    if role_id == "plan_verifier"
+        && !has_review_approval(conn, project_id, &task.id, "Pending")?
+        && !has_review_approval(conn, project_id, &task.id, "Approved")?
+    {
+        conn.execute(
+            "INSERT INTO approvals (
+               id, project_id, entity_type, entity_id, approval_type, status,
+               requested_reason, decision_reason, requested_at, decided_at, created_at, updated_at
+             )
+             VALUES (?1, ?2, 'Task', ?3, 'ReviewApproval', 'Pending', ?4, NULL, ?5, NULL, ?5, ?5)",
+            params![
+                new_id(),
+                project_id,
+                task.id,
+                "plan_verifier host run completed",
+                timestamp
+            ],
+        )
+        .map_err(|err| CommandError::database("리뷰 승인 요청을 저장하지 못했습니다.", err))?;
+        insert_audit(
+            conn,
+            project_id,
+            "Task",
+            Some(&task.id),
+            "approval.created",
+            json!({
+                "taskId": task.id,
+                "runId": run_id,
+                "approvalType": "ReviewApproval",
+                "requestedReason": "plan_verifier host run completed"
+            }),
+        )?;
+    }
     Ok(())
 }
 
@@ -9613,7 +9707,62 @@ fn build_upstream_dossiers_markdown(
 /// 중재자(arbiter) Context Pack에 붙일 "리뷰어 판정 요약" 섹션을 만든다.
 /// 각 code_reviewer run의 structured-result.json을 best-effort로 읽어 connection/provider,
 /// 판정(status), summary, blockers를 요약한다. 파일이 없거나 깨져도 안전하게 건너뛴다.
-fn build_reviewer_verdicts_markdown(
+/// Format one reviewer run row (connection/provider/status + parsed summary/blockers)
+/// into the markdown bullet shared by the aggregate and single-run views.
+fn format_reviewer_verdict_entry(
+    root: &Path,
+    connection_id: Option<&str>,
+    provider: Option<&str>,
+    result_status: Option<&str>,
+    artifact_dir: &str,
+    result_path: &str,
+) -> String {
+    let reviewer = match (connection_id, provider) {
+        (Some(connection), Some(provider)) => format!("{connection} ({provider})"),
+        (Some(connection), None) => connection.to_string(),
+        (None, Some(provider)) => provider.to_string(),
+        (None, None) => "알 수 없는 리뷰어".to_string(),
+    };
+    let status = result_status.unwrap_or("미상");
+
+    let result_file = root.join(artifact_dir).join(result_path);
+    let parsed = fs::read_to_string(&result_file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let (summary, blockers) = match parsed.as_ref() {
+        Some(value) => {
+            let summary = value
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(|item| truncate_for_context(item, 600))
+                .unwrap_or_else(|| "요약 없음".to_string());
+            let blockers = value
+                .get("gateResult")
+                .and_then(|gate| gate.get("blockers"))
+                .map(|item| string_list_from_json(item))
+                .unwrap_or_default();
+            (summary, blockers)
+        }
+        None => (
+            "structured-result.json을 읽지 못했습니다.".to_string(),
+            Vec::new(),
+        ),
+    };
+    let blockers_md = if blockers.is_empty() {
+        "  - blockers: 없음".to_string()
+    } else {
+        blockers
+            .iter()
+            .map(|item| format!("  - blocker: {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!("- {reviewer} · status={status}\n  - summary: {summary}\n{blockers_md}")
+}
+
+pub(crate) fn build_reviewer_verdicts_markdown(
     conn: &Connection,
     root: &Path,
     project_id: &str,
@@ -9646,50 +9795,13 @@ fn build_reviewer_verdicts_markdown(
     let mut entries: Vec<String> = Vec::new();
     for row in rows.flatten() {
         let (connection_id, provider, result_status, artifact_dir, result_path) = row;
-        let reviewer = match (connection_id.as_deref(), provider.as_deref()) {
-            (Some(connection), Some(provider)) => format!("{connection} ({provider})"),
-            (Some(connection), None) => connection.to_string(),
-            (None, Some(provider)) => provider.to_string(),
-            (None, None) => "알 수 없는 리뷰어".to_string(),
-        };
-        let status = result_status.as_deref().unwrap_or("미상");
-
-        let result_file = root.join(&artifact_dir).join(&result_path);
-        let parsed = fs::read_to_string(&result_file)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-        let (summary, blockers) = match parsed.as_ref() {
-            Some(value) => {
-                let summary = value
-                    .get("summary")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                    .map(|item| truncate_for_context(item, 600))
-                    .unwrap_or_else(|| "요약 없음".to_string());
-                let blockers = value
-                    .get("gateResult")
-                    .and_then(|gate| gate.get("blockers"))
-                    .map(|item| string_list_from_json(item))
-                    .unwrap_or_default();
-                (summary, blockers)
-            }
-            None => (
-                "structured-result.json을 읽지 못했습니다.".to_string(),
-                Vec::new(),
-            ),
-        };
-        let blockers_md = if blockers.is_empty() {
-            "  - blockers: 없음".to_string()
-        } else {
-            blockers
-                .iter()
-                .map(|item| format!("  - blocker: {item}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        entries.push(format!(
-            "- {reviewer} · status={status}\n  - summary: {summary}\n{blockers_md}"
+        entries.push(format_reviewer_verdict_entry(
+            root,
+            connection_id.as_deref(),
+            provider.as_deref(),
+            result_status.as_deref(),
+            &artifact_dir,
+            &result_path,
         ));
     }
 
@@ -9697,6 +9809,39 @@ fn build_reviewer_verdicts_markdown(
         return String::new();
     }
     format!("\n\n## 리뷰어 판정 요약\n\n{}\n", entries.join("\n"))
+}
+
+/// Same verdict bullet as the aggregate view, but for a single run — used as the
+/// body of that reviewer's PR comment. Empty string if the run can't be read.
+pub fn build_single_run_verdict_markdown(conn: &Connection, root: &Path, run_id: &str) -> String {
+    conn.query_row(
+        "SELECT connection_id, provider, result_status, artifact_dir, result_path
+           FROM agent_runs WHERE id = ?1",
+        params![run_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        },
+    )
+    .ok()
+    .map(
+        |(connection_id, provider, result_status, artifact_dir, result_path)| {
+            format_reviewer_verdict_entry(
+                root,
+                connection_id.as_deref(),
+                provider.as_deref(),
+                result_status.as_deref(),
+                &artifact_dir,
+                &result_path,
+            )
+        },
+    )
+    .unwrap_or_default()
 }
 
 fn repair_allowed_scope(affected_files: &Value) -> String {
@@ -10215,6 +10360,13 @@ fn validate_role_run_state(
         ));
     }
 
+    // 작업 완료(plan_verifier 통과) 후 사용자가 '리뷰 진행'을 승인해야 코드 리뷰어를 실행한다.
+    if role_id == "code_reviewer" && !has_review_approval(conn, project_id, &task.id, "Approved")? {
+        return Err(CommandError::validation(
+            "리뷰 진행 승인 전에는 코드 리뷰어 역할을 실행할 수 없습니다.",
+        ));
+    }
+
     Ok(())
 }
 
@@ -10235,6 +10387,26 @@ fn has_plan_approval(
         )
         .optional()
         .map_err(|err| CommandError::database("승인 요청을 확인하지 못했습니다.", err))?;
+    Ok(exists.is_some())
+}
+
+fn has_review_approval(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+    status: &str,
+) -> CommandResult<bool> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM approvals
+             WHERE project_id = ?1 AND entity_type = 'Task' AND entity_id = ?2
+               AND approval_type = 'ReviewApproval' AND status = ?3
+             LIMIT 1",
+            params![project_id, task_id, status],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| CommandError::database("리뷰 승인 요청을 확인하지 못했습니다.", err))?;
     Ok(exists.is_some())
 }
 
@@ -12273,6 +12445,20 @@ mod tests {
         let verifier =
             run_prepared_host_role(&mut conn, &repo, &project.id, &task.id, "plan_verifier");
         assert_eq!(verifier.status, "Succeeded");
+        // 작업 완료 후 리뷰 진행 승인 게이트: 승인해야 코드 리뷰어가 실행된다.
+        let review_approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("review approvals")
+            .into_iter()
+            .find(|approval| approval.approval_type == "ReviewApproval")
+            .expect("pending review approval");
+        decide_approval(
+            &mut conn,
+            &project.id,
+            &review_approval.id,
+            "Approved",
+            "리뷰 진행 승인",
+        )
+        .expect("approve review");
         let reviewer =
             run_prepared_host_role(&mut conn, &repo, &project.id, &task.id, "code_reviewer");
         assert_eq!(reviewer.status, "Succeeded");
@@ -12319,6 +12505,53 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("obsidian session files");
         assert_eq!(session_notes.len(), 5);
+    }
+
+    #[test]
+    fn code_reviewer_blocked_until_review_approval() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        update_task_status(
+            &mut conn,
+            &project.id,
+            &task.id,
+            "CodeReview",
+            Some("리뷰 게이트 테스트".to_string()),
+        )
+        .expect("status");
+        ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("worktree");
+
+        // 승인 전: 코드 리뷰어 준비가 리뷰 진행 승인 게이트에서 막힌다.
+        let err =
+            prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "code_reviewer")
+                .expect_err("review approval 전에는 막혀야 한다");
+        assert!(
+            err.message.contains("리뷰 진행 승인"),
+            "unexpected error: {}",
+            err.message
+        );
+
+        // 승인 후: 같은 게이트 에러는 더 이상 발생하지 않는다(이후 단계는 별도 설정 필요).
+        let timestamp = now();
+        conn.execute(
+            "INSERT INTO approvals (
+               id, project_id, entity_type, entity_id, approval_type, status,
+               requested_reason, requested_at, created_at, updated_at
+             )
+             VALUES (?1, ?2, 'Task', ?3, 'ReviewApproval', 'Approved', '승인', ?4, ?4, ?4)",
+            params![new_id(), &project.id, &task.id, timestamp],
+        )
+        .expect("insert review approval");
+        if let Err(err) =
+            prepare_role_context(&mut conn, &repo.root, &project.id, &task.id, "code_reviewer")
+        {
+            assert!(
+                !err.message.contains("리뷰 진행 승인"),
+                "승인 후에는 게이트를 통과해야 한다: {}",
+                err.message
+            );
+        }
     }
 
     #[test]
@@ -13140,6 +13373,8 @@ mod tests {
                 "claude",
                 "--add-dir",
                 "/tmp/helm-artifacts/run-1",
+                "--permission-mode",
+                "bypassPermissions",
                 "--model",
                 "sonnet",
                 "-p",

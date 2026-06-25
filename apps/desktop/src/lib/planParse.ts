@@ -1,4 +1,4 @@
-// Parse ACP's plan reply into a tasks[] list. ACP is asked to emit a tasks[] JSON; this
+// Parse a planner reply into a tasks[] list. The planner is asked to emit JSON; this
 // extracts it leniently so a little surrounding prose doesn't break materialization. We try
 // candidates in order: a fenced ```json block, the whole text, then the outermost { } or [ ].
 

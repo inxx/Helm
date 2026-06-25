@@ -10,7 +10,6 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,15 +19,7 @@ const cliPath = join(helmRoot, "src", "cli.ts");
 
 const DEFAULT_POLL_INTERVAL_MS = 3000;
 const SUPPORTED_EXTENSIONS = new Set([".md", ".txt", ".json"]);
-const AGENTS = new Set(["codex", "claude", "gemini", "hermes"]);
-
-const APP_SETTINGS_PATH = join(
-  homedir(),
-  "Library",
-  "Application Support",
-  "local.inxx.helm",
-  "app-settings.json",
-);
+const AGENTS = new Set(["codex", "claude", "gemini"]);
 
 const args = parseArgs(process.argv.slice(2));
 const inboxPath = resolve(args.inbox ?? join(helmRoot, ".helm", "inbox"));
@@ -433,188 +424,6 @@ function startRunHeartbeat({ dbPath, runId }) {
   return timer;
 }
 
-// ── Hermes execution ──────────────────────────────────────────────────────────
-
-function loadAppSettings() {
-  try {
-    return JSON.parse(readFileSync(APP_SETTINGS_PATH, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function buildHermesArgs(prompt) {
-  const appSettings = loadAppSettings();
-  const connection = appSettings?.orchestrator?.connection;
-
-  const base = ["exec", "hermes-local", "/opt/hermes/.venv/bin/hermes"];
-
-  if (connection?.enabled && Array.isArray(connection.commandArgs)) {
-    const idx = { provider: -1, model: -1 };
-    connection.commandArgs.forEach((arg, i) => {
-      if (arg === "--provider") idx.provider = i;
-      if (arg === "--model") idx.model = i;
-    });
-    if (idx.provider !== -1 && connection.commandArgs[idx.provider + 1]) {
-      base.push("--provider", connection.commandArgs[idx.provider + 1]);
-    }
-    if (idx.model !== -1 && connection.commandArgs[idx.model + 1]) {
-      base.push("--model", connection.commandArgs[idx.model + 1]);
-    }
-  }
-
-  base.push("--oneshot", prompt);
-  return base;
-}
-
-function runHermes(prompt, repoPath) {
-  return new Promise((resolveResult) => {
-    const child = spawn("docker", buildHermesArgs(prompt), {
-      cwd: repoPath,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-      process.stdout.write(chunk);
-    });
-
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-      process.stderr.write(chunk);
-    });
-
-    child.on("error", (error) => {
-      resolveResult({
-        code: 1,
-        stdout,
-        stderr: stderr ? `${stderr}${error.message}` : error.message,
-      });
-    });
-
-    child.on("close", (code) => {
-      resolveResult({ code: code ?? 1, stdout, stderr });
-    });
-  });
-}
-
-// hermes-api(REST)의 persistent 세션으로 동기 실행한다. oneshot(runHermes)과
-// 달리 세션을 유지해 session_id를 report/ledger에 남긴다. background delegation
-// 재주입은 API 경로에서 지원되지 않아(검증 결과) 동기 단일 턴으로 동작한다.
-// API 키/URL이 없거나 접속 불가하면 null을 반환해 호출부가 oneshot으로
-// fallback하게 한다(키 미설정 시 회귀 방지 목적의 의도된 fallback).
-function resolveHermesApi() {
-  const appSettings = loadAppSettings();
-  const connection = appSettings?.orchestrator?.connection;
-  const baseUrl = (process.env.HERMES_API_URL ?? "http://127.0.0.1:8642").replace(
-    /\/+$/,
-    "",
-  );
-  const apiKey = process.env.HERMES_API_KEY ?? connection?.apiKey ?? null;
-  const model = appSettings?.model ?? connection?.defaultModel ?? null;
-  return { baseUrl, apiKey, model };
-}
-
-async function runHermesSession(prompt, repoPath) {
-  const { baseUrl, apiKey, model } = resolveHermesApi();
-
-  if (!apiKey) {
-    return null; // 키 미설정 → oneshot fallback
-  }
-
-  const timeoutMs = readPositiveInt(process.env.HERMES_TIMEOUT_MS, 600_000);
-  const headers = {
-    Authorization: `Bearer ${apiKey}`,
-    "Content-Type": "application/json",
-  };
-
-  let sessionId;
-  try {
-    const session = await fetchJson(
-      `${baseUrl}/api/sessions`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(model ? { model } : {}),
-      },
-      timeoutMs,
-    );
-    sessionId = session?.session?.id;
-  } catch {
-    return null; // API 접속 불가 → oneshot fallback
-  }
-
-  if (!sessionId) {
-    return null;
-  }
-
-  const sessionHeader = `Session: ${sessionId}\n\n`;
-
-  try {
-    const chat = await fetchJson(
-      `${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/chat`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          message: prompt,
-          // 컨테이너에 마운트된 작업 디렉터리에서만 파일 접근이 가능하므로
-          // 호스트 repoPath를 맥락으로만 알려둔다(경로 매핑은 범위 외).
-          instructions: `작업 대상 repo(호스트 경로): ${repoPath}. 파일/셸 접근은 이 Hermes 컨테이너에 마운트된 작업 디렉터리로 한정된다.`,
-        }),
-      },
-      timeoutMs,
-    );
-
-    const content = chat?.message?.content;
-
-    if (!content || !String(content).trim()) {
-      return {
-        code: 1,
-        stdout: `${sessionHeader}(빈 응답)`,
-        stderr:
-          "Hermes 세션이 최종 응답을 생성하지 못했습니다(provider 오류/한도 가능성).",
-      };
-    }
-
-    return { code: 0, stdout: `${sessionHeader}${content}`, stderr: "" };
-  } catch (error) {
-    return {
-      code: 1,
-      stdout: sessionHeader,
-      stderr: `Hermes 세션 chat 실패: ${formatError(error)}`,
-    };
-  }
-}
-
-async function fetchJson(url, options, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    const text = await response.text();
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${text.slice(0, 300)}`);
-    }
-
-    return text ? JSON.parse(text) : null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function readPositiveInt(value, fallback) {
-  const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
 async function watchLoop() {
   while (true) {
     await processNextTask();
@@ -671,19 +480,10 @@ async function processNextTask() {
       });
     }
 
-    let result;
-    if (agent === "hermes") {
-      // persistent 세션 우선. 키 미설정/API 미가용(null)일 때만 oneshot fallback.
-      result = await runHermesSession(prompt, repoPath);
-      if (!result) {
-        result = await runHermes(prompt, repoPath);
-      }
-    } else {
-      const runArgs = ["run", "--agent", agent];
-      if (args.dryRun) runArgs.push("--dry-run");
-      runArgs.push(prompt);
-      result = await runHelm(runArgs, repoPath);
-    }
+    const runArgs = ["run", "--agent", agent];
+    if (args.dryRun) runArgs.push("--dry-run");
+    runArgs.push(prompt);
+    const result = await runHelm(runArgs, repoPath);
 
     const finishedAt = new Date();
 
@@ -912,7 +712,7 @@ function buildExecutionPrompt(task) {
     "",
     "---",
     "Helm 실행 규칙:",
-    "- 이 작업은 Helm이 이미 위임한 것이다. 다시 Helm/Hermes inbox로 이관하지 말고 이 세션에서 직접 구현한다.",
+    "- 이 작업은 Helm이 이미 위임한 것이다. 다시 Helm inbox로 이관하지 말고 이 세션에서 직접 구현한다.",
     "- 계획만 보고하고 멈추지 말고, 파일을 직접 수정해 구현을 완료한다.",
     "- 작업 범위를 벗어난 변경은 하지 않는다.",
     "- 구현 후 가능한 검증 명령을 실행한다.",
