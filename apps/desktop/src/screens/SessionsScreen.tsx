@@ -810,19 +810,6 @@ export function SessionsScreen({
                   <p>{t("sessions.noLinkedRun")}</p>
                 </SessionMessage>
               )}
-              {activePendingApprovals.map((approval) => (
-                <SessionMessage key={approval.id} role="assistant" icon="bot" title={t("sessions.approvalTitle")} timestamp={activeSession?.lastSignalAt ?? activeTask?.updatedAt ?? null} language={language}>
-                  <p>
-                    <strong>{approvalLabel(approval.approvalType, language)}</strong>
-                    {approval.requestedReason ? ` — ${approval.requestedReason}` : ""}
-                  </p>
-                  <p>
-                    {language === "ko"
-                      ? '아래 입력창에 "승인" 또는 "반려"를 입력하세요. 뒤에 결정 사유를 덧붙일 수 있습니다.'
-                      : 'Type "approve" or "reject" in the box below. You can add a reason after it.'}
-                  </p>
-                </SessionMessage>
-              ))}
               {events.filter(isContentEvent).map((event) => (
                 <SessionMessage
                   icon={event.kind === "artifact" ? "file" : "bot"}
@@ -941,6 +928,21 @@ export function SessionsScreen({
                   />
                 </SessionMessage>
               ) : null}
+              {/* 승인 카드는 항상 목록 맨 아래(입력창 바로 위)에 둔다 — 자동 스크롤이
+                  맨 아래로 따라가므로 위쪽에 두면 사용자가 보지 못하고 지나친다. */}
+              {activePendingApprovals.map((approval) => (
+                <SessionMessage key={approval.id} role="assistant" icon="bot" title={t("sessions.approvalTitle")} timestamp={activeSession?.lastSignalAt ?? activeTask?.updatedAt ?? null} language={language}>
+                  <p>
+                    <strong>{approvalLabel(approval.approvalType, language)}</strong>
+                    {approval.requestedReason ? ` — ${approval.requestedReason}` : ""}
+                  </p>
+                  <p>
+                    {language === "ko"
+                      ? '아래 입력창에 "승인" 또는 "반려"를 입력하세요. 뒤에 결정 사유를 덧붙일 수 있습니다.'
+                      : 'Type "approve" or "reject" in the box below. You can add a reason after it.'}
+                  </p>
+                </SessionMessage>
+              ))}
             </div>
             <form
               className="session-orchestrator-composer"
