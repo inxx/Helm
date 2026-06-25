@@ -1448,6 +1448,24 @@ fn list_terminal_directories(
         });
     }
 
+    let root_path = context.root_path.to_string_lossy().to_string();
+    for (path, branch) in git::list_worktrees(&context.root_path) {
+        if path == root_path {
+            continue; // 메인 워크트리는 이미 "프로젝트 루트"로 표시된다.
+        }
+        let label = branch.unwrap_or_else(|| {
+            Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone())
+        });
+        entries.push(TerminalDirectoryEntry {
+            path,
+            label: format!("⎇ {label}"),
+            kind: "worktree".to_string(),
+        });
+    }
+
     let mut child_dirs = fs::read_dir(&current)
         .map_err(|err| CommandError::io("디렉토리 목록을 읽지 못했습니다.", err))?
         .filter_map(Result::ok)
@@ -1961,10 +1979,24 @@ fn queue_next_role_after_success(
         return;
     }
 
-    // PR 연동(best-effort): plan_verifier 통과 → CodeReview 진입 시 메인 머지 PR 생성,
-    // code_reviewer/arbiter 통과 시 그 판정을 PR 코멘트로 남긴다. 실패해도 인계는 막지 않는다.
+    // 작업 완료(plan_verifier 통과) 후에는 PR/리뷰를 자동 진행하지 않는다.
+    // ReviewApproval(리뷰 진행 승인)은 apply_successful_role_result에서 생성되고,
+    // 사용자가 승인하면 approve_approval에서 PR 생성 + 코드 리뷰어 실행을 시작한다.
+    if run.role_id == "plan_verifier" {
+        append_and_emit_system_run_event(
+            app,
+            conn,
+            project_id,
+            &run.task_id,
+            &run.id,
+            "Awaiting review approval",
+            json!({ "source": "review-gate", "approvalType": "ReviewApproval" }),
+        );
+        return;
+    }
+
+    // code_reviewer/arbiter 통과 시 그 판정을 PR 코멘트로 남긴다(best-effort).
     match run.role_id.as_str() {
-        "plan_verifier" => ensure_merge_pr_for_code_review(app, conn, project_id, run),
         "code_reviewer" | "arbiter" => {
             post_review_comment_to_pr(app, conn, context, project_id, run)
         }
@@ -2057,26 +2089,27 @@ fn ensure_merge_pr_for_code_review(
     app: &AppHandle,
     conn: &rusqlite::Connection,
     project_id: &str,
-    run: &AgentRunSummary,
+    task_id: &str,
+    log_run_id: &str,
 ) {
     let log = |message: &str, payload: Value| {
         append_and_emit_system_run_event(
             app,
             conn,
             project_id,
-            &run.task_id,
-            &run.id,
+            task_id,
+            log_run_id,
             message,
             payload,
         );
     };
 
-    let task = match db::get_task(conn, &run.task_id) {
+    let task = match db::get_task(conn, task_id) {
         Ok(task) if task.status == "CodeReview" => task,
         _ => return, // 아직 CodeReview가 아니면(게이트 보류 등) PR 만들지 않는다.
     };
 
-    match db::find_pr_ref(conn, &run.task_id) {
+    match db::find_pr_ref(conn, task_id) {
         Ok(Some(_)) => return, // 이미 PR 있음 — 멱등.
         Ok(None) => {}
         Err(error) => {
@@ -2088,7 +2121,7 @@ fn ensure_merge_pr_for_code_review(
         }
     }
 
-    let worktree = match db::get_task_worktree(conn, project_id, &run.task_id) {
+    let worktree = match db::get_task_worktree(conn, project_id, task_id) {
         Ok(Some(worktree)) => worktree,
         _ => {
             log(
@@ -2146,7 +2179,7 @@ fn ensure_merge_pr_for_code_review(
         Ok(url) => {
             let number = parse_pr_number(&url);
             if let Some(number) = number {
-                if let Err(error) = db::insert_pr_ref(conn, project_id, &run.task_id, &url, number)
+                if let Err(error) = db::insert_pr_ref(conn, project_id, task_id, &url, number)
                 {
                     log(
                         "code_review.pr_ref_save_failed",
@@ -3062,10 +3095,30 @@ fn approve_approval(
     approval_id: String,
     reason: String,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> CommandResult<ApprovalSummary> {
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
-    db::decide_approval(&mut conn, &project_id, &approval_id, "Approved", &reason)
+    let approval = db::decide_approval(&mut conn, &project_id, &approval_id, "Approved", &reason)?;
+
+    // 리뷰 진행 승인 → 이제 메인 대상 PR을 만들고 코드 리뷰어 실행을 시작한다.
+    if approval.approval_type == "ReviewApproval" && approval.entity_type == "Task" {
+        let log_run_id = db::list_agent_runs(&conn, &project_id, &approval.entity_id)?
+            .first()
+            .map(|run| run.id.clone())
+            .unwrap_or_default();
+        ensure_merge_pr_for_code_review(&app, &conn, &project_id, &approval.entity_id, &log_run_id);
+        // 코드 리뷰어 run 큐잉(best-effort): 실패해도 reconcile 워커가 다시 시도한다.
+        let _ = db::prepare_next_role_context(
+            &mut conn,
+            &context.root_path,
+            &project_id,
+            &approval.entity_id,
+        );
+        let _ = ensure_project_queue_worker(&app, &state, &project_id);
+    }
+
+    Ok(approval)
 }
 
 #[tauri::command]

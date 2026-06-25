@@ -486,6 +486,34 @@ pub fn add_worktree(
     Ok(())
 }
 
+// (path, branch) for every git worktree of this repo, main worktree included.
+// best-effort: a non-git dir just yields an empty list instead of failing the caller.
+pub fn list_worktrees(root: &Path) -> Vec<(String, Option<String>)> {
+    match git_output_allow_fail(root, &["worktree", "list", "--porcelain"]) {
+        Some(output) => parse_worktree_porcelain(&output),
+        None => Vec::new(),
+    }
+}
+
+fn parse_worktree_porcelain(output: &str) -> Vec<(String, Option<String>)> {
+    let mut worktrees = Vec::new();
+    let mut path: Option<String> = None;
+    let mut branch: Option<String> = None;
+    for line in output.lines().chain(std::iter::once("")) {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            path = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            branch = Some(rest.trim_start_matches("refs/heads/").to_string());
+        } else if line.is_empty() {
+            if let Some(path) = path.take() {
+                worktrees.push((path, branch.take()));
+            }
+            branch = None;
+        }
+    }
+    worktrees
+}
+
 pub fn remove_worktree(root: &Path, worktree_path: &Path) -> CommandResult<()> {
     let output = Command::new("git")
         .arg("-C")
@@ -1565,6 +1593,20 @@ impl GraphColorAssigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_worktree_porcelain_with_and_without_branch() {
+        let output = "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /repo/.helm/worktrees/feat\nHEAD def\nbranch refs/heads/feature/x\n\nworktree /repo/detached\nHEAD 123\ndetached\n";
+        let parsed = parse_worktree_porcelain(output);
+        assert_eq!(
+            parsed,
+            vec![
+                ("/repo".to_string(), Some("main".to_string())),
+                ("/repo/.helm/worktrees/feat".to_string(), Some("feature/x".to_string())),
+                ("/repo/detached".to_string(), None),
+            ]
+        );
+    }
 
     #[test]
     fn truncated_parent_keeps_lane_open_for_next_branch() {
