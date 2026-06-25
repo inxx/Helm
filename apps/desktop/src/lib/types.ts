@@ -688,7 +688,7 @@ export interface ApprovalSummary {
   projectId: string;
   entityType: "Task" | "AgentRun";
   entityId: string;
-  approvalType: "PlanApproval" | "RunApproval" | "ManualStatusChange";
+  approvalType: "PlanApproval" | "ReviewApproval" | "RunApproval" | "ManualStatusChange";
   status: "Pending" | "Approved" | "Rejected" | "Expired";
   requestedReason: string;
   decisionReason: string | null;

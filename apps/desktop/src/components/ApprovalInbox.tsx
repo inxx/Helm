@@ -103,6 +103,7 @@ export function ApprovalInbox({ snapshot, onRefresh, compact = false, entityIds 
 
 function approvalLabel(type: string): string {
   if (type === "PlanApproval") return "계획 승인";
+  if (type === "ReviewApproval") return "리뷰 진행 승인";
   if (type === "RunApproval") return "실행 승인";
   if (type === "ManualStatusChange") return "수동 상태 변경";
   return type;

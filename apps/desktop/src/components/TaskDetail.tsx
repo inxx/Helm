@@ -122,6 +122,15 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
           approval.status === "Pending",
       ) ?? null
     : null;
+  const pendingReviewApproval = task
+    ? snapshot.approvals.find(
+        (approval) =>
+          approval.entityType === "Task" &&
+          approval.entityId === task.id &&
+          approval.approvalType === "ReviewApproval" &&
+          approval.status === "Pending",
+      ) ?? null
+    : null;
   const busy = Boolean(busyAction);
 
   useEffect(() => {
@@ -559,6 +568,55 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
     }
   }
 
+  async function approvePendingReview(approval: ApprovalSummary) {
+    if (!task) return;
+    setBusyAction({ key: `approval:${approval.id}`, label: "리뷰 진행 승인 중" });
+    try {
+      // 백엔드가 승인과 함께 PR 생성 + 코드 리뷰어 실행까지 처리한다.
+      await api.approveApproval(snapshot.project.id, approval.id, "Task 상세에서 리뷰 진행 승인");
+      await onRefresh();
+      setActiveTab("runs");
+      showToast({
+        tone: "success",
+        title: "리뷰 진행 승인",
+        description: "PR을 생성하고 코드 리뷰를 시작했습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "리뷰 진행 승인 실패",
+        description: messageFromError(error, "리뷰 진행 승인을 처리하지 못했습니다."),
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function rejectPendingReview(approval: ApprovalSummary) {
+    if (!task) return;
+    const reason = window.prompt("리뷰를 보류하는 이유를 적어주세요.", "추가 작업이 필요합니다.");
+    if (reason === null) return;
+    setBusyAction({ key: `approval:${approval.id}`, label: "리뷰 보류 저장 중" });
+    try {
+      await api.rejectApproval(snapshot.project.id, approval.id, reason.trim() || "리뷰 진행 보류");
+      await onRefresh();
+      setActiveTab("timeline");
+      showToast({
+        tone: "info",
+        title: "리뷰 진행 보류",
+        description: "Task가 Blocked로 이동했습니다. 작업을 보완한 뒤 다시 진행할 수 있습니다.",
+      });
+    } catch (error) {
+      showToast({
+        tone: "error",
+        title: "리뷰 보류 실패",
+        description: messageFromError(error, "리뷰 보류를 저장하지 못했습니다."),
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function approveTaskCompletion() {
     if (!task) return;
     setBusyAction({ key: "completion", label: "커밋 및 푸시 중" });
@@ -705,6 +763,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
           <NextAction
             busy={busy}
             pendingPlanApproval={pendingPlanApproval}
+            pendingReviewApproval={pendingReviewApproval}
             task={task}
             worktree={worktree}
             runnerReadiness={activeRunnerReadiness}
@@ -717,6 +776,8 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
             retryableRun={activeRetryableRun}
             busyAction={busyAction}
             onApprovePlan={approvePendingPlan}
+            onApproveReview={approvePendingReview}
+            onRejectReview={rejectPendingReview}
             onApproveCompletion={approveTaskCompletion}
             onRequestPlanRevision={requestPlanRevision}
             onPrepareWorktree={prepareWorktree}
@@ -898,7 +959,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
             <ul className="role-lane-list">
               {ROLE_IDS.map((roleId) => {
                 const latestRun = runs.find((run) => run.roleId === roleId);
-                const isCurrentRole = activeRoleId === roleId && !pendingPlanApproval;
+                const isCurrentRole = activeRoleId === roleId && !pendingPlanApproval && !pendingReviewApproval;
                 const readiness = runnerReadinessFor(snapshot.settings, roleId);
                 const needsRunner = isCurrentRole && !readiness.ready;
                 const needsWorktree = isCurrentRole && readiness.ready && !worktree;
@@ -1185,6 +1246,7 @@ export function TaskDetail({ snapshot, task, onRefresh, onGoGit, onGoSettings, o
 interface NextActionProps {
   busy: boolean;
   pendingPlanApproval: ApprovalSummary | null;
+  pendingReviewApproval: ApprovalSummary | null;
   task: TaskSummary;
   worktree: TaskWorktreeSummary | null;
   runnerReadiness: ReturnType<typeof runnerReadinessFor> | null;
@@ -1197,6 +1259,8 @@ interface NextActionProps {
   retryableRun: AgentRunSummary | null;
   busyAction: { key: string; label: string } | null;
   onApprovePlan: (approval: ApprovalSummary) => Promise<void>;
+  onApproveReview: (approval: ApprovalSummary) => Promise<void>;
+  onRejectReview: (approval: ApprovalSummary) => Promise<void>;
   onApproveCompletion: () => Promise<void>;
   onRequestPlanRevision: (approval: ApprovalSummary) => Promise<void>;
   onPrepareWorktree: () => Promise<void>;
@@ -1283,6 +1347,7 @@ function TaskBlockerPanel({
 function NextAction({
   busy,
   pendingPlanApproval,
+  pendingReviewApproval,
   task,
   worktree,
   runnerReadiness,
@@ -1295,6 +1360,8 @@ function NextAction({
   retryableRun,
   busyAction,
   onApprovePlan,
+  onApproveReview,
+  onRejectReview,
   onApproveCompletion,
   onRequestPlanRevision,
   onPrepareWorktree,
@@ -1327,6 +1394,33 @@ function NextAction({
           </button>
           <button disabled={busy} onClick={() => void onRequestPlanRevision(pendingPlanApproval)} type="button">
             계획 수정 요청
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (pendingReviewApproval) {
+    const approvalBusy = busyAction?.key === `approval:${pendingReviewApproval.id}`;
+    return (
+      <div className="next-action-card waiting">
+        <div>
+          <strong>리뷰 진행 승인 대기</strong>
+          <p>작업자가 작업을 완료했습니다. 승인하면 PR을 생성하고 코드 리뷰를 시작합니다.</p>
+        </div>
+        <div className="artifact-actions">
+          <button
+            aria-busy={approvalBusy ? true : undefined}
+            className={approvalBusy ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+            disabled={busy}
+            onClick={() => void onApproveReview(pendingReviewApproval)}
+            type="button"
+          >
+            {approvalBusy ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+            리뷰 진행 승인
+          </button>
+          <button disabled={busy} onClick={() => void onRejectReview(pendingReviewApproval)} type="button">
+            보류
           </button>
         </div>
       </div>

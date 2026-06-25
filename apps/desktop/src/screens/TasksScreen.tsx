@@ -564,6 +564,8 @@ function buildAttentionItems(
     id: approval.id,
     title: approval.approvalType === "PlanApproval"
       ? language === "ko" ? "계획 승인 필요" : "Plan approval required"
+      : approval.approvalType === "ReviewApproval"
+      ? language === "ko" ? "리뷰 진행 승인 필요" : "Review approval required"
       : language === "ko" ? "실행 승인 필요" : "Execution approval required",
     body: approval.requestedReason,
   }));
