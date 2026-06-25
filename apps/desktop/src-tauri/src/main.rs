@@ -1042,6 +1042,20 @@ fn delete_task(
 ) -> CommandResult<()> {
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
+    // 세션 삭제는 진행 중인 run을 막지 않고 함께 정리한다: 이 앱이 구동 중인 라이브 run엔 취소
+    // 플래그를 세우고, db::cancel_task_runs가 host 프로세스 그룹을 kill한 뒤 상태를 Canceled로
+    // 내린다 → delete_task의 "실행 중이면 거부" 가드를 통과한다.
+    let active_runs = db::list_active_runs_for_task(&conn, &project_id, &task_id)?;
+    if !active_runs.is_empty() {
+        if let Ok(running_runs) = state.running_runs.lock() {
+            for (run_id, _) in &active_runs {
+                if let Some(cancellation) = running_runs.get(run_id) {
+                    cancellation.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        db::cancel_task_runs(&conn, &project_id, &task_id)?;
+    }
     // worktree 정보는 DB 삭제(cascade) 전에 읽어둔다 — 삭제 후엔 task_worktrees 행이 사라진다.
     let worktree = db::get_task_worktree(&conn, &project_id, &task_id)?;
     db::delete_task(&mut conn, &project_id, &task_id)?;

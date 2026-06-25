@@ -8321,9 +8321,24 @@ fn run_codex_app_server_role(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     apply_connection_env(&mut command, &runner_command.env);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // 새 프로세스 그룹으로 띄운다(자식 PID == PGID). codex app-server가 분리되어 살아남더라도
+        // teardown/세션 삭제에서 그룹째 kill해 MCP 서브트리까지 함께 정리할 수 있다.
+        command.process_group(0);
+    }
     let mut child = command
         .spawn()
         .map_err(|err| CommandError::io("Codex app-server를 실행하지 못했습니다.", err))?;
+    // host_pid(=PGID)를 즉시 저장한다 → 세션 삭제/재시작 정리가 이 그룹을 찾아 종료할 수 있다.
+    // finalize_host_run이 정상 종료 시 host_pid를 다시 NULL로 되돌린다.
+    let host_pid = child.id();
+    conn.execute(
+        "UPDATE agent_runs SET host_pid = ?1, updated_at = ?2 WHERE id = ?3",
+        params![host_pid, now(), run.id],
+    )
+    .map_err(|err| CommandError::database("Codex host run PID를 저장하지 못했습니다.", err))?;
     let mut stdin = child.stdin.take().ok_or_else(|| {
         CommandError::new("IoFailed", "Codex app-server stdin을 열지 못했습니다.")
     })?;
@@ -8461,6 +8476,13 @@ fn run_codex_app_server_role(
         }
     }
 
+    // codex app-server는 자기 MCP 서브트리(codegraph 등)를 거느린 채 분리되어 child.kill()(단일 PID)로는
+    // 죽지 않을 수 있다. 살아남은 서버가 stdout/stderr 파이프 쓰기 끝을 쥐면 아래 reader join이 영구
+    // 블록되어 finalize가 멈춘다(턴 완료 후에도 run이 Running으로 박제). stdin을 먼저 닫아 EOF를 알리고,
+    // 프로세스 그룹째 KILL해 파이프를 확실히 닫는다 → reader가 EOF로 빠져나와 join이 풀린다.
+    drop(stdin);
+    #[cfg(unix)]
+    kill_host_pid_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
     let _ = stdout_reader.join();
@@ -9195,6 +9217,71 @@ fn kill_host_pid(pid: u32) {
 
 #[cfg(not(unix))]
 fn kill_host_pid(_pid: u32) {}
+
+/// 프로세스 그룹 전체에 SIGKILL을 보낸다(음수 PID = 그룹). process_group(0)으로 띄운 자식은
+/// PID == PGID이므로, 이 호출이 그 자식과 모든 하위 프로세스(codex의 MCP 서버 등)를 함께 종료한다.
+/// ponytail: `kill` 쉘아웃 — 기존 kill_host_pid와 동일 패턴, libc 의존성 없이 정리 경로에서만 호출.
+#[cfg(unix)]
+fn kill_host_pid_group(pgid: u32) {
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(format!("-{pgid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_host_pid_group(_pgid: u32) {}
+
+/// 태스크의 아직 끝나지 않은 run(Queued/Running)을 (id, host_pid)로 반환한다.
+/// 세션 삭제 시 라이브 run에 취소 플래그를 세우고 host 프로세스 그룹을 종료하는 데 쓴다.
+pub fn list_active_runs_for_task(
+    conn: &Connection,
+    project_id: &str,
+    task_id: &str,
+) -> CommandResult<Vec<(String, Option<i64>)>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, host_pid FROM agent_runs
+              WHERE project_id = ?1 AND task_id = ?2 AND status IN ('Queued', 'Running')",
+        )
+        .map_err(|err| CommandError::database("진행 중 실행을 조회하지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id, task_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(|err| CommandError::database("진행 중 실행을 조회하지 못했습니다.", err))?;
+    collect_rows(rows, "진행 중 실행을 조회하지 못했습니다.")
+}
+
+/// 태스크의 진행 중 run을 강제 종료한다: 저장된 host_pid가 있으면 프로세스 그룹째 kill하고,
+/// 상태를 Canceled로 내려 host_pid를 비운다. 세션 삭제가 delete_task의 "실행 중이면 거부" 가드를
+/// 통과하도록 삭제 직전에 호출한다. (라이브 run의 협조적 취소 플래그는 호출부에서 별도로 세운다.)
+pub fn cancel_task_runs(conn: &Connection, project_id: &str, task_id: &str) -> CommandResult<()> {
+    let active = list_active_runs_for_task(conn, project_id, task_id)?;
+    if active.is_empty() {
+        return Ok(());
+    }
+    for (_, host_pid) in &active {
+        if let Some(pid) = host_pid {
+            kill_host_pid_group(*pid as u32);
+        }
+    }
+    let timestamp = now();
+    conn.execute(
+        "UPDATE agent_runs
+            SET status = 'Canceled',
+                lifecycle_phase = 'completed',
+                finished_at = COALESCE(finished_at, ?1),
+                host_pid = NULL,
+                updated_at = ?1
+          WHERE project_id = ?2 AND task_id = ?3 AND status IN ('Queued', 'Running')",
+        params![timestamp, project_id, task_id],
+    )
+    .map_err(|err| CommandError::database("진행 중 실행을 취소하지 못했습니다.", err))?;
+    Ok(())
+}
 
 /// detached 자식의 stdout.log / stderr.log를 tail한다. 일반 파일은 EOF(Ok(0)) 이후
 /// 파일이 커지면 같은 핸들에서 read가 새 바이트를 반환하므로 follow가 된다.
@@ -13237,6 +13324,32 @@ mod tests {
 
         assert!(!worktree_path.exists());
         assert!(!git::branch_exists(&repo.root, &saved.branch_name).expect("branch_exists"));
+        assert!(get_task(&conn, &task.id).is_err());
+    }
+
+    #[test]
+    fn cancel_task_runs_lets_delete_proceed_past_active_guard() {
+        // 세션 삭제는 진행 중 run을 막지 않고 함께 정리해야 한다. cancel_task_runs가 활성 run을
+        // Canceled로 내려 delete_task의 "실행 중이면 거부" 가드를 통과시키는지 검증한다.
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let run =
+            prepare_next_role_context(&mut conn, &repo.root, &project.id, &task.id).expect("next");
+        assert_eq!(run.status, "Queued");
+
+        // 활성 run이 있으면 삭제가 거부된다(기존 가드).
+        assert!(delete_task(&mut conn, &project.id, &task.id).is_err());
+
+        cancel_task_runs(&conn, &project.id, &task.id).expect("cancel");
+        let canceled = get_agent_run(&conn, &run.id).expect("run");
+        assert_eq!(canceled.status, "Canceled");
+        assert!(list_active_runs_for_task(&conn, &project.id, &task.id)
+            .expect("active")
+            .is_empty());
+
+        // 이제 가드를 통과해 삭제된다.
+        delete_task(&mut conn, &project.id, &task.id).expect("delete after cancel");
         assert!(get_task(&conn, &task.id).is_err());
     }
 
