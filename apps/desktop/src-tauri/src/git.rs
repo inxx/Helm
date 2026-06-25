@@ -223,6 +223,28 @@ pub fn merge_pull_request(root: &Path, number: i64) -> CommandResult<()> {
 
 /// Open a PR from `head` into `base`. Returns the PR URL printed on stdout.
 /// `--head` is explicit so the PR never originates from `base` (e.g. main).
+/// 저장소의 PR 템플릿을 표준 위치에서 찾아 본문을 반환한다. 없으면 None.
+/// ponytail: GitHub이 인식하는 단일 파일 경로만 검사. `.github/PULL_REQUEST_TEMPLATE/`
+/// 복수 템플릿 디렉터리가 필요해지면 그때 추가한다.
+pub fn find_pr_template(root: &Path) -> Option<String> {
+    const CANDIDATES: [&str; 6] = [
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        ".github/pull_request_template.md",
+        "docs/PULL_REQUEST_TEMPLATE.md",
+        "docs/pull_request_template.md",
+        "PULL_REQUEST_TEMPLATE.md",
+        "pull_request_template.md",
+    ];
+    for candidate in CANDIDATES {
+        if let Ok(content) = std::fs::read_to_string(root.join(candidate)) {
+            if !content.trim().is_empty() {
+                return Some(content);
+            }
+        }
+    }
+    None
+}
+
 pub fn create_pull_request(
     root: &Path,
     base: &str,
@@ -1651,6 +1673,26 @@ impl GraphColorAssigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_pr_template_by_priority_else_none() {
+        let root = std::env::temp_dir().join("helm_pr_tpl_test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".github")).unwrap();
+
+        assert_eq!(find_pr_template(&root), None);
+
+        std::fs::write(root.join("PULL_REQUEST_TEMPLATE.md"), "root tpl").unwrap();
+        std::fs::write(root.join(".github/PULL_REQUEST_TEMPLATE.md"), "github tpl").unwrap();
+        // .github가 root보다 우선순위가 높다.
+        assert_eq!(find_pr_template(&root).as_deref(), Some("github tpl"));
+
+        std::fs::write(root.join(".github/PULL_REQUEST_TEMPLATE.md"), "   \n").unwrap();
+        // 비어있는 후보는 건너뛰고 다음 후보(root)를 쓴다.
+        assert_eq!(find_pr_template(&root).as_deref(), Some("root tpl"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn parses_worktree_porcelain_with_and_without_branch() {

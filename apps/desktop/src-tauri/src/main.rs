@@ -2158,10 +2158,15 @@ fn ensure_merge_pr_for_code_review(
     }
 
     let title = format_task_completion_commit_message(&task.title);
-    let body = if task.description.trim().is_empty() {
+    let task_ref = if task.description.trim().is_empty() {
         format!("Helm task `{}`", task.id)
     } else {
         format!("Helm task `{}`\n\n{}", task.id, task.description.trim())
+    };
+    // 저장소에 PR 템플릿이 있으면 그 구조를 본문으로 쓰고, task 정보는 위에 붙여 추적성을 유지한다.
+    let body = match git::find_pr_template(worktree_path) {
+        Some(template) => format!("{task_ref}\n\n---\n\n{}", template.trim_end()),
+        None => task_ref,
     };
 
     let result = (|| -> CommandResult<String> {
