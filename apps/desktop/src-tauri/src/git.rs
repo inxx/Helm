@@ -255,7 +255,19 @@ pub fn create_pull_request(
     let output = Command::new("gh")
         .current_dir(root)
         .args([
-            "pr", "create", "--base", base, "--head", head, "--title", title, "--body", body,
+            "pr",
+            "create",
+            "--base",
+            base,
+            "--head",
+            head,
+            "--title",
+            title,
+            "--body",
+            body,
+            // PR을 gh 인증 사용자(=실행한 사용자)에게 할당한다. @me는 username 조회 없이 안전하게 해석된다.
+            "--assignee",
+            "@me",
         ])
         .output()
         .map_err(|err| CommandError::io("PR 생성에 실패했습니다.", err))?;
@@ -501,6 +513,28 @@ pub fn add_worktree(
         return Err(CommandError::with_details(
             "GitCommandFailed",
             "Git worktree 생성에 실패했습니다.",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+
+    Ok(())
+}
+
+// 현재 root에서 HEAD를 기준으로 새 브랜치를 만들고 체크아웃한다(in-place 모드 전용).
+// 보호 브랜치(main 등)에서 in-place 작업을 시작할 때 그 브랜치를 직접 건드리지 않으려고 쓴다.
+pub fn create_and_checkout_branch(root: &Path, branch_name: &str) -> CommandResult<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["checkout", "-b"])
+        .arg(branch_name)
+        .output()
+        .map_err(|err| CommandError::io("Git 브랜치를 만들지 못했습니다.", err))?;
+
+    if !output.status.success() {
+        return Err(CommandError::with_details(
+            "GitCommandFailed",
+            "Git 브랜치 생성/체크아웃에 실패했습니다.",
             String::from_utf8_lossy(&output.stderr),
         ));
     }

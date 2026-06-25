@@ -933,6 +933,17 @@ h3 {
   align-items: stretch;
 }
 
+.composer-worktree-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  font-size: 12px;
+  opacity: 0.85;
+  cursor: pointer;
+  user-select: none;
+}
+
 .session-message {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);

@@ -520,6 +520,8 @@ pub struct CreateTaskInput {
     pub title: String,
     pub description: Option<String>,
     pub external_refs: Option<Vec<TaskExternalRefInput>>,
+    /// "current_branch"(현재 체크아웃 브랜치 in-place) | "worktree"(새 워크트리). None이면 기본값.
+    pub worktree_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

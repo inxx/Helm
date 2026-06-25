@@ -57,6 +57,8 @@ export function SessionsScreen({
   const [changedFiles, setChangedFiles] = useState<GitFileStatus[]>([]);
   const [orchestratorInput, setOrchestratorInput] = useState("");
   const [orchestratorBusy, setOrchestratorBusy] = useState(false);
+  // 새 작업을 현재 체크아웃된 브랜치에서 in-place로 할지, 새 워크트리에서 할지.
+  const [worktreeMode, setWorktreeMode] = useState<"current_branch" | "worktree">("current_branch");
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [deletingSession, setDeletingSession] = useState(false);
   const [events, setEvents] = useState<RunEventSummary[]>([]);
@@ -442,6 +444,7 @@ export function SessionsScreen({
           title: task.title.slice(0, 120),
           description,
           externalRefs: [{ refType: "PlainText", refValue: task.description ?? task.title, refTitle: language === "ko" ? "AI 계획 작업" : "AI-planned task" }],
+          worktreeMode,
         });
         try {
           await api.startNextRoleRun(projectId, newTask.id);
@@ -949,6 +952,24 @@ export function SessionsScreen({
                 value={orchestratorInput}
               />
               <div className="composer-buttons">
+                <label
+                  className="composer-worktree-toggle"
+                  title={
+                    language === "ko"
+                      ? "체크 시 새 작업마다 워크트리를 만듭니다. 해제 시 현재 체크아웃된 브랜치에서 작업합니다(보호 브랜치면 새 브랜치 생성)."
+                      : "Checked: create a worktree per task. Unchecked: work in the current branch (a new branch is created on protected branches)."
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={worktreeMode === "worktree"}
+                    disabled={orchestratorBusy}
+                    onChange={(event) =>
+                      setWorktreeMode(event.target.checked ? "worktree" : "current_branch")
+                    }
+                  />
+                  <span>{language === "ko" ? "새 워크트리" : "New worktree"}</span>
+                </label>
                 {orchestratorBusy ? (
                   <button className="primary-button loading-button" onClick={() => void cancelOrchestratorTurn()} type="button">
                     <Square size={14} aria-hidden />
@@ -1015,6 +1036,24 @@ export function SessionsScreen({
                 value={orchestratorInput}
               />
               <div className="composer-buttons">
+                <label
+                  className="composer-worktree-toggle"
+                  title={
+                    language === "ko"
+                      ? "체크 시 새 작업마다 워크트리를 만듭니다. 해제 시 현재 체크아웃된 브랜치에서 작업합니다(보호 브랜치면 새 브랜치 생성)."
+                      : "Checked: create a worktree per task. Unchecked: work in the current branch (a new branch is created on protected branches)."
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={worktreeMode === "worktree"}
+                    disabled={orchestratorBusy}
+                    onChange={(event) =>
+                      setWorktreeMode(event.target.checked ? "worktree" : "current_branch")
+                    }
+                  />
+                  <span>{language === "ko" ? "새 워크트리" : "New worktree"}</span>
+                </label>
                 {orchestratorBusy ? (
                   <button className="primary-button loading-button" onClick={() => void cancelOrchestratorTurn()} type="button">
                     <Square size={14} aria-hidden />

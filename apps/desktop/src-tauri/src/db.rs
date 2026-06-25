@@ -27,7 +27,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 13;
+const SUPPORTED_SCHEMA_VERSION: i64 = 14;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
@@ -41,6 +41,7 @@ const PHASE10_MIGRATION: &str = include_str!("../migrations/0010_terminal_orca_p
 const PHASE11_MIGRATION: &str = include_str!("../migrations/0011_agent_run_runner_metadata.sql");
 const PHASE12_MIGRATION: &str = include_str!("../migrations/0012_agent_run_host_pid.sql");
 const PHASE13_MIGRATION: &str = include_str!("../migrations/0013_review_approval.sql");
+const PHASE14_MIGRATION: &str = include_str!("../migrations/0014_task_worktree_mode.sql");
 const TASK_STATUS_ORDER: &[&str] = &[
     "Planned",
     "Ready",
@@ -402,6 +403,11 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
     }
     if current_version < 13 {
         apply_migration(conn, 13, "phase13_review_approval", PHASE13_MIGRATION)?;
+    }
+    if current_version < 14 {
+        apply_migration(conn, 14, "phase14_task_worktree_mode", PHASE14_MIGRATION)?;
+    } else if !table_has_column(conn, "tasks", "worktree_mode")? {
+        apply_schema_patch(conn, PHASE14_MIGRATION)?;
     }
     Ok(())
 }
@@ -893,6 +899,11 @@ pub fn create_task(
     for external_ref in &external_refs {
         validate_external_ref(external_ref)?;
     }
+    let worktree_mode = match input.worktree_mode.as_deref() {
+        None | Some("current_branch") => "current_branch",
+        Some("worktree") => "worktree",
+        Some(_) => return Err(CommandError::validation("알 수 없는 worktree 모드입니다.")),
+    };
 
     let id = new_id();
     let timestamp = now();
@@ -903,9 +914,9 @@ pub fn create_task(
     tx.execute(
         "INSERT INTO tasks (
            id, project_id, epic_id, title, description, status, sort_order,
-           created_at, updated_at, last_transition_at
+           worktree_mode, created_at, updated_at, last_transition_at
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, 'Planned', ?6, ?7, ?7, ?7)",
+         VALUES (?1, ?2, ?3, ?4, ?5, 'Planned', ?6, ?7, ?8, ?8, ?8)",
         params![
             id,
             project_id,
@@ -913,6 +924,7 @@ pub fn create_task(
             title,
             description,
             sort_order,
+            worktree_mode,
             timestamp
         ],
     )
@@ -1651,6 +1663,11 @@ pub fn ensure_task_worktree(
     let task = get_task(conn, task_id)?;
     if task.project_id != project_id {
         return Err(CommandError::validation("대상 태스크를 찾을 수 없습니다."));
+    }
+
+    // current_branch 모드는 새 worktree를 만들지 않고 프로젝트 root(현재 브랜치)에서 in-place 작업한다.
+    if task_worktree_mode(conn, task_id)? == "current_branch" {
+        return register_inplace_worktree(conn, root, project_id, &task);
     }
 
     let project = get_project(conn, project_id)?;
@@ -5010,6 +5027,98 @@ pub fn reconcile_interrupted_runs(
     Ok(reattach)
 }
 
+/// 세션 중 reaper가 살아있는 run을 죽이지 않도록 두는 여유 시간(초).
+/// healthy run은 자신의 role timeout(deadline)에서 스스로 종료되므로, 마지막 활동이
+/// timeout + 이 grace 보다 오래 멈춘 Running run은 finalize에 도달하지 못한 좀비로 본다.
+const STALE_RUN_GRACE_SECONDS: i64 = 120;
+
+/// 앱이 떠 있는 동안 host run thread가 finalize에 도달하지 못하고 죽거나 hang하면
+/// agent_runs row가 'Running'으로 영구히 남아 `has_running_agent_run`이 큐 워커를
+/// 무기한 교착시킨다(시작 시에만 도는 `reconcile_interrupted_runs`로는 못 잡는다).
+/// 마지막 활동(heartbeat, 없으면 started_at)이 role timeout + grace 보다 오래 멈췄고
+/// 살아있는 host_pid도 없는 Running run을 좀비로 보고 NeedsInspection으로 회수한다.
+/// NeedsInspection은 retry 가능 상태라 사용자가 재시도 버튼으로 다시 돌릴 수 있다.
+pub fn reap_stale_running_runs(conn: &Connection, project_id: &str) -> CommandResult<Vec<String>> {
+    let candidates: Vec<(String, String, Option<String>, Option<String>, Option<i64>)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, role_id, heartbeat_at, started_at, host_pid
+                   FROM agent_runs
+                  WHERE project_id = ?1 AND status = 'Running'",
+            )
+            .map_err(|err| CommandError::database("실행 상태를 조회하지 못했습니다.", err))?;
+        let rows = stmt
+            .query_map(params![project_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            })
+            .map_err(|err| CommandError::database("실행 상태를 조회하지 못했습니다.", err))?;
+        collect_rows(rows, "실행 상태를 조회하지 못했습니다.")?
+    };
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let settings = effective_settings(conn, project_id)?;
+    let now_dt = Utc::now();
+    let timestamp = now();
+    let mut reaped = Vec::new();
+    for (id, role_id, heartbeat_at, started_at, host_pid) in candidates {
+        // host_pid가 살아있으면(Process 어댑터의 detached run 등) 진짜 실행 중일 수 있으니 둔다.
+        if let Some(pid) = host_pid {
+            if host_pid_is_alive(pid as u32) {
+                continue;
+            }
+        }
+        let Some(last_seen) = heartbeat_at.or(started_at) else {
+            continue; // 시간 정보가 없으면 함부로 회수하지 않는다.
+        };
+        let Ok(last_dt) = DateTime::parse_from_rfc3339(&last_seen) else {
+            continue;
+        };
+        let idle_secs = (now_dt - last_dt.with_timezone(&Utc)).num_seconds();
+        let timeout = role_timeout_seconds(&settings.role_presets, &role_id) as i64;
+        if idle_secs <= timeout + STALE_RUN_GRACE_SECONDS {
+            continue; // 아직 자기 deadline 안. 살아있을 수 있으니 둔다.
+        }
+        conn.execute(
+            "UPDATE agent_runs
+                SET status = 'NeedsInspection',
+                    result_status = COALESCE(result_status, 'needs_changes'),
+                    lifecycle_phase = 'orphaned',
+                    failure_kind = 'orphaned_stale_heartbeat',
+                    failure_reason = 'Host run thread stopped before finishing (stale heartbeat past timeout).',
+                    finished_at = COALESCE(finished_at, ?1),
+                    host_pid = NULL,
+                    updated_at = ?1
+              WHERE id = ?2 AND status = 'Running'",
+            params![timestamp, id],
+        )
+        .map_err(|err| CommandError::database("좀비 실행 상태를 정리하지 못했습니다.", err))?;
+        reaped.push(id);
+    }
+
+    if !reaped.is_empty() {
+        insert_audit(
+            conn,
+            project_id,
+            "AgentRun",
+            None,
+            "agent_run.reaped_stale",
+            json!({
+                "reapedCount": reaped.len(),
+                "reason": "Running run idle past role timeout with no live host process"
+            }),
+        )?;
+    }
+    Ok(reaped)
+}
+
 fn mark_host_run_persistence_failed(
     conn: &Connection,
     project_id: &str,
@@ -7354,6 +7463,85 @@ fn task_slug(title: &str, task_id: &str) -> String {
         short_id
     };
     format!("{prefix}-{short_id}")
+}
+
+/// 태스크의 worktree 모드를 읽는다("current_branch" | "worktree").
+fn task_worktree_mode(conn: &Connection, task_id: &str) -> CommandResult<String> {
+    conn.query_row(
+        "SELECT worktree_mode FROM tasks WHERE id = ?1",
+        params![task_id],
+        |row| row.get::<_, String>(0),
+    )
+    .map_err(|err| CommandError::database("태스크 worktree 모드를 읽지 못했습니다.", err))
+}
+
+/// in-place 작업을 직접 올리면 안 되는 보호 브랜치. ponytail: 고정 목록, 설정화는 필요해지면.
+fn is_protected_branch(branch: &str) -> bool {
+    matches!(branch, "main" | "master" | "develop")
+}
+
+/// current_branch 모드: 새 worktree 없이 프로젝트 root(현재 브랜치)를 가리키는 task_worktrees
+/// 행을 등록한다. HEAD가 보호 브랜치면 그 위에서 새 feature 브랜치를 만들어 체크아웃한다.
+fn register_inplace_worktree(
+    conn: &mut Connection,
+    root: &Path,
+    project_id: &str,
+    task: &TaskSummary,
+) -> CommandResult<TaskWorktreeSummary> {
+    let current = git::current_branch(root).ok_or_else(|| {
+        CommandError::validation(
+            "현재 체크아웃된 브랜치를 찾을 수 없습니다(detached HEAD). 워크트리 모드로 시작해주세요.",
+        )
+    })?;
+    let base_branch = current.clone();
+    let created_branch = is_protected_branch(&current);
+    let branch_name = if created_branch {
+        let slug = task_slug(&task.title, &task.id);
+        let new_branch = unique_task_branch(root, &slug)?;
+        git::create_and_checkout_branch(root, &new_branch)?;
+        new_branch
+    } else {
+        current
+    };
+
+    let id = new_id();
+    let timestamp = now();
+    let root_text = root.to_string_lossy().to_string();
+    let head_hash = git::head_hash(root);
+    conn.execute(
+        "INSERT INTO task_worktrees (
+           id, project_id, task_id, branch_name, worktree_path, base_branch, head_hash,
+           status, created_at, updated_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'Active', ?8, ?8)",
+        params![
+            id,
+            project_id,
+            task.id,
+            branch_name.as_str(),
+            root_text.as_str(),
+            base_branch.as_str(),
+            head_hash,
+            timestamp
+        ],
+    )
+    .map_err(|err| CommandError::database("태스크 worktree를 저장하지 못했습니다.", err))?;
+    insert_audit(
+        conn,
+        project_id,
+        "Task",
+        Some(&task.id),
+        "task_worktree.inplace_registered",
+        json!({
+            "taskId": task.id,
+            "worktreePath": root_text,
+            "branchName": branch_name,
+            "baseBranch": base_branch,
+            "createdBranch": created_branch
+        }),
+    )?;
+    get_task_worktree(conn, project_id, &task.id)?
+        .ok_or_else(|| CommandError::validation("태스크 worktree를 찾을 수 없습니다."))
 }
 
 fn unique_task_branch(root: &Path, slug: &str) -> CommandResult<String> {
@@ -10888,6 +11076,7 @@ mod tests {
                 title: "Fixture core loop".to_string(),
                 description: Some("검증용 태스크".to_string()),
                 external_refs: None,
+                worktree_mode: Some("worktree".to_string()),
             },
         )
         .expect("create task")
@@ -11534,6 +11723,7 @@ mod tests {
                 title: "Second task".to_string(),
                 description: None,
                 external_refs: None,
+                worktree_mode: Some("worktree".to_string()),
             },
         )
         .expect("second task");
@@ -13204,7 +13394,14 @@ mod tests {
         let wt = repo.root.join("wt");
         run_git(
             &repo.root,
-            &["worktree", "add", "-b", "helm/x", wt.to_str().unwrap(), "HEAD"],
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "helm/x",
+                wt.to_str().unwrap(),
+                "HEAD",
+            ],
         );
         // git-lfs/husky 훅이 만들어낸 것처럼 untracked 노이즈를 만든다.
         fs::create_dir_all(wt.join(".husky/_")).expect("husky dir");
@@ -13636,6 +13833,97 @@ mod tests {
             )
             .expect("approval status");
         assert_eq!(approval_status, "Expired");
+    }
+
+    #[test]
+    fn ensure_task_worktree_inplace_uses_current_branch_and_protects_main() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+
+        // 1) 비보호 브랜치에서 in-place: 그 브랜치를 그대로 쓰고, worktree_path = root.
+        run_git(&repo.root, &["checkout", "-b", "feature/work"]);
+        let task = create_task(
+            &mut conn,
+            &project.id,
+            CreateTaskInput {
+                epic_id: None,
+                title: "inplace".to_string(),
+                description: None,
+                external_refs: None,
+                worktree_mode: Some("current_branch".to_string()),
+            },
+        )
+        .expect("task");
+        let wt = ensure_task_worktree(&mut conn, &repo.root, &project.id, &task.id).expect("wt");
+        assert_eq!(wt.worktree_path, repo.root.to_string_lossy());
+        assert_eq!(wt.branch_name, "feature/work");
+
+        // 2) 보호 브랜치(main)에서 in-place: main을 직접 건드리지 않고 새 helm/ 브랜치를 체크아웃.
+        run_git(&repo.root, &["checkout", "main"]);
+        let task2 = create_task(
+            &mut conn,
+            &project.id,
+            CreateTaskInput {
+                epic_id: None,
+                title: "on main".to_string(),
+                description: None,
+                external_refs: None,
+                worktree_mode: Some("current_branch".to_string()),
+            },
+        )
+        .expect("task2");
+        let wt2 = ensure_task_worktree(&mut conn, &repo.root, &project.id, &task2.id).expect("wt2");
+        assert_eq!(wt2.worktree_path, repo.root.to_string_lossy());
+        assert!(
+            wt2.branch_name.starts_with("helm/"),
+            "got {}",
+            wt2.branch_name
+        );
+        assert_eq!(
+            git::current_branch(&repo.root).as_deref(),
+            Some(wt2.branch_name.as_str())
+        );
+    }
+
+    #[test]
+    fn reap_stale_running_runs_reaps_only_idle_past_timeout() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+
+        let fresh_id = new_id();
+        let stale_id = new_id();
+        let fresh_hb = now();
+        // 기본 role timeout(1800s) + grace(120s)를 한참 넘긴 과거 heartbeat.
+        let stale_hb = (Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+
+        for (id, heartbeat) in [(&fresh_id, &fresh_hb), (&stale_id, &stale_hb)] {
+            conn.execute(
+                "INSERT INTO agent_runs (
+                   id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+                   stdout_log_path, stderr_log_path, started_at, heartbeat_at, created_at, updated_at
+                 )
+                 VALUES (?1, ?2, ?3, 'coder', 'Running', ?4, 'summary.md', 'structured-result.json',
+                         'stdout.log', 'stderr.log', ?5, ?5, ?5, ?5)",
+                params![id, project.id, task.id, ".helm/artifacts/runs/reap-test", heartbeat],
+            )
+            .expect("insert running run");
+        }
+
+        let reaped = reap_stale_running_runs(&conn, &project.id).expect("reap");
+        assert_eq!(reaped, vec![stale_id.clone()]);
+
+        let stale = get_agent_run(&conn, &stale_id).expect("stale run");
+        assert_eq!(stale.status, "NeedsInspection");
+        assert_eq!(
+            stale.failure_kind.as_deref(),
+            Some("orphaned_stale_heartbeat")
+        );
+        assert!(stale.finished_at.is_some());
+
+        // 방금 heartbeat을 찍은 run은 살아있는 것으로 보고 건드리지 않는다.
+        let fresh = get_agent_run(&conn, &fresh_id).expect("fresh run");
+        assert_eq!(fresh.status, "Running");
     }
 
     #[test]

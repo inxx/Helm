@@ -1047,10 +1047,14 @@ fn delete_task(
     // 디스크 worktree와 로컬 branch는 FK cascade 대상이 아니다. DB 삭제가 성공한 뒤에만,
     // best-effort로 정리해 고아 worktree/브랜치가 남지 않게 한다(실패해도 삭제는 이미 확정).
     if let Some(worktree) = worktree {
-        let _ = git::remove_worktree(&context.root_path, Path::new(&worktree.worktree_path));
-        // worktree admin 엔트리가 남으면 branch -D가 "checked out"으로 거부되므로 prune 후 삭제한다.
-        git::prune_worktrees(&context.root_path);
-        let _ = git::delete_branch(&context.root_path, &worktree.branch_name, false);
+        // in-place(current_branch) 모드는 worktree가 프로젝트 root를 가리킨다 — 사용자의
+        // 워킹트리·현재 브랜치이므로 절대 제거/삭제하지 않는다.
+        if Path::new(&worktree.worktree_path) != context.root_path {
+            let _ = git::remove_worktree(&context.root_path, Path::new(&worktree.worktree_path));
+            // worktree admin 엔트리가 남으면 branch -D가 "checked out"으로 거부되므로 prune 후 삭제한다.
+            git::prune_worktrees(&context.root_path);
+            let _ = git::delete_branch(&context.root_path, &worktree.branch_name, false);
+        }
     }
     Ok(())
 }
@@ -2454,7 +2458,23 @@ fn run_project_queue_worker(
     while !stop.load(Ordering::SeqCst) {
         let queued = db::open_existing_db(&context.db_path).and_then(|conn| {
             if db::has_running_agent_run(&conn, &project_id)? {
-                return Ok(None);
+                // 큐가 막혀 있으면, 세션 중 죽은 host run thread가 남긴 Running 좀비를 회수한다.
+                let reaped = db::reap_stale_running_runs(&conn, &project_id)?;
+                for run_id in &reaped {
+                    let _ = app.emit(
+                        "agent-run://updated",
+                        json!({
+                            "projectId": project_id,
+                            "runId": run_id,
+                            "status": "NeedsInspection",
+                            "source": "stale-run-reaper"
+                        }),
+                    );
+                }
+                // 회수 후에도 살아있는 run이 있으면 이번 사이클은 양보한다.
+                if db::has_running_agent_run(&conn, &project_id)? {
+                    return Ok(None);
+                }
             }
             db::next_queued_agent_run(&conn, &project_id)
         });

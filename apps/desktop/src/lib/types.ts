@@ -112,10 +112,12 @@ export interface RoleRunnerSelection {
   connectionId: string;
   model?: string | null;
   effort?: string | null;
+  /** code_reviewer 다중 선택에서 이 연결을 결정권자로 지정한다(게이트 기준). */
+  decider?: boolean;
 }
 
 export interface RoleAssignment {
-  roleId: "planner" | "coder" | "plan_verifier" | "code_reviewer" | "arbiter" | "tester";
+  roleId: "planner" | "coder" | "plan_verifier" | "code_reviewer" | "tester";
   selectionMode: "single" | "multiple";
   selections: RoleRunnerSelection[];
   /** Legacy shape retained for older persisted project settings. */
@@ -590,6 +592,8 @@ export interface CreateTaskInput {
     refValue: string;
     refTitle?: string | null;
   }>;
+  /** "current_branch"(현재 체크아웃 브랜치 in-place) | "worktree"(새 워크트리). 미지정 시 기본값. */
+  worktreeMode?: "current_branch" | "worktree";
 }
 
 export interface ProjectSettingsPatch {
