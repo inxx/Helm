@@ -1685,6 +1685,9 @@ pub fn ensure_task_worktree(
         let _ = git::delete_branch(root, &branch_name, false);
         return Err(err);
     }
+    // 훅(git-lfs/husky)이 막 만든 baseline untracked 노이즈를 exclude에 등록 — coder diff
+    // 게이트 오판과 merge 커밋 오염을 원천 차단한다.
+    git::exclude_baseline_untracked(&worktree_path);
 
     let id = new_id();
     let timestamp = now();
@@ -7510,6 +7513,30 @@ fn resolve_host_runner_command(
     })
 }
 
+// 연결의 commandArgs 템플릿이 {dossierPath}를 참조하지 않으면(과거 기본값/사용자 커스텀
+// 템플릿, app-settings↔project_settings 드리프트 등), agent는 역할 dossier md를 쓰지 않아
+// finalize의 dossier 게이트가 항상 막힌다. 해석된 명령 어디에도 dossier 경로가 없으면
+// 마지막(프롬프트) 인자에 작성 지시를 보강한다.
+// ponytail: 마지막 인자=프롬프트 가정(claude -p / codex exec -- / antigravity chat 모두 해당).
+//           프롬프트가 마지막이 아닌 CLI를 쓰게 되면 그때 위치 지정 로직을 추가한다.
+fn ensure_dossier_instruction(
+    mut args: Vec<String>,
+    placeholders: &HashMap<String, String>,
+) -> Vec<String> {
+    let Some(dossier_path) = placeholders.get("dossierPath") else {
+        return args;
+    };
+    if args.iter().any(|arg| arg.contains(dossier_path.as_str())) {
+        return args;
+    }
+    if let Some(last) = args.last_mut() {
+        last.push_str(&format!(
+            " Also write the role dossier markdown at {dossier_path}; Helm requires it as the role handoff record."
+        ));
+    }
+    args
+}
+
 fn role_assignment_command(
     settings: &EffectiveSettings,
     role_id: &str,
@@ -7572,6 +7599,7 @@ fn role_assignment_command(
         })
         .transpose()?
         .unwrap_or_default();
+    let args = ensure_dossier_instruction(args, placeholders);
     let provider = connection
         .get("provider")
         .and_then(Value::as_str)
@@ -10615,15 +10643,8 @@ fn diff_consistency_check(
         .filter_map(Value::as_str)
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
-    // 게이트의 목적은 "coder가 보고한 변경이 실제 변경과 맞는가"다. worktree 생성 시
-    // git-lfs/husky 훅이 .husky/_/ 같은 untracked 캐시 파일을 만들어내는데(메인 레포에선
-    // gitignore되지만 worktree엔 그 ignore 파일이 안 따라옴), coder가 건드리지도/보고하지도
-    // 않은 이 노이즈를 mismatch로 잡으면 툴링 있는 모든 레포에서 매 run이 오판된다.
-    // 따라서 coder가 보고하지 않은 untracked 파일은 비교에서 제외한다.
-    // ponytail: tracked 파일 누락/과보고는 그대로 잡는다. 미보고 신규파일만 놓치는데, merge diff에서 드러난다.
     let actual_files = actual_changed_files
         .iter()
-        .filter(|file| file.status != "untracked" || reported_files.contains(&file.path))
         .map(|file| file.path.clone())
         .collect::<BTreeSet<_>>();
 
@@ -13178,30 +13199,54 @@ mod tests {
     }
 
     #[test]
-    fn diff_consistency_ignores_untracked_unreported_noise() {
-        let result = json!({
-            "status": "pass",
-            "changedFiles": ["src/index.tsx"]
-        });
-        let status = |path: &str, status: &str| GitFileStatus {
-            path: path.to_string(),
-            status: status.to_string(),
-            staged: false,
-            renamed_from: None,
-        };
-        // coder가 보고한 tracked 변경 + 보고 안 한 untracked 툴링 노이즈(.husky/_/*) → 통과해야 함.
-        let actual = vec![
-            status("src/index.tsx", "modified"),
-            status(".husky/_/post-checkout", "untracked"),
-        ];
-        assert!(diff_consistency_check("coder", Some(&result), &actual).is_none());
+    fn exclude_baseline_untracked_silences_noise_and_dedups() {
+        let repo = test_repo();
+        let wt = repo.root.join("wt");
+        run_git(
+            &repo.root,
+            &["worktree", "add", "-b", "helm/x", wt.to_str().unwrap(), "HEAD"],
+        );
+        // git-lfs/husky 훅이 만들어낸 것처럼 untracked 노이즈를 만든다.
+        fs::create_dir_all(wt.join(".husky/_")).expect("husky dir");
+        fs::write(wt.join(".husky/_/post-checkout"), "noise\n").expect("hook");
+        assert!(!git::changed_files(&wt).expect("status").is_empty());
 
-        // tracked 파일을 보고 없이 바꾸면(스코프 위반) 여전히 잡아야 함.
-        let scope_violation = vec![
-            status("src/index.tsx", "modified"),
-            status("src/secret.ts", "modified"),
+        git::exclude_baseline_untracked(&wt);
+        assert!(
+            git::changed_files(&wt).expect("status").is_empty(),
+            "baseline 노이즈가 exclude 후에도 잡힘"
+        );
+
+        // 두 번 호출해도 exclude에 중복 추가하지 않는다.
+        let exclude = repo.root.join(".git/info/exclude");
+        let before = fs::read_to_string(&exclude).unwrap_or_default();
+        git::exclude_baseline_untracked(&wt);
+        let after = fs::read_to_string(&exclude).unwrap_or_default();
+        assert_eq!(before, after, "exclude 중복 추가됨");
+    }
+
+    #[test]
+    fn ensure_dossier_instruction_appends_when_missing() {
+        let mut placeholders = HashMap::new();
+        placeholders.insert("dossierPath".to_string(), "/runs/x/plan.md".to_string());
+
+        // 템플릿이 dossier를 안 쓰면 프롬프트(마지막 인자)에 보강된다.
+        let stale = vec![
+            "claude".to_string(),
+            "-p".to_string(),
+            "Read ctx, write summary and result.".to_string(),
         ];
-        assert!(diff_consistency_check("coder", Some(&result), &scope_violation).is_some());
+        let fixed = ensure_dossier_instruction(stale, &placeholders);
+        assert!(fixed.last().unwrap().contains("/runs/x/plan.md"));
+
+        // 이미 dossier를 참조하면 그대로 둔다(중복 보강 없음).
+        let ok = vec![
+            "claude".to_string(),
+            "-p".to_string(),
+            "Read ctx, write summary, result, /runs/x/plan.md.".to_string(),
+        ];
+        let unchanged = ensure_dossier_instruction(ok.clone(), &placeholders);
+        assert_eq!(unchanged, ok);
     }
 
     #[test]

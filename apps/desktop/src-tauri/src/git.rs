@@ -520,6 +520,58 @@ pub fn prune_worktrees(root: &Path) {
     let _ = git_output_allow_fail(root, &["worktree", "prune"]);
 }
 
+// 새 worktree에는 git-lfs/husky 등 훅이 post-checkout 시점에 .husky/_/* 같은 캐시 파일을
+// 만들어 둔다. 메인 레포는 이를 gitignore하지만 worktree엔 그 ignore 파일이 따라오지 않아
+// untracked로 남고, coder diff 정합성 게이트와 merge 커밋을 오염시킨다. worktree 생성 직후의
+// untracked(= coder가 건드리기 전의 baseline 노이즈)를 공용 info/exclude에 등록해 이후
+// git status/diff/add에서 빠지게 한다. best-effort.
+pub fn exclude_baseline_untracked(worktree_path: &Path) {
+    let Some(status) = git_output_allow_fail(
+        worktree_path,
+        &["status", "--porcelain", "--untracked-files=all"],
+    ) else {
+        return;
+    };
+    let paths: Vec<String> = status
+        .lines()
+        .filter_map(|line| line.strip_prefix("?? "))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if paths.is_empty() {
+        return;
+    }
+    let Some(exclude_raw) =
+        git_output_allow_fail(worktree_path, &["rev-parse", "--git-path", "info/exclude"])
+    else {
+        return;
+    };
+    let exclude_rel = Path::new(exclude_raw.trim());
+    let exclude_abs = if exclude_rel.is_absolute() {
+        exclude_rel.to_path_buf()
+    } else {
+        worktree_path.join(exclude_rel)
+    };
+    let existing = std::fs::read_to_string(&exclude_abs).unwrap_or_default();
+    let mut have: HashSet<&str> = existing.lines().map(str::trim).collect();
+    let mut additions = String::new();
+    for path in &paths {
+        if have.insert(path.as_str()) {
+            additions.push_str(path);
+            additions.push('\n');
+        }
+    }
+    if additions.is_empty() {
+        return;
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(&additions);
+    let _ = std::fs::write(&exclude_abs, content);
+}
+
 pub fn remove_worktree(root: &Path, worktree_path: &Path) -> CommandResult<()> {
     let output = Command::new("git")
         .arg("-C")
