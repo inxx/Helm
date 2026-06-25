@@ -179,8 +179,11 @@ export function SettingsScreen({
     };
   }, [showToast]);
 
+  // 프로젝트가 실제로 바뀔 때만 리셋한다. snapshot 객체는 백그라운드 갱신마다
+  // 새 레퍼런스가 되므로 [snapshot]에 걸면 입력 도중 githubAppInputs/jiraToken이 비워진다.
+  const snapshotProjectId = snapshot?.project.id;
   useEffect(() => {
-    if (!snapshot) return;
+    if (!snapshotProjectId) return;
     setRunnerChecks([]);
     setConnectionChecks({});
     setConnectionCheckBusyId(null);
@@ -188,11 +191,11 @@ export function SettingsScreen({
     setProjectRuns([]);
     setJiraToken("");
     void api
-      .jiraTokenStatus(snapshot.project.id)
+      .jiraTokenStatus(snapshotProjectId)
       .then(setJiraTokenSet)
       .catch(() => setJiraTokenSet(false));
     setGithubAppInputs({});
-  }, [snapshot]);
+  }, [snapshotProjectId]);
 
   useEffect(() => {
     if (!snapshot || activeCategory !== "usage") return;
