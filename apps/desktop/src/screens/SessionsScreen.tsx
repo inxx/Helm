@@ -62,6 +62,7 @@ export function SessionsScreen({
   const [summaries, setSummaries] = useState<Array<{ runId: string; roleId: string; text: string; at: string | null }>>([]);
   const [runAlert, setRunAlert] = useState<{ roleId: string; status: string; failureKind: string | null; failureReason: string | null; at: string | null } | null>(null);
   const [orchestratorMessages, setOrchestratorMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string }>>([]);
+  const [pendingOrchestratorRequirement, setPendingOrchestratorRequirement] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [savingStageAi, setSavingStageAi] = useState(false);
@@ -78,99 +79,14 @@ export function SessionsScreen({
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatScrollFrameRef = useRef<number | null>(null);
-  // ACP orchestrator session: the chat drives `hermes acp`, which decomposes goals into
-  // kanban tasks. Execution is owned by Helm's dispatcher, not this chat.
-  const [acpSessionId, setAcpSessionId] = useState<string | null>(null);
-  const streamingIdRef = useRef<string | null>(null);
-  // Every assistant turn's text is accumulated here so we can parse it for a tasks[] JSON on
-  // turn end. `primedRef` tracks whether the tasks[] schema rule has been prepended to a message
-  // yet this session — it rides the user's first real send, so there is no startup round-trip.
-  const primedRef = useRef(false);
-  const turnTextRef = useRef("");
-
-  // start an ACP session scoped to the active project; tear it down on project change.
-  useEffect(() => {
-    if (!snapshot) return;
-    let disposed = false;
-    let created: string | null = null;
-    primedRef.current = false;
-    void api
-      .acpSessionNew(snapshot.project.rootPath)
-      .then((id) => {
-        if (disposed) {
-          void api.acpSessionClose(id);
-          return;
-        }
-        created = id;
-        setAcpSessionId(id);
-      })
-      .catch((err) => !disposed && setLoadError(messageFromError(err, language === "ko" ? "ACP 세션을 시작하지 못했습니다." : "Failed to start the ACP session.")));
-    return () => {
-      disposed = true;
-      setAcpSessionId(null);
-      streamingIdRef.current = null;
-      if (created) void api.acpSessionClose(created);
-    };
-  }, [snapshot?.project.id, snapshot?.project.rootPath]);
-
-  // stream ACP updates into the chat transcript.
-  useEffect(() => {
-    if (!acpSessionId) return;
-    let disposed = false;
-    const unlisteners: Array<() => void> = [];
-    const sub = <T,>(event: string, handler: (payload: T) => void) => {
-      void listen<T>(event, (e) => {
-        if (!disposed) handler(e.payload);
-      }).then((un) => (disposed ? un() : unlisteners.push(un)));
-    };
-
-    sub<AcpUpdatePayload>("acp://update", (payload) => {
-      if (payload.sessionId !== acpSessionId || !payload.update) return;
-      const kind = payload.update.sessionUpdate;
-      if (kind === "agent_message_chunk") {
-        const text = chunkText(payload.update);
-        if (!text) return;
-        turnTextRef.current += text;
-        setOrchestratorMessages((items) => appendAssistantChunk(items, text, streamingIdRef));
-      } else if (kind === "tool_call") {
-        streamingIdRef.current = null;
-        const title = payload.update.title ?? "tool";
-        setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "assistant", content: `🔧 ${title}` }]);
-      }
-    });
-    sub<{ sessionId: string }>("acp://turn", (payload) => {
-      if (payload.sessionId !== acpSessionId) return;
-      streamingIdRef.current = null;
-      setOrchestratorBusy(false);
-      const turnText = turnTextRef.current;
-      turnTextRef.current = "";
-      void maybeMaterializeTasks(turnText);
-    });
-    sub<{ sessionId: string }>("acp://closed", (payload) => {
-      if (payload.sessionId === acpSessionId) {
-        streamingIdRef.current = null;
-        setOrchestratorBusy(false);
-      }
-    });
-
-    return () => {
-      disposed = true;
-      unlisteners.forEach((un) => un());
-    };
-  }, [acpSessionId]);
-
   // Orchestrator chat bubbles are project-scoped client state with no backing store. Reset them
   // whenever the active session changes — switching, deleting, starting a new compose, or changing
   // project — so a previous session's transcript doesn't bleed into the next one. Also abandon any
   // in-flight conductor turn: left running it would keep streaming into the cleared transcript and
   // could still materialize tasks for a session the user just left.
   useEffect(() => {
-    if (orchestratorBusy && acpSessionId) {
-      void api.acpSessionCancel(acpSessionId).catch(() => {});
-      setOrchestratorBusy(false);
-    }
-    turnTextRef.current = "";
-    streamingIdRef.current = null;
+    setOrchestratorBusy(false);
+    setPendingOrchestratorRequirement(null);
     setOrchestratorMessages([]);
   }, [activeSessionId]);
 
@@ -203,9 +119,7 @@ export function SessionsScreen({
   const pendingApprovalCount = snapshot?.approvals.filter((approval) => approval.status === "Pending").length ?? 0;
   const activeRunWorking = Boolean(activeSession && isSessionWorking(activeSession));
   const latestActivity = events.at(-1) ?? null;
-  // Orchestrator turn is in flight but no *visible* assistant text yet — show a waiting bubble so
-  // a long Hermes turn (or a JSON-only "진행" turn whose block strips to nothing) doesn't blink to
-  // a dead screen after the user hits send.
+  // Orchestrator turn is in flight but no visible assistant text yet.
   const lastOrchestratorMessage = orchestratorMessages.at(-1);
   const hasVisibleAssistantReply =
     lastOrchestratorMessage?.role === "assistant" && stripPlanJson(lastOrchestratorMessage.content).length > 0;
@@ -410,42 +324,60 @@ export function SessionsScreen({
 
   async function submitOrchestratorInstruction() {
     const goalText = orchestratorInput.trim();
-    if (!goalText || orchestratorBusy) return;
-    if (!acpSessionId) {
-      setLoadError(language === "ko" ? "ACP 세션이 아직 준비되지 않았습니다." : "The ACP session is not ready yet.");
-      return;
-    }
-    setOrchestratorBusy(true);
+    if (!snapshot || !goalText || orchestratorBusy) return;
     setLoadError(null);
     setOrchestratorInput("");
     setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "user", content: goalText }]);
-    streamingIdRef.current = null;
-    // The chat bubble shows only the user's text; the tasks[] schema rule rides invisibly on the
-    // first send of the session so Hermes knows how to emit a task list when later asked.
-    const prompt = primedRef.current ? goalText : `${HERMES_TASK_RULE}\n\n---\n${goalText}`;
-    primedRef.current = true;
+
+    if (!pendingOrchestratorRequirement || !isConfirmationMessage(goalText)) {
+      const nextRequirement = [pendingOrchestratorRequirement, goalText].filter(Boolean).join("\n\n추가 요구사항:\n");
+      setPendingOrchestratorRequirement(nextRequirement);
+      setOrchestratorMessages((items) => [
+        ...items,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: requirementConfirmationText(nextRequirement, language),
+        },
+      ]);
+      return;
+    }
+
+    const confirmedRequirement = pendingOrchestratorRequirement;
+    setPendingOrchestratorRequirement(null);
+    setOrchestratorBusy(true);
     try {
-      await api.acpSessionPrompt(acpSessionId, prompt);
+      const result = await api.runPlannerConversation(snapshot.project.id, {
+        message: confirmedRequirement,
+        goalText: confirmedRequirement,
+        currentDraftJson: null,
+      });
+      if (result.timedOut || result.exitCode !== 0) {
+        throw new Error(result.stderr.trim() || result.responseText.trim() || (language === "ko" ? "AI 계획 응답을 받지 못했습니다." : "The AI planner did not return a usable response."));
+      }
+      const reply = result.responseText.trim();
+      setOrchestratorMessages((items) => [
+        ...items,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: stripPlanJson(reply) || (language === "ko" ? "계획을 받았습니다." : "Received a plan."),
+        },
+      ]);
+      await maybeMaterializeTasks(reply);
     } catch (error) {
-      setOrchestratorBusy(false);
       setLoadError(messageFromError(error, language === "ko" ? "오케스트레이터에 지시를 전달하지 못했습니다." : "Failed to send the instruction to the orchestrator."));
+    } finally {
+      setOrchestratorBusy(false);
     }
   }
 
   async function cancelOrchestratorTurn() {
-    if (!acpSessionId || !orchestratorBusy) return;
-    try {
-      await api.acpSessionCancel(acpSessionId);
-    } catch {
-      /* the acp://turn event clears busy regardless */
-    }
-    streamingIdRef.current = null;
     setOrchestratorBusy(false);
   }
 
-  // Every assistant turn is parsed for a tasks[] JSON. If found, confirm once, then materialize
-  // each into a Helm task that the existing role-pipeline engine runs. Non-task replies parse to
-  // null and are left as ordinary chat — the schema rule (priming) keeps false positives rare.
+  // Every planner reply is parsed for tasks[] JSON. If found, confirm once, then materialize
+  // each into a Helm task that the existing role-pipeline engine runs.
   async function maybeMaterializeTasks(turnText: string) {
     if (!snapshot) return;
     const tasks = parsePlanTasks(turnText);
@@ -460,7 +392,7 @@ export function SessionsScreen({
         const newTask = await api.createTask(projectId, {
           title: task.title.slice(0, 120),
           description,
-          externalRefs: [{ refType: "PlainText", refValue: task.description ?? task.title, refTitle: language === "ko" ? "ACP 분해 작업" : "ACP-decomposed task" }],
+          externalRefs: [{ refType: "PlainText", refValue: task.description ?? task.title, refTitle: language === "ko" ? "AI 계획 작업" : "AI-planned task" }],
         });
         try {
           await api.startNextRoleRun(projectId, newTask.id);
@@ -1517,13 +1449,15 @@ function messageFromError(error: unknown, fallback: string): string {
   return fallback;
 }
 
-interface AcpUpdatePayload {
-  sessionId: string;
-  update: {
-    sessionUpdate?: string;
-    content?: { text?: string } | { text?: string }[];
-    title?: string;
-  } | null;
+function isConfirmationMessage(text: string): boolean {
+  return /^(확인|진행|시작|좋아|오케이|ok|okay|yes|y|go|proceed)$/i.test(text.trim());
+}
+
+function requirementConfirmationText(requirement: string, language: AppLanguage): string {
+  if (language === "en") {
+    return `I'll hand this to the planner after your confirmation.\n\n${requirement}\n\nReply "ok" to proceed, or add missing details.`;
+  }
+  return `아래 내용으로 계획자 AI에게 넘길까요?\n\n${requirement}\n\n진행하려면 "확인" 또는 "진행"이라고 답하고, 빠진 내용이 있으면 이어서 적어주세요.`;
 }
 
 // Keep the previous reference when the freshly-fetched value is deeply equal, so a no-op poll
@@ -1531,37 +1465,4 @@ interface AcpUpdatePayload {
 // task's transcript); swap for a structural compare only if they ever grow large.
 function keepIfEqual<T>(prev: T, next: T): T {
   return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
-}
-
-function chunkText(update: AcpUpdatePayload["update"]): string {
-  const content = update?.content;
-  if (!content) return "";
-  if (Array.isArray(content)) return content.map((part) => part.text ?? "").join("");
-  return content.text ?? "";
-}
-
-const HERMES_TASK_RULE = `[규칙] 너는 Helm의 오케스트레이터야. 초반엔 사용자와 대화하며 요구사항을 분석·구체화하고, 분석이 끝나면 설계자(planner)에게 넘겨 작업을 시작시켜. 그 이후엔 나머지 단계(설계→구현→리뷰→테스트)가 원활히 진행되도록 지켜보고 조율하는 역할이야. 코드를 직접 수정하거나 파일을 만들거나 명령을 실행하지 마 — 실제 작업은 항상 각 단계 담당자에게 맡겨.
-
-먼저 무엇을, 왜, 어떤 제약 아래 만들지 충분히 파악해. 모호하면 질문해서 좁혀. 요구사항이 충분히 모였다고 판단되면 사용자에게 "이대로 진행할까요?"라고 물어. 사용자가 진행을 원하면, 다른 설명·인사 없이 확정된 요구사항을 아래 JSON 코드블록 하나만 출력해:
-\`\`\`json
-{"tasks":[{"title":"한 줄 제목","description":"설계자에게 넘길 확정 요구사항 전문","role":"planner"}]}
-\`\`\`
-작업은 딱 하나, role은 항상 "planner". 분석이 끝나기 전이거나 사용자가 진행을 원하지 않으면 이 JSON을 절대 출력하지 마.`;
-
-type OrchestratorMessage = { id: string; role: "user" | "assistant"; content: string };
-
-// Append a streaming agent chunk: extend the in-progress assistant message (tracked by ref)
-// or start a new one.
-function appendAssistantChunk(
-  items: OrchestratorMessage[],
-  text: string,
-  ref: { current: string | null },
-): OrchestratorMessage[] {
-  if (ref.current) {
-    const id = ref.current;
-    return items.map((message) => (message.id === id ? { ...message, content: message.content + text } : message));
-  }
-  const id = crypto.randomUUID();
-  ref.current = id;
-  return [...items, { id, role: "assistant", content: text }];
 }

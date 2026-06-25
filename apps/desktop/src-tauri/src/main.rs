@@ -1,7 +1,5 @@
 mod db;
 mod git;
-mod hermes;
-mod hermes_acp;
 mod jira;
 mod models;
 
@@ -98,7 +96,6 @@ struct AppState {
     terminal_sessions: Mutex<HashMap<String, PtySession>>,
     role_pty_sessions: Mutex<HashMap<String, RolePtySession>>,
     handoff_watcher: Mutex<Option<Child>>,
-    acp_sessions: Mutex<HashMap<String, hermes_acp::AcpSession>>,
 }
 
 struct PtySession {
@@ -2787,108 +2784,6 @@ fn list_agent_sessions(
 }
 
 #[tauri::command]
-fn list_hermes_board(limit: Option<i64>) -> CommandResult<Vec<hermes::HermesBoardCard>> {
-    hermes::list_board(limit.unwrap_or(120))
-}
-
-#[tauri::command]
-fn get_hermes_task_tree(task_id: String) -> CommandResult<Vec<hermes::HermesSessionNode>> {
-    hermes::get_task_tree(task_id)
-}
-
-#[tauri::command]
-fn create_hermes_stage_chain(
-    goal: String,
-    stages: Vec<hermes::HermesStageInput>,
-) -> CommandResult<Vec<String>> {
-    hermes::create_stage_chain(goal, stages)
-}
-
-#[tauri::command]
-fn get_hermes_task_diff(task_id: String) -> CommandResult<Vec<GitFileDiff>> {
-    hermes::get_task_diff(task_id)
-}
-
-#[tauri::command]
-fn list_hermes_profiles() -> CommandResult<Vec<hermes::HermesProfile>> {
-    hermes::list_profiles()
-}
-
-#[tauri::command]
-fn hermes_kanban_action(
-    action: String,
-    task_id: String,
-    reason: Option<String>,
-) -> CommandResult<()> {
-    hermes::kanban_action(action, task_id, reason)
-}
-
-fn lock_acp<'a>(
-    state: &'a State<'_, AppState>,
-) -> CommandResult<std::sync::MutexGuard<'a, HashMap<String, hermes_acp::AcpSession>>> {
-    state
-        .acp_sessions
-        .lock()
-        .map_err(|_| CommandError::new("IoFailed", "ACP 세션 상태를 사용하지 못했습니다."))
-}
-
-#[tauri::command]
-fn acp_session_new(
-    cwd: Option<String>,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> CommandResult<String> {
-    let (session_id, session) = hermes_acp::start_session(&app, cwd)?;
-    lock_acp(&state)?.insert(session_id.clone(), session);
-    Ok(session_id)
-}
-
-#[tauri::command]
-fn acp_session_prompt(
-    session_id: String,
-    text: String,
-    state: State<'_, AppState>,
-) -> CommandResult<()> {
-    let sessions = lock_acp(&state)?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| CommandError::new("AcpNoSession", "ACP 세션을 찾을 수 없습니다."))?;
-    hermes_acp::prompt(session, &session_id, &text)
-}
-
-#[tauri::command]
-fn acp_session_cancel(session_id: String, state: State<'_, AppState>) -> CommandResult<()> {
-    let sessions = lock_acp(&state)?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| CommandError::new("AcpNoSession", "ACP 세션을 찾을 수 없습니다."))?;
-    hermes_acp::cancel(session, &session_id)
-}
-
-#[tauri::command]
-fn acp_permission_respond(
-    session_id: String,
-    request_id: serde_json::Value,
-    option_id: String,
-    state: State<'_, AppState>,
-) -> CommandResult<()> {
-    let sessions = lock_acp(&state)?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| CommandError::new("AcpNoSession", "ACP 세션을 찾을 수 없습니다."))?;
-    hermes_acp::respond_permission(session, request_id, &option_id)
-}
-
-#[tauri::command]
-fn acp_session_close(session_id: String, state: State<'_, AppState>) -> CommandResult<()> {
-    let session = lock_acp(&state)?.remove(&session_id);
-    if let Some(session) = session {
-        hermes_acp::close(session);
-    }
-    Ok(())
-}
-
-#[tauri::command]
 fn list_task_timeline(
     project_id: String,
     task_id: String,
@@ -4180,7 +4075,6 @@ fn inject_planning_provider_options(
 }
 
 fn normalize_planning_cli_args(args: Vec<String>, provider: Option<&str>) -> Vec<String> {
-    let args = ensure_hermes_oneshot_args(args);
     if provider != Some("codex") {
         return args;
     }
@@ -4328,86 +4222,6 @@ fn command_output_message(output: &ShellOutput) -> String {
 fn smoke_output_contains_sentinel(output: &ShellOutput) -> bool {
     output.stdout.contains(AI_CLI_SMOKE_SENTINEL) || output.stderr.contains(AI_CLI_SMOKE_SENTINEL)
 }
-
-/// Hermes takes a one-shot prompt via `-z PROMPT`; a bare positional prompt is parsed as a
-/// subcommand and fails with exit code 2. Rewrite `hermes <prompt>` to `hermes -z <prompt>`.
-fn ensure_hermes_oneshot_args(args: Vec<String>) -> Vec<String> {
-    let Some(program) = args.first() else {
-        return args;
-    };
-    let name = Path::new(program)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(program);
-    if name != "hermes" || args.len() < 2 {
-        return args;
-    }
-    // Already a oneshot or an explicit subcommand invocation — leave untouched.
-    if args[1..].iter().any(|arg| arg == "-z") || HERMES_SUBCOMMANDS.contains(&args[1].as_str()) {
-        return args;
-    }
-    let mut out = args;
-    let prompt_idx = out.len() - 1; // prompt is the trailing positional
-    out.insert(prompt_idx, "-z".to_string());
-    out
-}
-
-const HERMES_SUBCOMMANDS: &[&str] = &[
-    "chat",
-    "model",
-    "fallback",
-    "secrets",
-    "migrate",
-    "gateway",
-    "proxy",
-    "lsp",
-    "setup",
-    "postinstall",
-    "whatsapp",
-    "whatsapp-cloud",
-    "slack",
-    "send",
-    "login",
-    "logout",
-    "auth",
-    "status",
-    "cron",
-    "webhook",
-    "portal",
-    "kanban",
-    "hooks",
-    "doctor",
-    "security",
-    "dump",
-    "debug",
-    "backup",
-    "checkpoints",
-    "import",
-    "config",
-    "pairing",
-    "skills",
-    "bundles",
-    "plugins",
-    "curator",
-    "memory",
-    "tools",
-    "computer-use",
-    "mcp",
-    "sessions",
-    "insights",
-    "claw",
-    "version",
-    "update",
-    "uninstall",
-    "acp",
-    "profile",
-    "completion",
-    "dashboard",
-    "desktop",
-    "gui",
-    "logs",
-    "prompt-size",
-];
 
 fn is_antigravity_chat_command(command: &[String]) -> bool {
     let Some(program) = command.first() else {
@@ -6698,37 +6512,6 @@ fn truncate_output(value: String) -> String {
 mod tests {
     use super::*;
 
-    fn v(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn hermes_oneshot_rewrite() {
-        // bare positional prompt -> -z prompt
-        assert_eq!(
-            ensure_hermes_oneshot_args(v(&["hermes", "do a thing"])),
-            v(&["hermes", "-z", "do a thing"])
-        );
-        // works with absolute path and leading static flags
-        assert_eq!(
-            ensure_hermes_oneshot_args(v(&["/x/hermes", "--safe-mode", "prompt"])),
-            v(&["/x/hermes", "--safe-mode", "-z", "prompt"])
-        );
-        // already explicit -z, subcommand invocation, and non-hermes left untouched
-        assert_eq!(
-            ensure_hermes_oneshot_args(v(&["hermes", "-z", "p"])),
-            v(&["hermes", "-z", "p"])
-        );
-        assert_eq!(
-            ensure_hermes_oneshot_args(v(&["hermes", "chat"])),
-            v(&["hermes", "chat"])
-        );
-        assert_eq!(
-            ensure_hermes_oneshot_args(v(&["codex", "exec", "p"])),
-            v(&["codex", "exec", "p"])
-        );
-    }
-
     fn shell_output(stdout: &str, stderr: &str, exit_code: i32) -> ShellOutput {
         ShellOutput {
             stdout: stdout.to_string(),
@@ -6973,17 +6756,6 @@ fn main() {
             list_agent_runs,
             list_project_runs,
             list_agent_sessions,
-            list_hermes_board,
-            get_hermes_task_tree,
-            get_hermes_task_diff,
-            create_hermes_stage_chain,
-            list_hermes_profiles,
-            hermes_kanban_action,
-            acp_session_new,
-            acp_session_prompt,
-            acp_session_cancel,
-            acp_permission_respond,
-            acp_session_close,
             list_task_timeline,
             list_run_events,
             get_agent_run,

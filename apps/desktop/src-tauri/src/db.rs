@@ -13140,6 +13140,8 @@ mod tests {
                 "claude",
                 "--add-dir",
                 "/tmp/helm-artifacts/run-1",
+                "--permission-mode",
+                "bypassPermissions",
                 "--model",
                 "sonnet",
                 "-p",

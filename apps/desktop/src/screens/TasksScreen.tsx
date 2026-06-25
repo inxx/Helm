@@ -6,13 +6,11 @@ import type {
   ApprovalSummary,
   ControlTowerProjectSummary,
   GitFileStatus,
-  HermesBoardCard,
   ProjectSnapshot,
   TaskSummary,
   TaskTimelineEntry,
 } from "../lib/types";
 import { TaskBoard } from "../components/TaskBoard";
-import { hermesCardToTask } from "../lib/hermesBoard";
 import { api } from "../lib/api";
 import { deriveRunLiveState, isRunActiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
 import { roleLabel } from "../lib/runnerReadiness";
@@ -40,40 +38,12 @@ export function TasksScreen({
   const [taskRuns, setTaskRuns] = useState<Record<string, AgentRunSummary[]>>({});
   const [towerProjects, setTowerProjects] = useState<ControlTowerProjectSummary[]>([]);
   const [towerLoadError, setTowerLoadError] = useState<string | null>(null);
-  const [hermesCards, setHermesCards] = useState<HermesBoardCard[]>([]);
   const [runRefreshKey, setRunRefreshKey] = useState(0);
   const taskRunKey = useMemo(
     () => snapshot?.tasks.map((task) => task.id).join(":") ?? "",
     [snapshot?.tasks],
   );
   const combined = useMemo(() => buildCombinedTasks(towerProjects, snapshot, taskRuns), [snapshot, taskRuns, towerProjects]);
-
-  // Hermes board is the unified execution source: map its cards onto the Helm TaskBoard and
-  // merge them with Helm's own tasks (disjoint id namespaces, so no collision).
-  const boardTasks = useMemo<TaskSummary[]>(() => {
-    if (!snapshot) return combined.tasks;
-    const mapped = hermesCards
-      .filter((card) => (card.status || "").toLowerCase() !== "archived") // archived는 보드에서 제외
-      .map((card) => hermesCardToTask(card, snapshot.project.id));
-    return [...combined.tasks, ...mapped];
-  }, [combined.tasks, hermesCards, snapshot?.project.id]);
-
-  // poll the Hermes board while the dispatcher runs. ponytail: 5s interval, fine for a local
-  // SQLite read; switch to an event if it ever shows up in profiling.
-  useEffect(() => {
-    let disposed = false;
-    const load = () =>
-      api
-        .listHermesBoard(200)
-        .then((cards) => !disposed && setHermesCards(cards))
-        .catch(() => !disposed && setHermesCards([]));
-    void load();
-    const timer = window.setInterval(load, 5_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, []);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -172,9 +142,9 @@ export function TasksScreen({
         </div>
 
         <div className="task-observer-workspace">
-          {boardTasks.length > 0 ? (
+          {combined.tasks.length > 0 ? (
             <TaskBoard
-              tasks={boardTasks}
+              tasks={combined.tasks}
               taskRuns={combined.taskRuns}
               projectLabels={combined.projectLabels}
               selectedTaskId={null}
@@ -185,7 +155,6 @@ export function TasksScreen({
                   void onFocusProjectTask(projectId, taskId, "sessions");
                   return;
                 }
-                // Hermes-sourced cards have no Helm task/chat to open — ignore the click.
                 if (!combined.taskProject[taskId]) return;
                 onOpenTaskChat(taskId);
               }}
@@ -686,8 +655,8 @@ function TaskObserverEmptyState({
         <h3>{language === "ko" ? "관찰할 태스크 세션이 없습니다." : "No task sessions to observe."}</h3>
         <p>
           {language === "ko"
-            ? "Codex Desktop 또는 Hermes가 실행을 시작하고 Task를 기록하면 이 화면에 세션별로 나타납니다."
-            : "Sessions will appear here when Codex Desktop or Hermes starts a run and records tasks."}
+            ? "Codex Desktop이 실행을 시작하고 Task를 기록하면 이 화면에 세션별로 나타납니다."
+            : "Sessions will appear here when Codex Desktop starts a run and records tasks."}
         </p>
       </div>
       <dl className="task-observer-empty-grid">

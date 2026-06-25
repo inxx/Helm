@@ -19,7 +19,7 @@ Helm의 관찰(옵저버) 정보가 TaskDetail 패널과 10단계 칸반 안에 
 ## 검토한 대안
 
 - **A. 파생 뷰 레이어**: 기존 agent_runs/run_events를 읽기 전용 재구성. → 채택(A′로 보강)
-- **B. command_session 테이블 신설**: 명령 체인 정밀 추적. → 기각. "새 테이블 금지" 원칙(codex-hermes-helm-observer-plan.md) 위반, 중립 구조와 충돌, 양쪽 데스크톱 래퍼 수정 필요.
+- **B. command_session 테이블 신설**: 명령 체인 정밀 추적. → 기각. "새 테이블 금지" 원칙 위반, 중립 구조와 충돌, 양쪽 데스크톱 래퍼 수정 필요.
 - **C. run_event 상관관계 태깅**: 래퍼가 메타를 채워야 의미 있음. → 지금은 과투자, 향후 확장 경로로만 유지.
 
 **A′ = A + provider 필드 승격.** `AgentRunSummary`에 provider/connectionId가 없고 `Runner request captured` 이벤트 payload에만 묻혀 있어(db.rs claim_host_run 부근), 레인 그룹핑을 기록된 사실 기반으로 만들기 위해 컬럼으로 승격한다. 컬럼 추가는 기존 run 구조의 확장이므로 "새 테이블 금지" 계약 위반이 아니다.
