@@ -123,11 +123,9 @@ export function SettingsScreen({
   const [jiraConfig, setJiraConfig] = useState<JiraConfig>(emptyJiraConfig());
   const [jiraToken, setJiraToken] = useState("");
   const [jiraTokenSet, setJiraTokenSet] = useState(false);
-  const [githubAppId, setGithubAppId] = useState("");
-  const [githubAppKey, setGithubAppKey] = useState("");
-  const [githubAppSet, setGithubAppSet] = useState(false);
-  // "" = 프로젝트 기본 봇, 그 외 = 해당 리뷰어 connection의 봇.
-  const [githubAppTarget, setGithubAppTarget] = useState("");
+  // 봇 대상별 입력값/저장상태. 키 "" = 프로젝트 기본 봇, 그 외 = 리뷰어 connection id.
+  const [githubAppInputs, setGithubAppInputs] = useState<Record<string, { appId: string; key: string }>>({});
+  const [githubAppStatus, setGithubAppStatus] = useState<Record<string, boolean>>({});
   const [obsidianVaultPath, setObsidianVaultPath] = useState("");
   const [obsidianArtifactPath, setObsidianArtifactPath] = useState("");
   const [busy, setBusy] = useState(false);
@@ -193,19 +191,8 @@ export function SettingsScreen({
       .jiraTokenStatus(snapshot.project.id)
       .then(setJiraTokenSet)
       .catch(() => setJiraTokenSet(false));
-    setGithubAppTarget("");
+    setGithubAppInputs({});
   }, [snapshot]);
-
-  // 선택된 봇 대상(프로젝트 기본 또는 리뷰어 connection)의 저장 상태를 조회한다.
-  useEffect(() => {
-    if (!snapshot) return;
-    setGithubAppId("");
-    setGithubAppKey("");
-    void api
-      .githubAppCredentialsStatus(snapshot.project.id, githubAppTarget || undefined)
-      .then(setGithubAppSet)
-      .catch(() => setGithubAppSet(false));
-  }, [snapshot, githubAppTarget]);
 
   useEffect(() => {
     if (!snapshot || activeCategory !== "usage") return;
@@ -257,6 +244,26 @@ export function SettingsScreen({
       decider: selection.decider === true,
     }));
   }, [roleAssignments, aiConnections]);
+
+  // 프로젝트 기본 봇 + 각 리뷰어 connection의 자격증명 저장 상태를 한 번에 조회한다.
+  useEffect(() => {
+    if (!snapshot) return;
+    const ids = ["", ...reviewerBotTargets.map((target) => target.id)];
+    let cancelled = false;
+    void Promise.all(
+      ids.map((id) =>
+        api
+          .githubAppCredentialsStatus(snapshot.project.id, id || undefined)
+          .then((set) => [id, set] as const)
+          .catch(() => [id, false] as const),
+      ),
+    ).then((pairs) => {
+      if (!cancelled) setGithubAppStatus(Object.fromEntries(pairs));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot, reviewerBotTargets]);
 
   async function save() {
     setBusy(true);
@@ -821,19 +828,19 @@ export function SettingsScreen({
     }
   }
 
-  async function saveGithubAppCredentials() {
+  async function saveGithubAppCredentials(targetId: string) {
     if (!snapshot) return;
+    const input = githubAppInputs[targetId] ?? { appId: "", key: "" };
     try {
       await api.setGithubAppCredentials(
         snapshot.project.id,
-        githubAppId,
-        githubAppKey,
-        githubAppTarget || undefined,
+        input.appId,
+        input.key,
+        targetId || undefined,
       );
-      const set = githubAppId.trim().length > 0;
-      setGithubAppSet(set);
-      setGithubAppId("");
-      setGithubAppKey("");
+      const set = input.appId.trim().length > 0;
+      setGithubAppStatus((current) => ({ ...current, [targetId]: set }));
+      setGithubAppInputs((current) => ({ ...current, [targetId]: { appId: "", key: "" } }));
       showToast({
         tone: "success",
         title: set ? "GitHub App 자격증명 저장됨" : "GitHub App 자격증명 삭제됨",
@@ -1611,71 +1618,68 @@ export function SettingsScreen({
                       : "Post code-review comments to PRs under a GitHub App identity instead of your personal gh account. You can match a different bot per reviewer."}
                   </p>
                 </div>
-                <div className="jira-fieldset">
-                  <h4 className="jira-fieldset-title">{language === "ko" ? "인증" : "Authentication"}</h4>
-                  <label className="settings-field">
-                    <span>{language === "ko" ? "적용 대상" : "Applies to"}</span>
-                    <select
-                      value={githubAppTarget}
-                      onChange={(event) => setGithubAppTarget(event.target.value)}
-                    >
-                      <option value="">{language === "ko" ? "프로젝트 기본 봇" : "Project default bot"}</option>
-                      {reviewerBotTargets.map((target) => (
-                        <option key={target.id} value={target.id}>
-                          {target.label}
-                          {target.decider ? (language === "ko" ? " · 결정권자" : " · decider") : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="settings-field">
-                    <span>
-                      App ID
-                      {githubAppSet ? (
-                        <em className="muted"> · {language === "ko" ? "저장됨" : "saved"}</em>
-                      ) : null}
-                    </span>
-                    <input
-                      placeholder={githubAppSet ? "••••••" : "123456"}
-                      value={githubAppId}
-                      onChange={(event) => setGithubAppId(event.target.value)}
-                    />
-                  </label>
-                  <label className="settings-field">
-                    <span>{language === "ko" ? "Private key (PEM)" : "Private key (PEM)"}</span>
-                    <textarea
-                      placeholder={
-                        githubAppSet
-                          ? "••••••••••••"
-                          : "-----BEGIN RSA PRIVATE KEY-----"
-                      }
-                      rows={6}
-                      value={githubAppKey}
-                      onChange={(event) => setGithubAppKey(event.target.value)}
-                    />
-                  </label>
-                  <div className="settings-actions">
-                    <button
-                      className="secondary-button"
-                      disabled={!snapshot || (!githubAppId.trim() && !githubAppSet)}
-                      onClick={() => void saveGithubAppCredentials()}
-                      type="button"
-                    >
-                      {!githubAppId.trim() && githubAppSet
-                        ? language === "ko"
-                          ? "자격증명 삭제"
-                          : "Clear credentials"
-                        : language === "ko"
-                          ? "자격증명 저장"
-                          : "Save credentials"}
-                    </button>
-                  </div>
-                  <p className="muted">
-                    {language === "ko"
-                      ? "App ID와 private key는 OS 키체인에 대상별로 저장됩니다. App이 대상 저장소에 설치되어 있어야 하며, Pull requests write 권한이 필요합니다. 리뷰어별 봇이 없으면 프로젝트 기본 봇으로, 그것도 없으면 기존 gh 계정으로 폴백합니다."
-                      : "App ID and private key are stored per-target in the OS keychain. The App must be installed on the target repo with Pull requests write permission. A reviewer with no bot falls back to the project default bot, then to the default gh account."}
-                  </p>
-                </div>
+                {[
+                  { id: "", label: language === "ko" ? "프로젝트 기본 봇" : "Project default bot", decider: false },
+                  ...reviewerBotTargets,
+                ].map((target) => {
+                  const input = githubAppInputs[target.id] ?? { appId: "", key: "" };
+                  const saved = githubAppStatus[target.id] === true;
+                  return (
+                    <div className="jira-fieldset" key={target.id || "__default__"}>
+                      <h4 className="jira-fieldset-title">
+                        {target.label}
+                        {target.decider ? (language === "ko" ? " · 결정권자" : " · decider") : ""}
+                        {saved ? (
+                          <em className="muted"> · {language === "ko" ? "저장됨" : "saved"}</em>
+                        ) : null}
+                      </h4>
+                      <label className="settings-field">
+                        <span>App ID</span>
+                        <input
+                          placeholder={saved ? "••••••" : "123456"}
+                          value={input.appId}
+                          onChange={(event) =>
+                            setGithubAppInputs((current) => ({
+                              ...current,
+                              [target.id]: { ...(current[target.id] ?? { appId: "", key: "" }), appId: event.target.value },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="settings-field">
+                        <span>{language === "ko" ? "Private key (PEM)" : "Private key (PEM)"}</span>
+                        <textarea
+                          placeholder={saved ? "••••••••••••" : "-----BEGIN RSA PRIVATE KEY-----"}
+                          rows={6}
+                          value={input.key}
+                          onChange={(event) =>
+                            setGithubAppInputs((current) => ({
+                              ...current,
+                              [target.id]: { ...(current[target.id] ?? { appId: "", key: "" }), key: event.target.value },
+                            }))
+                          }
+                        />
+                      </label>
+                      <div className="settings-actions">
+                        <button
+                          className="secondary-button"
+                          disabled={!snapshot || (!input.appId.trim() && !saved)}
+                          onClick={() => void saveGithubAppCredentials(target.id)}
+                          type="button"
+                        >
+                          {!input.appId.trim() && saved
+                            ? language === "ko" ? "자격증명 삭제" : "Clear credentials"
+                            : language === "ko" ? "자격증명 저장" : "Save credentials"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+                <p className="muted">
+                  {language === "ko"
+                    ? "App ID와 private key는 OS 키체인에 대상별로 저장됩니다. App이 대상 저장소에 설치되어 있어야 하며, Pull requests write 권한이 필요합니다. 리뷰어별 봇이 없으면 프로젝트 기본 봇으로, 그것도 없으면 기존 gh 계정으로 폴백합니다."
+                    : "App ID and private key are stored per-target in the OS keychain. The App must be installed on the target repo with Pull requests write permission. A reviewer with no bot falls back to the project default bot, then to the default gh account."}
+                </p>
               </section>
             ) : null}
 
