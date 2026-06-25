@@ -2427,12 +2427,21 @@ function appendRunEvent(
   };
 }
 
+// system 이벤트의 payload에서 진단에 필요한 error만 한 줄로 노출한다.
+// (예: code_review.app_token_failed의 GitHub API 404/InvalidKeyFormat)
+function runEventPayloadDetail(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const error = (payload as { error?: unknown }).error;
+  return typeof error === "string" && error.trim() ? `↳ ${error.trim()}` : null;
+}
+
 function formatRunEvents(events: RunEventSummary[]): string {
   if (events.length === 0) return "아직 기록된 실행 이벤트가 없습니다.";
   return events
     .map((event) => {
       const timestamp = event.createdAt.replace("T", " ").replace(/\.\d+Z$/, "Z");
-      return `[${event.seq}] ${timestamp} ${event.kind}\n${event.message}`;
+      const detail = runEventPayloadDetail(event.payload);
+      return `[${event.seq}] ${timestamp} ${event.kind}\n${event.message}${detail ? `\n${detail}` : ""}`;
     })
     .join("\n\n");
 }
