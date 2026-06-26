@@ -2051,9 +2051,13 @@ pub fn prepare_role_context(
     fs::create_dir_all(&artifact_path)
         .map_err(|err| CommandError::io("실행 산출물 폴더를 만들지 못했습니다.", err))?;
 
+    // epic 게이트(계획 검토/코드 리뷰)는 한 task가 아니라 epic 전체를 검토한다. 약한 검증
+    // 모델이 상단 ## Description(단일 task)에 앵커링해 형제 변경을 오탐하지 않도록, 게이트
+    // run에서는 Description 자체를 epic 전체 계획의 합집합으로 교체한다.
+    let context_task = epic_gate_context_task(conn, project_id, &task, role_id)?;
     let mut context_pack = build_context_pack_markdown(
         root,
-        &task,
+        &context_task,
         &worktree,
         role_id,
         worktree_setup.as_ref(),
@@ -2062,7 +2066,6 @@ pub fn prepare_role_context(
     context_pack.push_str(&build_upstream_dossiers_markdown(
         conn, root, project_id, task_id, role_id,
     ));
-    context_pack.push_str(&build_epic_plan_markdown(conn, project_id, &task, role_id)?);
     let context_manifest = build_context_manifest(
         root,
         &task,
@@ -10007,20 +10010,20 @@ fn role_context_contract(role_id: &str) -> RoleContextContract {
             gate: None,
         },
         "plan_verifier" => RoleContextContract {
-            objective: "승인된 계획과 실제 diff가 일치하는지 판정한다.",
+            objective: "승인된 계획과 실제 diff가 일치하는지 판정한다. Epic Plan 섹션이 있으면 이 게이트는 한 task가 아니라 epic 전체를 검토하는 것이며, '승인된 계획'은 그 섹션에 있는 모든 task 계획의 합집합이다.",
             focus: &[
-                "변경 파일, diff, task 설명, approval 상태를 비교한다.",
-                "계획 밖 변경, 누락된 acceptance criteria, 위험한 상태 전이를 찾는다.",
-                "차단 이슈는 gateResult.blocking=true로 남긴다.",
+                "Epic Plan 섹션이 있으면 그 안의 모든 task 계획의 합집합을 '승인된 계획'으로 본다. 상단 ## Description(anchor 한 task)만으로 범위를 좁히지 마라.",
+                "worktree diff 전체를 그 계획 합집합과 대조한다. 합집합 안 어느 task 계획에든 대응되는 변경이면 '계획 밖'이 아니다(다른 task가 소유한 파일 변경 포함).",
+                "어느 task 계획에도 대응되지 않는 변경, 누락된 acceptance criteria, 위험한 상태 전이만 차단 후보로 본다. 차단 이슈는 gateResult.blocking=true로 남긴다.",
             ],
             pass_conditions: &[
-                "구현 diff가 승인된 계획 범위 안에 있다.",
+                "diff의 모든 변경이 승인된 계획(Epic Plan 합집합 포함) 안 어느 task에든 대응된다.",
                 "필수 acceptance criteria가 코드 또는 검증 계획으로 대응된다.",
                 "blocking issue가 없으면 gateResult.status=pass를 남긴다.",
             ],
             blocking_conditions: &[
-                "계획 밖 변경이 있거나 필수 변경이 누락되었다.",
-                "사용자 승인이 필요한 범위 변경이 있다.",
+                "어느 task 계획에도(Epic Plan 합집합 포함) 대응되지 않는 변경이 있거나 필수 변경이 누락되었다.",
+                "어떤 task 계획에도 없는, 사용자 승인이 필요한 범위 변경이 있다.",
             ],
             forbidden: &[
                 "직접 코드를 수정하지 않는다.",
@@ -11435,28 +11438,30 @@ fn epic_gate_ready(
     Ok(task.id == epic_anchor_id(&siblings) && epic_barrier_met(&siblings, &task.status))
 }
 
-/// epic 게이트 role의 context pack에 형제 task 전체의 계획/범위를 덧붙인다. 게이트는
-/// anchor의 단일 task가 아니라 epic 전체 계획의 합집합과 worktree diff를 대조해야 하므로,
-/// 형제 어느 task의 계획에든 포함된 변경은 "계획 밖"이 아님을 명시한다. 이게 없으면 공유
-/// worktree에서 형제 변경을 매번 out-of-plan으로 오탐한다.
-fn build_epic_plan_markdown(
+/// epic 게이트 role의 context용 task를 반환한다. 게이트는 anchor의 단일 task가 아니라
+/// epic 전체 계획의 합집합과 worktree diff를 대조해야 하므로, context pack의 ## Description을
+/// epic 전체 task 계획의 합집합으로 교체한 clone을 돌려준다. 게이트 role이 아니거나 형제가
+/// 1개뿐이면 원본 task를 그대로 쓴다. 이게 없으면 약한 검증 모델이 단일 task 설명에 앵커링해
+/// 공유 worktree의 형제 변경을 매번 out-of-plan으로 오탐한다.
+fn epic_gate_context_task(
     conn: &Connection,
     project_id: &str,
     task: &TaskSummary,
     role_id: &str,
-) -> CommandResult<String> {
+) -> CommandResult<TaskSummary> {
     if !is_epic_gate_role(role_id) || task.epic_id.is_none() {
-        return Ok(String::new());
+        return Ok(task.clone());
     }
     let siblings = epic_sibling_tasks(conn, project_id, task)?;
     if siblings.len() <= 1 {
-        return Ok(String::new());
+        return Ok(task.clone());
     }
-    let mut out = String::from(
-        "\n## Epic Plan (형제 task 전체)\n\n\
-         이 게이트는 개별 task가 아니라 아래 epic 전체 계획을 합쳐 검토한다. \
-         worktree diff 전체를 아래 task 계획의 합집합과 대조하라. \
-         아래 어느 task의 계획에든 포함된 변경이면 '계획 밖'으로 판정하지 마라.\n\n",
+    let mut description = String::from(
+        "이 게이트는 한 task가 아니라 아래 epic 전체를 검토한다. '승인된 계획'은 아래 \
+         모든 task 계획의 합집합이다. worktree diff 전체를 이 합집합과 대조하고, 아래 어느 \
+         task 계획에든 대응되는 변경이면 절대 '계획 밖'으로 판정하지 마라(다른 task가 소유한 \
+         파일 변경 포함). 어느 task 계획에도 대응되지 않는 변경만 범위 밖 후보다.\n\n\
+         ## Epic 전체 계획 (task별)\n\n",
     );
     for sib in &siblings {
         let marker = if sib.id == task.id {
@@ -11464,17 +11469,20 @@ fn build_epic_plan_markdown(
         } else {
             ""
         };
-        let desc = if sib.description.trim().is_empty() {
+        let body = if sib.description.trim().is_empty() {
             "설명 없음"
         } else {
             sib.description.trim()
         };
-        out.push_str(&format!(
+        description.push_str(&format!(
             "### {}{}\n\n- id: {}\n- status: {}\n\n{}\n\n",
-            sib.title, marker, sib.id, sib.status, desc
+            sib.title, marker, sib.id, sib.status, body
         ));
     }
-    Ok(out)
+    Ok(TaskSummary {
+        description,
+        ..task.clone()
+    })
 }
 
 fn stub_summary(role_id: &str) -> String {
