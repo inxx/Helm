@@ -150,8 +150,9 @@ export function PlanningScreen({
   const [goal, setGoal] = useState("");
   const [plannerRequest, setPlannerRequest] = useState("");
   const [jiraRef, setJiraRef] = useState("");
+  const [importJson, setImportJson] = useState("");
   const [sessions, setSessions] = useState<PlanningSessionStub[]>([]);
-  const [plannerOperation, setPlannerOperation] = useState<"planner" | "approve" | null>(null);
+  const [plannerOperation, setPlannerOperation] = useState<"planner" | "approve" | "import" | null>(null);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [loadedSessions, setLoadedSessions] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -256,6 +257,7 @@ export function PlanningScreen({
   const draft = activeSession?.draft ?? (goal.trim() ? buildPlannerDraft(goal, null) : null);
   const approvingPlan = plannerOperation === "approve";
   const startingPlanner = plannerOperation === "planner";
+  const importingPlan = plannerOperation === "import";
 
   function startNewPlan() {
     cancelPlannerRefinement();
@@ -347,6 +349,60 @@ export function PlanningScreen({
         title: "계획 세션 저장 실패",
         description: message,
       });
+    } finally {
+      setPlannerOperation(null);
+    }
+  }
+
+  // Claude Code 등 외부에서 만든 plan draft JSON을 planner 단계 없이 그대로 저장한다. 검증은
+  // savePlanDraftRevision(backend)이 수행하므로 여기서는 모양 파싱만 한다. 저장 후에는 일반 세션과
+  // 동일하게 기존 승인 버튼으로 approve → materialize → 작업자 dispatch로 이어진다.
+  async function importPlanDraft() {
+    const raw = importJson.trim();
+    if (!raw || plannerOperation) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      const message = `JSON 파싱 실패: ${errorMessage(err)}`;
+      setError(message);
+      showToast({ tone: "error", title: "Plan JSON 가져오기 실패", description: message });
+      return;
+    }
+    const record = isRecord(parsed) ? parsed : {};
+    const title = typeof record.title === "string" && record.title.trim() ? record.title.trim() : "가져온 계획";
+    const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+    const goalText = summary || title;
+    const trimmedJiraRef = jiraRef.trim();
+    const existingTask = trimmedJiraRef ? findTaskByJiraRef(projectSnapshot, trimmedJiraRef) : null;
+    const jiraState = existingTask ? "AlreadyTracked" : trimmedJiraRef ? "Linked" : "Missing";
+    setPlannerOperation("import");
+    try {
+      const created = await api.createPlanningSession(projectSnapshot.project.id, {
+        title,
+        goalText,
+        jiraRef: trimmedJiraRef || null,
+        jiraState,
+      });
+      const saved = await api.savePlanDraftRevision(projectSnapshot.project.id, created.session.id, {
+        draftJson: parsed,
+        plannerMessage: "Claude Code에서 만든 Plan Document를 가져왔습니다.",
+      });
+      const stub = { ...sessionStubFromDetail(saved), taskId: existingTask?.id };
+      setSessions((current) => [stub, ...current.filter((item) => item.id !== stub.id)]);
+      setActiveSessionId(stub.id);
+      setImportJson("");
+      setGoal("");
+      setError(null);
+      showToast({
+        tone: "success",
+        title: "Plan Document 가져옴",
+        description: "검토 후 승인하면 Task로 만들어집니다.",
+      });
+    } catch (err) {
+      const message = errorMessage(err);
+      setError(message);
+      showToast({ tone: "error", title: "Plan JSON 가져오기 실패", description: message });
     } finally {
       setPlannerOperation(null);
     }
@@ -942,6 +998,32 @@ export function PlanningScreen({
               </div>
               {error ? <p className="planning-form-error">{error}</p> : null}
             </form>
+
+            {activeSession ? null : (
+              <details className="planning-import">
+                <summary>Claude Code 계획 JSON 가져오기</summary>
+                <textarea
+                  placeholder='Claude Code가 만든 plan draft JSON을 붙여넣으세요 — title, summary, tasks[], executablePlan{...}'
+                  value={importJson}
+                  onChange={(event) => setImportJson(event.target.value)}
+                  rows={6}
+                />
+                <div className="planning-goal-actions">
+                  <span className="planning-goal-hint">
+                    붙여넣은 계획을 planner 없이 그대로 Plan Document로 저장합니다. 검증은 저장 시 실행되고, 문제가 있으면 어떤 필드가 빠졌는지 알려줍니다.
+                  </span>
+                  <button
+                    type="button"
+                    className={importingPlan ? "primary-button loading-button is-loading" : "primary-button loading-button"}
+                    onClick={() => void importPlanDraft()}
+                    disabled={Boolean(plannerOperation) || !importJson.trim()}
+                  >
+                    {importingPlan ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Sparkles size={14} aria-hidden />}
+                    {importingPlan ? "가져오는 중..." : "가져오기"}
+                  </button>
+                </div>
+              </details>
+            )}
           </section>
 
           <section className="plan-preview">
