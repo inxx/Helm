@@ -1628,6 +1628,17 @@ pub fn delete_task(conn: &mut Connection, project_id: &str, task_id: &str) -> Co
         params![project_id, task_id],
     )
     .map_err(|err| CommandError::database("태스크 감사 기록을 삭제하지 못했습니다.", err))?;
+    // conversation_messages.source_run_id는 FK가 아니라 일반 TEXT라 task cascade로 지워지지
+    // 않는다. agent_runs가 cascade로 사라지기 전에, 이 task run에 묶인 채팅 요약을 먼저 지운다.
+    tx.execute(
+        "DELETE FROM conversation_messages
+         WHERE project_id = ?1
+           AND source_run_id IN (
+             SELECT id FROM agent_runs WHERE project_id = ?1 AND task_id = ?2
+           )",
+        params![project_id, task_id],
+    )
+    .map_err(|err| CommandError::database("태스크 대화 메시지를 삭제하지 못했습니다.", err))?;
     let affected = tx
         .execute(
             "DELETE FROM tasks WHERE project_id = ?1 AND id = ?2",
@@ -13966,6 +13977,32 @@ mod tests {
         assert!(!worktree_path.exists());
         assert!(!git::branch_exists(&repo.root, &saved.branch_name).expect("branch_exists"));
         assert!(get_task(&conn, &task.id).is_err());
+    }
+
+    #[test]
+    fn delete_task_removes_task_scoped_chat_messages() {
+        // 채팅은 프로젝트 단일 스레드라 source_run_id↔task 매핑으로만 task에 묶인다.
+        // task 삭제 시 그 run에 묶인 채팅 요약은 사라지고, 일반 메시지는 남아야 한다.
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task = create_test_task(&mut conn, &project.id);
+        let run =
+            prepare_next_role_context(&mut conn, &repo.root, &project.id, &task.id).expect("next");
+        cancel_task_runs(&conn, &project.id, &task.id).expect("cancel");
+
+        append_conversation_message(&conn, &project.id, "user", "안녕", None).expect("plain msg");
+        append_conversation_message(&conn, &project.id, "assistant", "요약", Some(&run.id))
+            .expect("run msg");
+        assert_eq!(
+            list_conversation_messages(&conn, &project.id).expect("list").len(),
+            2
+        );
+
+        delete_task(&mut conn, &project.id, &task.id).expect("delete");
+
+        let remaining = list_conversation_messages(&conn, &project.id).expect("list after");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].source_run_id, None);
     }
 
     #[test]
