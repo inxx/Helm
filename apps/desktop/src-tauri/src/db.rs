@@ -2062,6 +2062,7 @@ pub fn prepare_role_context(
     context_pack.push_str(&build_upstream_dossiers_markdown(
         conn, root, project_id, task_id, role_id,
     ));
+    context_pack.push_str(&build_epic_plan_markdown(conn, project_id, &task, role_id)?);
     let context_manifest = build_context_manifest(
         root,
         &task,
@@ -2242,6 +2243,14 @@ pub fn prepare_next_role_context(
     let role_id = next_role_for_task_status(&task.status).ok_or_else(|| {
         CommandError::validation("현재 태스크 상태에서 자동으로 실행할 role이 없습니다.")
     })?;
+    // epic 게이트(계획 검토/코드 리뷰)는 anchor task에서 형제가 모두 끝난 뒤 1회만 실행한다.
+    // 미충족이면 ValidationFailed로 돌려 auto-handoff가 조용히 건너뛰고, supervisor reconcile이
+    // 배리어가 충족되는 시점에 anchor를 집어 게이트를 띄운다.
+    if !epic_gate_ready(conn, project_id, &task, role_id)? {
+        return Err(CommandError::validation(
+            "epic 게이트 대기: 형제 task가 모두 끝난 뒤 anchor task에서 실행됩니다.",
+        ));
+    }
     ensure_task_worktree(conn, root, project_id, task_id)?;
     prepare_role_context(conn, root, project_id, task_id, role_id)
 }
@@ -2261,6 +2270,11 @@ pub fn reconcile_next_role_gap(
         let Some(role_id) = next_role_for_task_status(&task.status) else {
             continue;
         };
+        // epic 게이트는 anchor에서 형제가 모두 끝난 뒤에만 띄운다. anchor가 아니거나
+        // 배리어 미충족이면 건너뛰고 계속 스캔해 anchor를 찾는다.
+        if !epic_gate_ready(conn, project_id, &task, role_id)? {
+            continue;
+        }
         // 리뷰 진행 승인 전에는 코드 리뷰어를 자동 큐잉하지 않는다(승인 게이트).
         if role_id == "code_reviewer"
             && !has_review_approval(conn, project_id, &task.id, "Approved")?
@@ -3573,7 +3587,10 @@ pub fn list_agent_runs(
                         AND run_events.kind NOT IN ('stdout', 'stderr')
                       ORDER BY run_events.seq DESC
                       LIMIT 1),
-                    created_at, updated_at
+                    created_at, updated_at,
+                    (SELECT COUNT(*) FROM run_events
+                       WHERE run_events.run_id = agent_runs.id
+                         AND run_events.kind NOT IN ('stdout', 'stderr'))
              FROM agent_runs WHERE project_id = ?1 AND task_id = ?2 ORDER BY created_at DESC",
         )
         .map_err(|err| CommandError::database("실행 기록을 읽지 못했습니다.", err))?;
@@ -3623,7 +3640,10 @@ pub fn list_project_runs(
                         AND run_events.kind NOT IN ('stdout', 'stderr')
                       ORDER BY run_events.seq DESC
                       LIMIT 1),
-                    created_at, updated_at
+                    created_at, updated_at,
+                    (SELECT COUNT(*) FROM run_events
+                       WHERE run_events.run_id = agent_runs.id
+                         AND run_events.kind NOT IN ('stdout', 'stderr'))
              FROM agent_runs
              WHERE project_id = ?1
              ORDER BY created_at DESC
@@ -4674,7 +4694,10 @@ pub fn next_queued_agent_run(
                     AND run_events.kind NOT IN ('stdout', 'stderr')
                   ORDER BY run_events.seq DESC
                   LIMIT 1),
-                created_at, updated_at
+                created_at, updated_at,
+                (SELECT COUNT(*) FROM run_events
+                   WHERE run_events.run_id = agent_runs.id
+                     AND run_events.kind NOT IN ('stdout', 'stderr'))
          FROM agent_runs
          WHERE project_id = ?1 AND status = 'Queued'
          ORDER BY created_at ASC
@@ -4971,7 +4994,10 @@ pub fn get_agent_run(conn: &Connection, run_id: &str) -> CommandResult<AgentRunS
                     AND run_events.kind NOT IN ('stdout', 'stderr')
                   ORDER BY run_events.seq DESC
                   LIMIT 1),
-                created_at, updated_at
+                created_at, updated_at,
+                (SELECT COUNT(*) FROM run_events
+                   WHERE run_events.run_id = agent_runs.id
+                     AND run_events.kind NOT IN ('stdout', 'stderr'))
          FROM agent_runs WHERE id = ?1",
         params![run_id],
         map_agent_run,
@@ -5590,6 +5616,7 @@ fn map_agent_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunSummary> {
         latest_event_at: row.get(27)?,
         created_at: row.get(28)?,
         updated_at: row.get(29)?,
+        event_count: row.get(30)?,
     })
 }
 
@@ -9806,6 +9833,49 @@ fn apply_successful_role_result(
                 "source": "host_runner"
             }),
         )?;
+
+        // epic 게이트(계획 검토/코드 리뷰)는 anchor에서 1회 돈다. 통과하면 같은 source 상태로
+        // 대기하던 형제 task들도 함께 다음 단계로 옮겨 epic 전체가 한 게이트를 공유하게 한다.
+        if is_epic_gate_role(role_id) {
+            if let Some(epic_id) = task.epic_id.as_deref() {
+                let moved = conn
+                    .execute(
+                        "UPDATE tasks
+                         SET status = ?1, status_reason = ?2, updated_at = ?3, last_transition_at = ?3
+                         WHERE project_id = ?4 AND epic_id = ?5 AND status = ?6 AND id != ?7",
+                        params![
+                            next_status,
+                            format!("epic {role_id} gate passed"),
+                            timestamp,
+                            project_id,
+                            epic_id,
+                            task.status,
+                            task.id
+                        ],
+                    )
+                    .map_err(|err| {
+                        CommandError::database("epic 형제 태스크 상태를 저장하지 못했습니다.", err)
+                    })?;
+                if moved > 0 {
+                    insert_audit(
+                        conn,
+                        project_id,
+                        "Epic",
+                        Some(epic_id),
+                        "epic.gate_passed",
+                        json!({
+                            "epicId": epic_id,
+                            "role": role_id,
+                            "from": task.status,
+                            "to": next_status,
+                            "anchorTaskId": task.id,
+                            "siblingsMoved": moved,
+                            "runId": run_id
+                        }),
+                    )?;
+                }
+            }
+        }
     }
 
     // plan_verifier 통과 = 작업자 작업 완료. PR/리뷰를 자동 진행하지 않고, 사용자에게
@@ -11284,6 +11354,129 @@ fn next_role_for_task_status(status: &str) -> Option<&'static str> {
     }
 }
 
+/// epic 단위로 한 번만 도는 게이트 role. 공유 worktree에서는 형제 task의 변경이 모두
+/// 같은 diff에 섞여 보이므로, 개별 task가 아니라 epic 전체가 끝난 뒤 anchor task에서 1회
+/// 실행해 합쳐진 diff를 epic 전체 계획과 대조한다. coder/tester는 task 단위 그대로 둔다.
+const EPIC_GATE_ROLES: &[&str] = &["plan_verifier", "code_reviewer"];
+
+fn is_epic_gate_role(role_id: &str) -> bool {
+    EPIC_GATE_ROLES.contains(&role_id)
+}
+
+/// task가 속한 epic의 형제 task들을 (sort_order, id) 순으로 반환한다.
+/// epic_id가 없으면 자기 자신만 담은 1개짜리 epic으로 취급한다(= 기존 task 단위 동작).
+fn epic_sibling_tasks(
+    conn: &Connection,
+    project_id: &str,
+    task: &TaskSummary,
+) -> CommandResult<Vec<TaskSummary>> {
+    let Some(epic_id) = task.epic_id.as_deref() else {
+        return Ok(vec![task.clone()]);
+    };
+    let mut siblings: Vec<TaskSummary> = list_tasks(conn, project_id)?
+        .into_iter()
+        .filter(|candidate| candidate.epic_id.as_deref() == Some(epic_id))
+        .collect();
+    siblings.sort_by(|a, b| {
+        a.sort_order
+            .cmp(&b.sort_order)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    if siblings.is_empty() {
+        siblings.push(task.clone());
+    }
+    Ok(siblings)
+}
+
+/// epic 게이트를 호스팅하는 anchor task id (형제 중 sort_order/id 최소). 입력 순서와
+/// 무관하게 결정적이라 같은 epic에서 항상 동일한 task가 게이트를 1회만 띄운다.
+fn epic_anchor_id(siblings: &[TaskSummary]) -> &str {
+    siblings
+        .iter()
+        .min_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.id.cmp(&b.id))
+        })
+        .map(|t| t.id.as_str())
+        .unwrap_or_default()
+}
+
+/// epic 배리어: 형제 task가 모두 gate_status에 도달했는지. 아직 코딩 중(Planned/Ready/Coding)
+/// 이거나 Blocked인 형제가 하나라도 있으면 미충족 → 게이트를 대기시킨다.
+fn epic_barrier_met(siblings: &[TaskSummary], gate_status: &str) -> bool {
+    let Some(gate_idx) = TASK_STATUS_ORDER.iter().position(|s| *s == gate_status) else {
+        return false;
+    };
+    siblings.iter().all(|sib| {
+        // Blocked는 순서상 뒤에 있지만 "진행"이 아니므로 배리어를 막는다.
+        if sib.status == "Blocked" {
+            return false;
+        }
+        TASK_STATUS_ORDER
+            .iter()
+            .position(|s| *s == sib.status)
+            .is_some_and(|idx| idx >= gate_idx)
+    })
+}
+
+/// 이 task에서 지금 role_id 게이트를 띄울 수 있는지. epic 게이트 role이면 anchor이면서
+/// 형제가 모두 도달했을 때만 true. 게이트 role이 아니면 항상 true(기존 동작).
+fn epic_gate_ready(
+    conn: &Connection,
+    project_id: &str,
+    task: &TaskSummary,
+    role_id: &str,
+) -> CommandResult<bool> {
+    if !is_epic_gate_role(role_id) {
+        return Ok(true);
+    }
+    let siblings = epic_sibling_tasks(conn, project_id, task)?;
+    Ok(task.id == epic_anchor_id(&siblings) && epic_barrier_met(&siblings, &task.status))
+}
+
+/// epic 게이트 role의 context pack에 형제 task 전체의 계획/범위를 덧붙인다. 게이트는
+/// anchor의 단일 task가 아니라 epic 전체 계획의 합집합과 worktree diff를 대조해야 하므로,
+/// 형제 어느 task의 계획에든 포함된 변경은 "계획 밖"이 아님을 명시한다. 이게 없으면 공유
+/// worktree에서 형제 변경을 매번 out-of-plan으로 오탐한다.
+fn build_epic_plan_markdown(
+    conn: &Connection,
+    project_id: &str,
+    task: &TaskSummary,
+    role_id: &str,
+) -> CommandResult<String> {
+    if !is_epic_gate_role(role_id) || task.epic_id.is_none() {
+        return Ok(String::new());
+    }
+    let siblings = epic_sibling_tasks(conn, project_id, task)?;
+    if siblings.len() <= 1 {
+        return Ok(String::new());
+    }
+    let mut out = String::from(
+        "\n## Epic Plan (형제 task 전체)\n\n\
+         이 게이트는 개별 task가 아니라 아래 epic 전체 계획을 합쳐 검토한다. \
+         worktree diff 전체를 아래 task 계획의 합집합과 대조하라. \
+         아래 어느 task의 계획에든 포함된 변경이면 '계획 밖'으로 판정하지 마라.\n\n",
+    );
+    for sib in &siblings {
+        let marker = if sib.id == task.id {
+            " (anchor · 이 run이 호스팅)"
+        } else {
+            ""
+        };
+        let desc = if sib.description.trim().is_empty() {
+            "설명 없음"
+        } else {
+            sib.description.trim()
+        };
+        out.push_str(&format!(
+            "### {}{}\n\n- id: {}\n- status: {}\n\n{}\n\n",
+            sib.title, marker, sib.id, sib.status, desc
+        ));
+    }
+    Ok(out)
+}
+
 fn stub_summary(role_id: &str) -> String {
     format!(
         "# Stub {} Result\n\n이 실행은 실제 agent process 없이 생성된 Phase 2 검증용 결과입니다.\n\n- 역할: {}\n- 결과: pass\n",
@@ -11700,6 +11893,59 @@ mod tests {
         let check = diff_consistency_check("coder", Some(&result), &actual)
             .expect("reported file absent from diff must block");
         assert_eq!(check.extra_files, vec!["a.tsx".to_string()]);
+    }
+
+    fn epic_task(id: &str, sort_order: i64, status: &str) -> TaskSummary {
+        TaskSummary {
+            id: id.to_string(),
+            project_id: "p".to_string(),
+            epic_id: Some("epic-1".to_string()),
+            title: id.to_string(),
+            description: String::new(),
+            status: status.to_string(),
+            status_reason: None,
+            sort_order,
+            external_refs: vec![],
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            last_transition_at: "t".to_string(),
+        }
+    }
+
+    #[test]
+    fn epic_barrier_and_anchor_gate_the_plan_verifier() {
+        // anchor = (sort_order, id) 최소. 순서가 뒤섞여도 결정적으로 첫 task를 고른다.
+        let siblings = vec![
+            epic_task("b", 2, "PlanVerification"),
+            epic_task("a", 1, "Coding"),
+            epic_task("c", 3, "PlanVerification"),
+        ];
+        assert_eq!(epic_anchor_id(&siblings), "a");
+
+        // 형제 하나가 아직 Coding → PlanVerification 배리어 미충족.
+        assert!(!epic_barrier_met(&siblings, "PlanVerification"));
+
+        // 전부 PlanVerification 이상 도달 → 충족.
+        let ready = vec![
+            epic_task("a", 1, "PlanVerification"),
+            epic_task("b", 2, "CodeReview"),
+            epic_task("c", 3, "PlanVerification"),
+        ];
+        assert!(epic_barrier_met(&ready, "PlanVerification"));
+
+        // Blocked 형제가 있으면(순서상 뒤지만 진행 아님) 배리어를 막는다.
+        let blocked = vec![
+            epic_task("a", 1, "PlanVerification"),
+            epic_task("b", 2, "Blocked"),
+        ];
+        assert!(!epic_barrier_met(&blocked, "PlanVerification"));
+
+        // CodeReview 게이트는 PlanVerification에 머문 형제가 있으면 미충족.
+        let mixed = vec![
+            epic_task("a", 1, "CodeReview"),
+            epic_task("b", 2, "PlanVerification"),
+        ];
+        assert!(!epic_barrier_met(&mixed, "CodeReview"));
     }
 
     #[test]

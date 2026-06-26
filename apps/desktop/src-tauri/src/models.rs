@@ -246,7 +246,7 @@ pub struct EpicSummary {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskExternalRefSummary {
     pub id: String,
@@ -258,7 +258,7 @@ pub struct TaskExternalRefSummary {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskSummary {
     pub id: String,
@@ -737,6 +737,8 @@ pub struct AgentRunSummary {
     pub latest_event_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    // stdout/stderr를 제외한 의미 있는 run_events 개수 — 카드의 진행 신호용.
+    pub event_count: i64,
 }
 
 #[derive(Debug, Serialize)]
