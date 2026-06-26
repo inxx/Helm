@@ -57,14 +57,18 @@ export function SessionsScreen({
   const [changedFiles, setChangedFiles] = useState<GitFileStatus[]>([]);
   const [orchestratorInput, setOrchestratorInput] = useState("");
   const [orchestratorBusy, setOrchestratorBusy] = useState(false);
+  // 진행 중인 단계가 요구사항 명확화(orchestrator)인지, 계획자 실행(planner)인지. busy 라벨만 구분한다.
+  const [busyPhase, setBusyPhase] = useState<"orchestrator" | "planner">("orchestrator");
   // 새 작업을 현재 체크아웃된 브랜치에서 in-place로 할지, 새 워크트리에서 할지.
   const [worktreeMode, setWorktreeMode] = useState<"current_branch" | "worktree">("current_branch");
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [deletingSession, setDeletingSession] = useState(false);
   const [events, setEvents] = useState<RunEventSummary[]>([]);
-  const [summaries, setSummaries] = useState<Array<{ runId: string; roleId: string; text: string; at: string | null }>>([]);
   const [runAlert, setRunAlert] = useState<{ roleId: string; status: string; failureKind: string | null; failureReason: string | null; at: string | null } | null>(null);
-  const [orchestratorMessages, setOrchestratorMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string }>>([]);
+  const [orchestratorMessages, setOrchestratorMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string; sourceRunId?: string | null }>>([]);
+  // 이미 스레드에 적은 작업자 run 요약(source_run_id)을 기억해 3초 폴링마다 중복으로 덧붙이지 않는다.
+  // 프로젝트를 바꿀 때만 비운다.
+  const persistedRunIdsRef = useRef<Set<string>>(new Set());
   const [pendingOrchestratorRequirement, setPendingOrchestratorRequirement] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -83,16 +87,51 @@ export function SessionsScreen({
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatScrollFrameRef = useRef<number | null>(null);
   const pinnedToBottomRef = useRef(true);
-  // Orchestrator chat bubbles are project-scoped client state with no backing store. Reset them
-  // whenever the active session changes — switching, deleting, starting a new compose, or changing
-  // project — so a previous session's transcript doesn't bleed into the next one. Also abandon any
-  // in-flight conductor turn: left running it would keep streaming into the cleared transcript and
-  // could still materialize tasks for a session the user just left.
+  // 대화는 프로젝트 단위 append-only 스레드다. 오케스트레이터 질문/확정 → 계획자 → 작업자 요약이
+  // 모두 한 스레드에 누적되며, 세션을 바꿔도 초기화하지 않는다. 프로젝트를 열 때 DB에서 불러오고
+  // 프로젝트가 바뀔 때만 in-flight 턴/pending 상태를 정리한다.
   useEffect(() => {
     setOrchestratorBusy(false);
     setPendingOrchestratorRequirement(null);
-    setOrchestratorMessages([]);
-  }, [activeSessionId]);
+    persistedRunIdsRef.current = new Set();
+    if (!snapshot) {
+      setOrchestratorMessages([]);
+      return;
+    }
+    let disposed = false;
+    void api
+      .listConversationMessages(snapshot.project.id)
+      .then((messages) => {
+        if (disposed) return;
+        for (const message of messages) {
+          if (message.sourceRunId) persistedRunIdsRef.current.add(message.sourceRunId);
+        }
+        setOrchestratorMessages(
+          messages.map((message) => ({
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            sourceRunId: message.sourceRunId,
+          })),
+        );
+      })
+      .catch(() => {
+        if (!disposed) setOrchestratorMessages([]);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [snapshot?.project.id]);
+
+  // 채팅 버블을 로컬 상태에 추가하면서 DB에도 append한다(프로젝트 단위 영속). sourceRunId가 있으면
+  // 작업자 run 요약으로, 백엔드가 멱등 처리한다.
+  function appendMessage(role: "user" | "assistant", content: string, sourceRunId: string | null = null) {
+    if (!content) return;
+    setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role, content, sourceRunId }]);
+    if (snapshot) {
+      void api.appendConversationMessage(snapshot.project.id, role, content, sourceRunId).catch(() => undefined);
+    }
+  }
 
   const taskById = useMemo(
     () => new Map(snapshot?.tasks.map((task) => [task.id, task]) ?? []),
@@ -234,7 +273,6 @@ export function SessionsScreen({
     const taskId = activeTask?.id;
     if (!snapshot || !taskId) {
       setEvents([]);
-      setSummaries([]);
       setRunAlert(null);
       return;
     }
@@ -259,10 +297,20 @@ export function SessionsScreen({
         // chat blocks blink/reorder.
         const nextEvents = perRun.flatMap((entry) => entry.events);
         setEvents((prev) => keepIfEqual(prev, nextEvents));
+        // 완료된 작업자 run 요약을 한 채팅 스레드에 누적한다. source_run_id로 멱등 — 같은 run은
+        // 폴링이 반복돼도 한 번만 적힌다(메모리 ref + 백엔드 UNIQUE 이중 가드).
         const nextSummaries = perRun
           .filter((entry) => entry.summary?.trim())
-          .map((entry) => ({ runId: entry.run.id, roleId: entry.run.roleId, text: entry.summary!.trim(), at: entry.run.finishedAt ?? entry.run.updatedAt }));
-        setSummaries((prev) => keepIfEqual(prev, nextSummaries));
+          .map((entry) => ({ runId: entry.run.id, roleId: entry.run.roleId, text: entry.summary!.trim() }));
+        for (const summary of nextSummaries) {
+          if (persistedRunIdsRef.current.has(summary.runId)) continue;
+          persistedRunIdsRef.current.add(summary.runId);
+          appendMessage(
+            "assistant",
+            `**${roleLabel(summary.roleId, language)} · ${t("sessions.summaryTitle")}**\n\n${summary.text}`,
+            summary.runId,
+          );
+        }
         // Surface the latest run's blocking reason: a NeedsInspection/Failed run leaves the task
         // silently stuck (e.g. coder reported edits that aren't in the worktree diff). Show it.
         const latest = ordered.at(-1);
@@ -275,7 +323,6 @@ export function SessionsScreen({
       .catch(() => {
         if (!disposed) {
           setEvents([]);
-          setSummaries([]);
           setRunAlert(null);
         }
       });
@@ -345,8 +392,8 @@ export function SessionsScreen({
     if (!snapshot || !goalText || orchestratorBusy) return;
     setLoadError(null);
     setOrchestratorInput("");
-    const userTurn = { id: crypto.randomUUID(), role: "user" as const, content: goalText };
-    setOrchestratorMessages((items) => [...items, userTurn]);
+    const priorMessages = orchestratorMessages;
+    appendMessage("user", goalText);
 
     // 승인 대기가 있으면 채팅 입력을 승인/반려 결정으로 먼저 해석한다 (버튼 대신 대화로 결정).
     const decision = parseApprovalDecision(goalText);
@@ -364,10 +411,11 @@ export function SessionsScreen({
 
     // 그 외 모든 입력 → 오케스트레이터(요구사항 명확화 AI)에게 보내 질문/정리를 받는다.
     setPendingOrchestratorRequirement(null);
+    setBusyPhase("orchestrator");
     setOrchestratorBusy(true);
     try {
-      const history = [...orchestratorMessages, userTurn].map((m) => ({ role: m.role, content: m.content }));
-      const originalGoal = orchestratorMessages.find((m) => m.role === "user")?.content ?? goalText;
+      const history = [...priorMessages, { role: "user" as const, content: goalText }].map((m) => ({ role: m.role, content: m.content }));
+      const originalGoal = priorMessages.find((m) => m.role === "user")?.content ?? goalText;
       const result = await api.runOrchestratorConversation(snapshot.project.id, {
         goalText: originalGoal,
         history,
@@ -378,27 +426,16 @@ export function SessionsScreen({
       const parsed = parseOrchestratorReply(result.responseText);
       if (!parsed) {
         // JSON 파싱 실패 → 원문을 보여주고 대화를 이어간다.
-        setOrchestratorMessages((items) => [
-          ...items,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content: stripPlanJson(result.responseText.trim()) || (language === "ko" ? "응답을 이해하지 못했습니다. 다시 설명해 주세요." : "Could not parse the response. Please rephrase."),
-          },
-        ]);
+        appendMessage(
+          "assistant",
+          stripPlanJson(result.responseText.trim()) || (language === "ko" ? "응답을 이해하지 못했습니다. 다시 설명해 주세요." : "Could not parse the response. Please rephrase."),
+        );
         return;
       }
       if (parsed.ready) {
         setPendingOrchestratorRequirement(parsed.requirement);
       }
-      setOrchestratorMessages((items) => [
-        ...items,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: orchestratorReplyText(parsed, language),
-        },
-      ]);
+      appendMessage("assistant", orchestratorReplyText(parsed, language));
     } catch (error) {
       setLoadError(messageFromError(error, language === "ko" ? "오케스트레이터에 지시를 전달하지 못했습니다." : "Failed to send the instruction to the orchestrator."));
     } finally {
@@ -409,6 +446,7 @@ export function SessionsScreen({
   async function handOffToPlanner(requirement: string) {
     if (!snapshot) return;
     setPendingOrchestratorRequirement(null);
+    setBusyPhase("planner");
     setOrchestratorBusy(true);
     try {
       const result = await api.runPlannerConversation(snapshot.project.id, {
@@ -420,14 +458,7 @@ export function SessionsScreen({
         throw new Error(result.stderr.trim() || result.responseText.trim() || (language === "ko" ? "AI 계획 응답을 받지 못했습니다." : "The AI planner did not return a usable response."));
       }
       const reply = result.responseText.trim();
-      setOrchestratorMessages((items) => [
-        ...items,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: stripPlanJson(reply) || (language === "ko" ? "계획을 받았습니다." : "Received a plan."),
-        },
-      ]);
+      appendMessage("assistant", stripPlanJson(reply) || (language === "ko" ? "계획을 받았습니다." : "Received a plan."));
       await maybeMaterializeTasks(reply, requirement);
     } catch (error) {
       setLoadError(messageFromError(error, language === "ko" ? "오케스트레이터에 지시를 전달하지 못했습니다." : "Failed to send the instruction to the orchestrator."));
@@ -458,17 +489,12 @@ export function SessionsScreen({
       }
       await onRefresh();
       setReloadKey((value) => value + 1);
-      setOrchestratorMessages((items) => [
-        ...items,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content:
-            decision === "approve"
-              ? `${approvalLabel(approval.approvalType, language)} 승인을 반영했습니다.`
-              : `${approvalLabel(approval.approvalType, language)} 반려를 반영했습니다.`,
-        },
-      ]);
+      appendMessage(
+        "assistant",
+        decision === "approve"
+          ? `${approvalLabel(approval.approvalType, language)} 승인을 반영했습니다.`
+          : `${approvalLabel(approval.approvalType, language)} 반려를 반영했습니다.`,
+      );
     } catch (error) {
       setLoadError(messageFromError(error, language === "ko" ? "승인 상태를 변경하지 못했습니다." : "Failed to update the approval."));
     } finally {
@@ -492,20 +518,16 @@ export function SessionsScreen({
     const freshTasks = dedupePlanTasks(tasks, snapshot.tasks.map((task) => task.title));
     const skippedDupes = tasks.length - freshTasks.length;
     if (freshTasks.length === 0) {
-      setOrchestratorMessages((items) => [
-        ...items,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: language === "ko"
-            ? `이미 만든 작업과 모두 중복이라 새로 만들지 않았습니다 (${skippedDupes}개 건너뜀).`
-            : `All ${skippedDupes} proposed task(s) already exist, so nothing new was created.`,
-        },
-      ]);
+      appendMessage(
+        "assistant",
+        language === "ko"
+          ? `이미 만든 작업과 모두 중복이라 새로 만들지 않았습니다 (${skippedDupes}개 건너뜀).`
+          : `All ${skippedDupes} proposed task(s) already exist, so nothing new was created.`,
+      );
       return;
     }
-    const proceed = window.confirm(language === "ko" ? "이대로 진행할까요? 설계자에게 넘겨 작업을 시작합니다." : "Proceed? This hands the requirement to the planner and starts the task.");
-    if (!proceed) return;
+    // 사용자는 이미 채팅에서 "확인"으로 요구사항을 승인했다(handOffToPlanner 진입 조건).
+    // 여기서 다시 window.confirm을 띄우면 같은 결정을 두 번 묻는 셈이라 제거한다 — 단일 승인 게이트.
     const projectId = snapshot.project.id;
     // One planning conversation → one epic; every materialized task hangs off it so the sidebar
     // shows a single parent group instead of N flat sessions. If the epic fails to create, fall
@@ -543,22 +565,18 @@ export function SessionsScreen({
     if (startFailed.length) {
       setLoadError(language === "ko" ? `일부 작업의 실행을 시작하지 못했습니다:\n- ${startFailed.join("\n- ")}` : `Failed to start some tasks:\n- ${startFailed.join("\n- ")}`);
     }
-    setOrchestratorMessages((items) => [
-      ...items,
-      {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: (created.length
-          ? (language === "ko" ? `${created.length}개 작업을 만들었습니다:\n- ${created.join("\n- ")}` : `Created ${created.length} task(s):\n- ${created.join("\n- ")}`)
-          : (language === "ko" ? "작업 생성에 실패했습니다." : "Failed to create tasks."))
-          + (startFailed.length
-            ? (language === "ko" ? `\n\n⚠️ 실행을 시작하지 못한 작업:\n- ${startFailed.join("\n- ")}` : `\n\n⚠️ Failed to start:\n- ${startFailed.join("\n- ")}`)
-            : "")
-          + (skippedDupes
-            ? (language === "ko" ? `\n\n(중복 ${skippedDupes}개는 건너뜀)` : `\n\n(skipped ${skippedDupes} duplicate(s))`)
-            : ""),
-      },
-    ]);
+    appendMessage(
+      "assistant",
+      (created.length
+        ? (language === "ko" ? `${created.length}개 작업을 만들었습니다:\n- ${created.join("\n- ")}` : `Created ${created.length} task(s):\n- ${created.join("\n- ")}`)
+        : (language === "ko" ? "작업 생성에 실패했습니다." : "Failed to create tasks."))
+        + (startFailed.length
+          ? (language === "ko" ? `\n\n⚠️ 실행을 시작하지 못한 작업:\n- ${startFailed.join("\n- ")}` : `\n\n⚠️ Failed to start:\n- ${startFailed.join("\n- ")}`)
+          : "")
+        + (skippedDupes
+          ? (language === "ko" ? `\n\n(중복 ${skippedDupes}개는 건너뜀)` : `\n\n(skipped ${skippedDupes} duplicate(s))`)
+          : ""),
+    );
     setOrchestratorBusy(false);
     await onRefresh();
     setReloadKey((value) => value + 1);
@@ -918,20 +936,6 @@ export function SessionsScreen({
                   <p>{event.message}</p>
                 </SessionMessage>
               ))}
-              {summaries.map((summary) => (
-                <SessionMessage
-                  icon="file"
-                  key={summary.runId}
-                  role="assistant"
-                  timestamp={summary.at}
-                  title={`${roleLabel(summary.roleId, language)} · ${t("sessions.summaryTitle")}`}
-                  language={language}
-                >
-                  <div className="session-markdown">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary.text}</ReactMarkdown>
-                  </div>
-                </SessionMessage>
-              ))}
               {orchestratorMessages.map((message) => {
                 const text = message.role === "assistant" ? stripPlanJson(message.content) : message.content;
                 if (!text) return null;
@@ -954,7 +958,7 @@ export function SessionsScreen({
                   </SessionMessage>
                 );
               })}
-              {orchestratorPending ? <OrchestratorPending language={language} /> : null}
+              {orchestratorPending ? <OrchestratorPending language={language} phase={busyPhase} /> : null}
               {runAlert ? (
                 <SessionMessage
                   icon="bot"
@@ -1132,7 +1136,7 @@ export function SessionsScreen({
                       </SessionMessage>
                     );
                   })}
-                  {orchestratorPending ? <OrchestratorPending language={language} /> : null}
+                  {orchestratorPending ? <OrchestratorPending language={language} phase={busyPhase} /> : null}
                 </div>
               </div>
             )}
@@ -1431,19 +1435,27 @@ function SessionMessage(props: {
   );
 }
 
-function OrchestratorPending({ language }: { language: AppLanguage }) {
+function OrchestratorPending({ language, phase }: { language: AppLanguage; phase: "orchestrator" | "planner" }) {
   const [seconds, setSeconds] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(id);
   }, []);
+  const label =
+    phase === "planner"
+      ? language === "ko"
+        ? "계획자가 계획을 세우는 중입니다"
+        : "The planner is drafting a plan"
+      : language === "ko"
+        ? "오케스트레이터가 응답을 작성 중입니다"
+        : "The orchestrator is composing a reply";
   return (
     <SessionMessage role="assistant" icon="bot" title={language === "ko" ? "응답 대기 중" : "Waiting for reply"} timestamp={null} language={language}>
       <div className="session-working-indicator">
         <span className="session-working-spinner" aria-hidden="true" />
         <div>
           <strong>
-            {language === "ko" ? "오케스트레이터가 응답을 작성 중입니다" : "The orchestrator is composing a reply"}
+            {label}
             <span className="session-working-dots" aria-hidden="true" />
           </strong>
           <p>{formatElapsed(seconds, language)}</p>

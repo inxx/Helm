@@ -765,6 +765,18 @@ pub struct AgentSessionSummary {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct ConversationMessage {
+    pub id: String,
+    pub project_id: String,
+    pub seq: i64,
+    pub role: String,
+    pub content: String,
+    pub source_run_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct RunEventSummary {
     pub id: String,
     pub project_id: String,

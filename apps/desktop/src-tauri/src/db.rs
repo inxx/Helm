@@ -2,7 +2,8 @@ use crate::git;
 use crate::models::{
     AgentRunSummary, AgentSessionSummary, ApprovalSummary, AuditLogEntry, CommandError,
     CommandResult, CoordinationExportSummary, CreateEpicInput, CreatePlanningSessionInput,
-    CreateTaskInput, DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitFileStatus,
+    ConversationMessage, CreateTaskInput, DecidePlanDraftInput, EffectiveSettings, EpicSummary,
+    GitFileStatus,
     PlanDraftRevisionSummary, PlanningApprovalSummary, PlanningMaterializationSummary,
     PlanningMessageSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectSettingsPatch,
     ProjectSummary, RunEventSummary, SavePlanDraftRevisionInput, SaveTerminalScriptInput,
@@ -27,7 +28,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 14;
+const SUPPORTED_SCHEMA_VERSION: i64 = 15;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
@@ -42,6 +43,7 @@ const PHASE11_MIGRATION: &str = include_str!("../migrations/0011_agent_run_runne
 const PHASE12_MIGRATION: &str = include_str!("../migrations/0012_agent_run_host_pid.sql");
 const PHASE13_MIGRATION: &str = include_str!("../migrations/0013_review_approval.sql");
 const PHASE14_MIGRATION: &str = include_str!("../migrations/0014_task_worktree_mode.sql");
+const PHASE15_MIGRATION: &str = include_str!("../migrations/0015_conversation_messages.sql");
 const TASK_STATUS_ORDER: &[&str] = &[
     "Planned",
     "Ready",
@@ -408,6 +410,11 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
         apply_migration(conn, 14, "phase14_task_worktree_mode", PHASE14_MIGRATION)?;
     } else if !table_has_column(conn, "tasks", "worktree_mode")? {
         apply_schema_patch(conn, PHASE14_MIGRATION)?;
+    }
+    if current_version < 15 {
+        apply_migration(conn, 15, "phase15_conversation_messages", PHASE15_MIGRATION)?;
+    } else if !table_exists(conn, "conversation_messages")? {
+        apply_schema_patch(conn, PHASE15_MIGRATION)?;
     }
     Ok(())
 }
@@ -4887,6 +4894,75 @@ pub fn get_agent_run(conn: &Connection, run_id: &str) -> CommandResult<AgentRunS
             err,
         )
     })
+}
+
+fn map_conversation_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationMessage> {
+    Ok(ConversationMessage {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        seq: row.get(2)?,
+        role: row.get(3)?,
+        content: row.get(4)?,
+        source_run_id: row.get(5)?,
+        created_at: row.get(6)?,
+    })
+}
+
+/// 한 프로젝트의 오케스트레이터/계획자/작업자 대화 메시지를 시간순(append-only)으로 읽는다.
+pub fn list_conversation_messages(
+    conn: &Connection,
+    project_id: &str,
+) -> CommandResult<Vec<ConversationMessage>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, project_id, seq, role, content, source_run_id, created_at
+             FROM conversation_messages WHERE project_id = ?1 ORDER BY seq ASC",
+        )
+        .map_err(|err| CommandError::database("대화 메시지를 읽지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id], map_conversation_message)
+        .map_err(|err| CommandError::database("대화 메시지를 읽지 못했습니다.", err))?;
+    collect_rows(rows, "대화 메시지를 읽지 못했습니다.")
+}
+
+/// 대화 메시지를 스레드 끝에 덧붙인다. source_run_id가 이미 기록된 run이면(중복 폴링)
+/// INSERT OR IGNORE로 건너뛰고 None을 돌려준다.
+pub fn append_conversation_message(
+    conn: &Connection,
+    project_id: &str,
+    role: &str,
+    content: &str,
+    source_run_id: Option<&str>,
+) -> CommandResult<Option<ConversationMessage>> {
+    let id = new_id();
+    let created_at = now();
+    let seq: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM conversation_messages WHERE project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| CommandError::database("대화 메시지를 기록하지 못했습니다.", err))?;
+    let changed = conn
+        .execute(
+            "INSERT OR IGNORE INTO conversation_messages
+               (id, project_id, seq, role, content, source_run_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, project_id, seq, role, content, source_run_id, created_at],
+        )
+        .map_err(|err| CommandError::database("대화 메시지를 기록하지 못했습니다.", err))?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    Ok(Some(ConversationMessage {
+        id,
+        project_id: project_id.to_string(),
+        seq,
+        role: role.to_string(),
+        content: content.to_string(),
+        source_run_id: source_run_id.map(|value| value.to_string()),
+        created_at,
+    }))
 }
 
 pub fn list_run_events(

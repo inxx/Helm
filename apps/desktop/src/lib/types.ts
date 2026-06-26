@@ -177,6 +177,16 @@ export interface OrchestratorConversationInput {
   history: Array<{ role: "user" | "assistant"; content: string }>;
 }
 
+export interface ConversationMessage {
+  id: string;
+  projectId: string;
+  seq: number;
+  role: "user" | "assistant";
+  content: string;
+  sourceRunId: string | null;
+  createdAt: string;
+}
+
 export interface PlannerConversationResult {
   connectionId: string;
   provider: string | null;

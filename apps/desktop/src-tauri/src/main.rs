@@ -7,7 +7,8 @@ mod models;
 use crate::models::{
     AgentRunSummary, AgentSessionSummary, AiConnectionCheckResult, AiModelRefreshResult,
     AppSettings, AppendTaskInstructionInput, ApprovalSummary, CommandError, CommandResult,
-    CoordinationExportSummary, CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput,
+    ConversationMessage, CoordinationExportSummary, CreateEpicInput, CreatePlanningSessionInput,
+    CreateTaskInput,
     DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary,
     GitFileDiff, GitFileStatus, GitRepositoryState, JiraIssueSummary, JiraTransition,
     NodeRuntimeSummary, OrchestratorConversationInput, OrchestratorSettings, PlannerConversationInput,
@@ -3205,6 +3206,35 @@ fn list_run_events(
     let context = project_context(&state, &project_id)?;
     let conn = db::open_existing_db(&context.db_path)?;
     db::list_run_events(&conn, &project_id, &run_id)
+}
+
+#[tauri::command]
+fn list_conversation_messages(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<ConversationMessage>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::list_conversation_messages(&conn, &project_id)
+}
+
+#[tauri::command]
+fn append_conversation_message(
+    project_id: String,
+    role: String,
+    content: String,
+    source_run_id: Option<String>,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<ConversationMessage>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::append_conversation_message(
+        &conn,
+        &project_id,
+        &role,
+        &content,
+        source_run_id.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -7266,6 +7296,8 @@ fn main() {
             list_agent_sessions,
             list_task_timeline,
             list_run_events,
+            list_conversation_messages,
+            append_conversation_message,
             get_agent_run,
             read_run_artifact,
             list_approvals,

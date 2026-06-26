@@ -8,6 +8,7 @@ import type {
   AiModelRefreshResult,
   ApprovalSummary,
   ControlTowerProjectSummary,
+  ConversationMessage,
   CoordinationExportSummary,
   CreatePlanningSessionInput,
   CreateTaskInput,
@@ -100,6 +101,22 @@ export const api = {
   },
   runOrchestratorConversation(projectId: string, input: OrchestratorConversationInput) {
     return invoke<PlannerConversationResult>("run_orchestrator_conversation", { projectId, input });
+  },
+  listConversationMessages(projectId: string) {
+    return invoke<ConversationMessage[]>("list_conversation_messages", { projectId });
+  },
+  appendConversationMessage(
+    projectId: string,
+    role: "user" | "assistant",
+    content: string,
+    sourceRunId: string | null = null,
+  ) {
+    return invoke<ConversationMessage | null>("append_conversation_message", {
+      projectId,
+      role,
+      content,
+      sourceRunId,
+    });
   },
   listPlanningSessions(projectId: string) {
     return invoke<PlanningSessionSummary[]>("list_planning_sessions", { projectId });
