@@ -3210,6 +3210,9 @@ fn open_project_from_path(
         Vec::new()
     };
     register_project_context(state, &project.id, &root)?;
+    // 프로젝트를 열면(개별 열기·전체 보드 모두 이 경로를 거친다) 큐 워커를 띄워,
+    // 재시작 후에도 Queued run이 claim 없이 "대기 중"으로 멈춰 있지 않게 한다.
+    let _ = ensure_project_queue_worker(app, state, &project.id);
     // 재시작 후에도 살아남은 detached host run을 백그라운드에서 재연결한다.
     for run_id in reattach_run_ids {
         if let Ok(context) = project_context(state, &project.id) {
