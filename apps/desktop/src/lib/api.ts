@@ -23,6 +23,7 @@ import type {
   EffectiveSettings,
   LaunchState,
   NodeRuntimeSummary,
+  OrchestratorConversationInput,
   PlannerConversationInput,
   PlannerConversationResult,
   PlanningMaterializationSummary,
@@ -96,6 +97,9 @@ export const api = {
   },
   runPlannerConversation(projectId: string, input: PlannerConversationInput) {
     return invoke<PlannerConversationResult>("run_planner_conversation", { projectId, input });
+  },
+  runOrchestratorConversation(projectId: string, input: OrchestratorConversationInput) {
+    return invoke<PlannerConversationResult>("run_orchestrator_conversation", { projectId, input });
   },
   listPlanningSessions(projectId: string) {
     return invoke<PlanningSessionSummary[]>("list_planning_sessions", { projectId });

@@ -172,6 +172,11 @@ export interface PlannerConversationInput {
   currentDraftJson?: unknown;
 }
 
+export interface OrchestratorConversationInput {
+  goalText: string;
+  history: Array<{ role: "user" | "assistant"; content: string }>;
+}
+
 export interface PlannerConversationResult {
   connectionId: string;
   provider: string | null;

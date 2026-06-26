@@ -649,6 +649,20 @@ pub struct PlannerConversationInput {
     pub current_draft_json: Option<Value>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorConversationInput {
+    pub goal_text: String,
+    pub history: Vec<OrchestratorTurn>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorTurn {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannerConversationResult {

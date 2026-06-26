@@ -10,7 +10,8 @@ use crate::models::{
     CoordinationExportSummary, CreateEpicInput, CreatePlanningSessionInput, CreateTaskInput,
     DecidePlanDraftInput, EffectiveSettings, EpicSummary, GitBranchSummary, GitCommitSummary,
     GitFileDiff, GitFileStatus, GitRepositoryState, JiraIssueSummary, JiraTransition,
-    NodeRuntimeSummary, OrchestratorSettings, PlannerConversationInput, PlannerConversationResult,
+    NodeRuntimeSummary, OrchestratorConversationInput, OrchestratorSettings, PlannerConversationInput,
+    PlannerConversationResult,
     PlanningMaterializationSummary, PlanningSessionDetail, PlanningSessionSummary, ProjectContext,
     ProjectSettingsPatch, ProjectSnapshot, ProjectSummary, PullRequestDetail, PullRequestSummary,
     RunEventSummary, RunnerCheckResult, RunnerTemplateSummary, SavePlanDraftRevisionInput,
@@ -476,13 +477,55 @@ fn run_planner_conversation_blocking(
 ) -> CommandResult<PlannerConversationResult> {
     let conn = db::open_existing_db(&context.db_path)?;
     let settings = db::effective_settings(&conn, &project_id)?;
-    let commands = resolve_planning_commands(&settings, &context.root_path, &input)?;
+    let prompt = build_planner_prompt(&context.root_path, &input);
+    let commands = resolve_planning_commands(&settings, &context.root_path, &input, "planner", &prompt)?;
+    run_planning_commands(&context.root_path, commands)
+}
+
+#[tauri::command]
+async fn run_orchestrator_conversation(
+    project_id: String,
+    input: OrchestratorConversationInput,
+    state: State<'_, AppState>,
+) -> CommandResult<PlannerConversationResult> {
+    let context = project_context(&state, &project_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        run_orchestrator_conversation_blocking(project_id, input, context)
+    })
+    .await
+    .map_err(|err| CommandError::io("orchestrator 작업 thread가 중단되었습니다.", err))?
+}
+
+fn run_orchestrator_conversation_blocking(
+    project_id: String,
+    input: OrchestratorConversationInput,
+    context: ProjectContext,
+) -> CommandResult<PlannerConversationResult> {
+    let conn = db::open_existing_db(&context.db_path)?;
+    let settings = db::effective_settings(&conn, &project_id)?;
+    let prompt = build_orchestrator_prompt(&context.root_path, &input);
+    // The orchestrator borrows the planner's CLI connection by default; only the prompt and project
+    // root matter because the default provider args reference {planPrompt}/{projectRoot}.
+    let adapter = PlannerConversationInput {
+        message: input.goal_text.clone(),
+        goal_text: input.goal_text.clone(),
+        current_draft_json: None,
+    };
+    let commands =
+        resolve_planning_commands(&settings, &context.root_path, &adapter, "orchestrator", &prompt)?;
+    run_planning_commands(&context.root_path, commands)
+}
+
+fn run_planning_commands(
+    root_path: &Path,
+    commands: Vec<PlanningCommandSpec>,
+) -> CommandResult<PlannerConversationResult> {
     let mut failures = Vec::new();
     let mut last_output = None;
 
     for command in commands {
         match run_direct_command_with_timeout_env(
-            &context.root_path,
+            root_path,
             &command.command,
             Duration::from_secs(command.timeout_seconds),
             &command.env,
@@ -3883,15 +3926,19 @@ fn resolve_planning_commands(
     settings: &EffectiveSettings,
     project_root: &Path,
     input: &PlannerConversationInput,
+    role_id: &str,
+    prompt: &str,
 ) -> CommandResult<Vec<PlanningCommandSpec>> {
-    let planner_assignment = settings
-        .role_assignments
-        .as_array()
-        .and_then(|items| {
+    let find_assignment = |id: &str| {
+        settings.role_assignments.as_array().and_then(|items| {
             items
                 .iter()
-                .find(|item| item.get("roleId").and_then(Value::as_str) == Some("planner"))
+                .find(|item| item.get("roleId").and_then(Value::as_str) == Some(id))
         })
+    };
+    // The orchestrator borrows the planner's connection when it has no assignment of its own.
+    let planner_assignment = find_assignment(role_id)
+        .or_else(|| find_assignment("planner"))
         .ok_or_else(|| CommandError::validation("planner 역할 배정을 찾을 수 없습니다."))?;
 
     let mut commands = Vec::new();
@@ -3903,6 +3950,7 @@ fn resolve_planning_commands(
             settings,
             project_root,
             input,
+            prompt,
             &selection,
             &mut seen,
             &mut commands,
@@ -3922,6 +3970,7 @@ fn resolve_planning_commands(
             settings,
             project_root,
             input,
+            prompt,
             &selection,
             &mut seen,
             &mut commands,
@@ -3950,6 +3999,7 @@ fn push_planning_command_candidate(
     settings: &EffectiveSettings,
     project_root: &Path,
     input: &PlannerConversationInput,
+    prompt: &str,
     selection: &Value,
     seen: &mut HashSet<String>,
     commands: &mut Vec<PlanningCommandSpec>,
@@ -3974,7 +4024,7 @@ fn push_planning_command_candidate(
         return;
     };
 
-    match resolve_planning_command_for_connection(project_root, input, selection, connection) {
+    match resolve_planning_command_for_connection(project_root, input, prompt, selection, connection) {
         Ok(command) => commands.push(command),
         Err(error) => failures.push(format!(
             "{connection_id}: {}",
@@ -3986,6 +4036,7 @@ fn push_planning_command_candidate(
 fn resolve_planning_command_for_connection(
     project_root: &Path,
     input: &PlannerConversationInput,
+    prompt: &str,
     selection: &Value,
     connection: &Value,
 ) -> CommandResult<PlanningCommandSpec> {
@@ -4027,7 +4078,6 @@ fn resolve_planning_command_for_connection(
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
         });
-    let prompt = build_planner_prompt(project_root, input);
     let current_draft_json = input
         .current_draft_json
         .as_ref()
@@ -4038,7 +4088,7 @@ fn resolve_planning_command_for_connection(
         "projectRoot".to_string(),
         project_root.to_string_lossy().to_string(),
     );
-    placeholders.insert("planPrompt".to_string(), prompt);
+    placeholders.insert("planPrompt".to_string(), prompt.to_string());
     placeholders.insert("message".to_string(), input.message.clone());
     placeholders.insert("goalText".to_string(), input.goal_text.clone());
     placeholders.insert("currentDraftJson".to_string(), current_draft_json);
@@ -4226,6 +4276,64 @@ fn planning_command_args(
         .collect()),
         _ => Ok(Vec::new()),
     }
+}
+
+fn build_orchestrator_prompt(project_root: &Path, input: &OrchestratorConversationInput) -> String {
+    let branch = git::current_branch(project_root).unwrap_or_else(|| "detached".to_string());
+    let head = git::head_hash(project_root).unwrap_or_else(|| "unknown".to_string());
+    let transcript = if input.history.is_empty() {
+        "(아직 대화 없음)".to_string()
+    } else {
+        input
+            .history
+            .iter()
+            .map(|turn| {
+                let who = if turn.role == "assistant" {
+                    "오케스트레이터"
+                } else {
+                    "사용자"
+                };
+                format!("{who}: {}", turn.content.trim())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        r#"너는 Helm의 orchestrator role이다. 계획자(planner)에게 작업을 넘기기 전에 사용자와 대화하며 요구사항을 확정하는 역할이다.
+
+규칙:
+- 한글로 답한다.
+- 너는 계획을 세우거나 task를 만들지 않는다. 파일 수정, 명령 실행, Git 작업도 하지 않는다. 오직 요구사항을 명확히 정리한다.
+- 대화 내역을 읽고, 계획자가 바로 일할 수 있을 만큼 요구사항이 충분한지 판단한다.
+- 모호하거나 빠진 게 있으면 ready=false로 두고, 가장 중요한 것부터 3~6개 질문을 questions에 담는다. 사용자가 한 번에 답할 수 있도록 구체적으로 묻는다.
+- 요구사항이 이미 충분하면 ready=true로 두고 questions는 빈 배열로 둔다.
+- requirement에는 지금까지 확정된 내용을 항상 정리해 담는다(목표 / 범위(포함) / 제외(범위 밖) / 제약 / 완료 조건). 아직 모르는 칸은 "미정"으로 표시한다.
+- assumptions에는 사용자가 명시하지 않아 네가 가정한 기본값을 적어 사용자가 점검하게 한다.
+- 한 번에 너무 많이 묻지 말고 핵심부터 좁혀 간다.
+- Markdown fence, 머리말, 설명 문장 없이 JSON만 반환한다.
+
+JSON schema:
+{{
+  "ready": false,
+  "requirement": "string (markdown)",
+  "questions": ["string"],
+  "assumptions": ["string"]
+}}
+
+Project:
+- root: {root}
+- branch: {branch}
+- head: {head}
+
+대화 내역:
+{transcript}
+"#,
+        root = project_root.to_string_lossy(),
+        branch = branch,
+        head = head,
+        transcript = transcript,
+    )
 }
 
 fn build_planner_prompt(project_root: &Path, input: &PlannerConversationInput) -> String {
@@ -7014,6 +7122,7 @@ fn main() {
             get_effective_settings,
             update_project_settings,
             run_planner_conversation,
+            run_orchestrator_conversation,
             list_planning_sessions,
             create_planning_session,
             get_planning_session,

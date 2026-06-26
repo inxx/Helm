@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsePlanTasks, stripPlanJson } from "./planParse.ts";
+import { parseOrchestratorReply, parsePlanTasks, stripPlanJson } from "./planParse.ts";
 
 test("parsePlanTasks reads a fenced json block, ignoring surrounding prose", () => {
   const text = "여기 계획입니다:\n```json\n{\"tasks\":[{\"title\":\"로그인 UI\",\"description\":\"폼 작성\",\"role\":\"coder\"}]}\n```\n끝.";
@@ -28,6 +28,27 @@ test("parsePlanTasks returns null on invalid or empty input", () => {
   assert.equal(parsePlanTasks("계획을 못 세웠어요"), null);
   assert.equal(parsePlanTasks('{"tasks":[]}'), null);
   assert.equal(parsePlanTasks("```json\n{not valid}\n```"), null);
+});
+
+test("parseOrchestratorReply reads questions when not ready, tolerating prose and fences", () => {
+  const text = "확인이 필요합니다:\n```json\n{\"ready\":false,\"requirement\":\"목표: 로그인\",\"questions\":[\"어떤 인증?\"],\"assumptions\":[\"웹 전용\"]}\n```";
+  const reply = parseOrchestratorReply(text);
+  assert.deepEqual(reply, {
+    ready: false,
+    requirement: "목표: 로그인",
+    questions: ["어떤 인증?"],
+    assumptions: ["웹 전용"],
+  });
+});
+
+test("parseOrchestratorReply marks ready and defaults missing arrays", () => {
+  const reply = parseOrchestratorReply('{"ready":true,"requirement":"정리 완료"}');
+  assert.deepEqual(reply, { ready: true, requirement: "정리 완료", questions: [], assumptions: [] });
+});
+
+test("parseOrchestratorReply returns null when no ready-shaped object is present", () => {
+  assert.equal(parseOrchestratorReply("그냥 설명만 있는 응답"), null);
+  assert.equal(parseOrchestratorReply('{"tasks":[{"title":"A"}]}'), null);
 });
 
 test("stripPlanJson removes a tasks json block but keeps prose and other code", () => {

@@ -38,6 +38,67 @@ export function stripPlanJson(text: string): string {
     .trim();
 }
 
+// The orchestrator clarifies requirements before the planner; it emits a JSON object describing
+// whether requirements are ready, the organized requirement so far, open questions, and assumptions.
+// Extracted leniently (same candidates as parsePlanTasks) so a little surrounding prose is tolerated.
+export interface OrchestratorReply {
+  ready: boolean;
+  requirement: string;
+  questions: string[];
+  assumptions: string[];
+}
+
+export function parseOrchestratorReply(text: string): OrchestratorReply | null {
+  const candidates: string[] = [];
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) candidates.push(fenced[1]);
+  candidates.push(text);
+  const objStart = text.indexOf("{");
+  const objEnd = text.lastIndexOf("}");
+  if (objStart >= 0 && objEnd > objStart) candidates.push(text.slice(objStart, objEnd + 1));
+
+  for (const raw of candidates) {
+    if (!raw.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null || !("ready" in parsed)) continue;
+    const obj = parsed as Record<string, unknown>;
+    const strings = (value: unknown): string[] =>
+      Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+    return {
+      ready: obj.ready === true,
+      requirement: typeof obj.requirement === "string" ? obj.requirement : "",
+      questions: strings(obj.questions),
+      assumptions: strings(obj.assumptions),
+    };
+  }
+  return null;
+}
+
+// Drop plan tasks whose title already exists (the planner re-runs statelessly on each follow-up
+// and re-emits overlapping tasks) and de-duplicate within the batch. Exact match on a normalized
+// title only — fuzzy matching would swallow legitimately distinct tasks.
+export function dedupePlanTasks(tasks: PlanTask[], existingTitles: Iterable<string>): PlanTask[] {
+  const seen = new Set<string>();
+  for (const title of existingTitles) seen.add(normalizeTaskTitle(title));
+  const fresh: PlanTask[] = [];
+  for (const task of tasks) {
+    const key = normalizeTaskTitle(task.title);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    fresh.push(task);
+  }
+  return fresh;
+}
+
+function normalizeTaskTitle(title: string): string {
+  return title.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 function tryParse(raw: string): PlanTask[] | null {
   if (!raw.trim()) return null;
   let parsed: unknown;

@@ -9661,6 +9661,26 @@ impl RoleContextContract {
 
 fn role_context_contract(role_id: &str) -> RoleContextContract {
     match role_id {
+        "orchestrator" => RoleContextContract {
+            objective: "계획자에게 작업을 넘기기 전에 사용자와 대화하며 요구사항을 명확히 확정한다.",
+            focus: &[
+                "목표, 범위(포함), 제외 범위, 제약, 완료 조건을 사용자와 함께 구체화한다.",
+                "모호하거나 빠진 정보는 우선순위가 높은 질문으로 되묻는다.",
+                "계획이나 구현을 만들지 않고 정리된 요구사항만 산출한다.",
+            ],
+            pass_conditions: &[
+                "계획자가 바로 계획을 세울 수 있을 만큼 요구사항이 구체적이다.",
+                "확정된 범위와 제외 범위가 분리되어 있다.",
+            ],
+            blocking_conditions: &[
+                "핵심 요구사항이 상충하거나 사용자 확인 없이는 진행할 수 없다.",
+            ],
+            forbidden: &[
+                "요구사항이 확정되기 전에 계획이나 task를 만들지 않는다.",
+                "파일을 변경하지 않는다.",
+            ],
+            gate: None,
+        },
         "planner" => RoleContextContract {
             objective: "사용자 목표와 현재 저장소 맥락을 바탕으로 승인 가능한 실행 계획을 만든다.",
             focus: &[

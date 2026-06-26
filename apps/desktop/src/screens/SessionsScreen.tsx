@@ -4,12 +4,12 @@ import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Bot, Check, FileText, Folder, Loader2, MessageSquare, MoreHorizontal, Pencil, Plus, Send, Square, Trash2, User, X } from "lucide-react";
-import { collapseSessionsByTask } from "../lib/agentSessions";
+import { collapseSessionsByTask, groupSessionsByEpic } from "../lib/agentSessions";
 import { api } from "../lib/api";
 import { useI18n, type AppLanguage } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
 import { roleLabel } from "../lib/runnerReadiness";
-import { parsePlanTasks, stripPlanJson } from "../lib/planParse";
+import { dedupePlanTasks, parseOrchestratorReply, parsePlanTasks, stripPlanJson, type OrchestratorReply, type PlanTask } from "../lib/planParse";
 import { parseApprovalDecision } from "../lib/approvalIntent";
 import type {
   AgentSessionSummary,
@@ -97,6 +97,10 @@ export function SessionsScreen({
   const taskById = useMemo(
     () => new Map(snapshot?.tasks.map((task) => [task.id, task]) ?? []),
     [snapshot?.tasks],
+  );
+  const epicById = useMemo(
+    () => new Map(snapshot?.epics.map((epic) => [epic.id, epic]) ?? []),
+    [snapshot?.epics],
   );
   const activeSession = useMemo(() => {
     if (composingNewSession) return null;
@@ -341,7 +345,8 @@ export function SessionsScreen({
     if (!snapshot || !goalText || orchestratorBusy) return;
     setLoadError(null);
     setOrchestratorInput("");
-    setOrchestratorMessages((items) => [...items, { id: crypto.randomUUID(), role: "user", content: goalText }]);
+    const userTurn = { id: crypto.randomUUID(), role: "user" as const, content: goalText };
+    setOrchestratorMessages((items) => [...items, userTurn]);
 
     // 승인 대기가 있으면 채팅 입력을 승인/반려 결정으로 먼저 해석한다 (버튼 대신 대화로 결정).
     const decision = parseApprovalDecision(goalText);
@@ -350,27 +355,65 @@ export function SessionsScreen({
       return;
     }
 
-    if (!pendingOrchestratorRequirement || !isConfirmationMessage(goalText)) {
-      const nextRequirement = [pendingOrchestratorRequirement, goalText].filter(Boolean).join("\n\n추가 요구사항:\n");
-      setPendingOrchestratorRequirement(nextRequirement);
+    // 오케스트레이터가 요구사항 확정(ready)을 마치고 사용자 확인을 기다리는 중 + 사용자가 "확인"
+    // → 정리된 요구사항을 그대로 계획자에게 넘긴다.
+    if (pendingOrchestratorRequirement && isConfirmationMessage(goalText)) {
+      await handOffToPlanner(pendingOrchestratorRequirement);
+      return;
+    }
+
+    // 그 외 모든 입력 → 오케스트레이터(요구사항 명확화 AI)에게 보내 질문/정리를 받는다.
+    setPendingOrchestratorRequirement(null);
+    setOrchestratorBusy(true);
+    try {
+      const history = [...orchestratorMessages, userTurn].map((m) => ({ role: m.role, content: m.content }));
+      const originalGoal = orchestratorMessages.find((m) => m.role === "user")?.content ?? goalText;
+      const result = await api.runOrchestratorConversation(snapshot.project.id, {
+        goalText: originalGoal,
+        history,
+      });
+      if (result.timedOut || result.exitCode !== 0) {
+        throw new Error(result.stderr.trim() || result.responseText.trim() || (language === "ko" ? "요구사항 정리 응답을 받지 못했습니다." : "The orchestrator did not return a usable response."));
+      }
+      const parsed = parseOrchestratorReply(result.responseText);
+      if (!parsed) {
+        // JSON 파싱 실패 → 원문을 보여주고 대화를 이어간다.
+        setOrchestratorMessages((items) => [
+          ...items,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: stripPlanJson(result.responseText.trim()) || (language === "ko" ? "응답을 이해하지 못했습니다. 다시 설명해 주세요." : "Could not parse the response. Please rephrase."),
+          },
+        ]);
+        return;
+      }
+      if (parsed.ready) {
+        setPendingOrchestratorRequirement(parsed.requirement);
+      }
       setOrchestratorMessages((items) => [
         ...items,
         {
           id: crypto.randomUUID(),
           role: "assistant",
-          content: requirementConfirmationText(nextRequirement, language),
+          content: orchestratorReplyText(parsed, language),
         },
       ]);
-      return;
+    } catch (error) {
+      setLoadError(messageFromError(error, language === "ko" ? "오케스트레이터에 지시를 전달하지 못했습니다." : "Failed to send the instruction to the orchestrator."));
+    } finally {
+      setOrchestratorBusy(false);
     }
+  }
 
-    const confirmedRequirement = pendingOrchestratorRequirement;
+  async function handOffToPlanner(requirement: string) {
+    if (!snapshot) return;
     setPendingOrchestratorRequirement(null);
     setOrchestratorBusy(true);
     try {
       const result = await api.runPlannerConversation(snapshot.project.id, {
-        message: confirmedRequirement,
-        goalText: confirmedRequirement,
+        message: requirement,
+        goalText: requirement,
         currentDraftJson: null,
       });
       if (result.timedOut || result.exitCode !== 0) {
@@ -385,7 +428,7 @@ export function SessionsScreen({
           content: stripPlanJson(reply) || (language === "ko" ? "계획을 받았습니다." : "Received a plan."),
         },
       ]);
-      await maybeMaterializeTasks(reply);
+      await maybeMaterializeTasks(reply, requirement);
     } catch (error) {
       setLoadError(messageFromError(error, language === "ko" ? "오케스트레이터에 지시를 전달하지 못했습니다." : "Failed to send the instruction to the orchestrator."));
     } finally {
@@ -439,19 +482,29 @@ export function SessionsScreen({
 
   // Every planner reply is parsed for tasks[] JSON. If found, confirm once, then materialize
   // each into a Helm task that the existing role-pipeline engine runs.
-  async function maybeMaterializeTasks(turnText: string) {
+  async function maybeMaterializeTasks(turnText: string, goalText: string) {
     if (!snapshot) return;
     const tasks = parsePlanTasks(turnText);
     if (!tasks) return;
     const proceed = window.confirm(language === "ko" ? "이대로 진행할까요? 설계자에게 넘겨 작업을 시작합니다." : "Proceed? This hands the requirement to the planner and starts the task.");
     if (!proceed) return;
     const projectId = snapshot.project.id;
+    // One planning conversation → one epic; every materialized task hangs off it so the sidebar
+    // shows a single parent group instead of N flat sessions. If the epic fails to create, fall
+    // back to ungrouped tasks (epicId stays null) rather than dropping the work.
+    let epicId: string | null = null;
+    try {
+      epicId = (await api.createEpic(projectId, deriveEpicTitle(goalText, tasks))).id;
+    } catch {
+      /* group-less fallback */
+    }
     const created: string[] = [];
     const startFailed: string[] = [];
     for (const task of tasks) {
       try {
         const description = [task.description, task.role ? `(role: ${task.role})` : null].filter(Boolean).join("\n\n") || task.title;
         const newTask = await api.createTask(projectId, {
+          epicId,
           title: task.title.slice(0, 120),
           description,
           externalRefs: [{ refType: "PlainText", refValue: task.description ?? task.title, refTitle: language === "ko" ? "AI 계획 작업" : "AI-planned task" }],
@@ -641,6 +694,30 @@ export function SessionsScreen({
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
 
+  function renderSessionRow(session: AgentSessionSummary) {
+    const active = session.taskId
+      ? session.taskId === activeSession?.taskId
+      : session.id === activeSession?.id;
+    return (
+      <button
+        className={active ? "session-row active" : "session-row"}
+        key={session.id}
+        onClick={() => {
+          setComposingNewSession(false);
+          setActiveSessionId(session.id);
+          onSelectTask(session.taskId);
+        }}
+        type="button"
+      >
+        <span className={`session-status-dot ${session.nextAction}`} />
+        <span className="session-row-main">
+          <strong>{session.title}</strong>
+          <small>{session.provider ?? t("sessions.providerUnknown")} · {formatRelative(session.lastSignalAt, language)}</small>
+        </span>
+      </button>
+    );
+  }
+
   function scrollChatToBottom() {
     if (chatScrollFrameRef.current !== null) {
       window.cancelAnimationFrame(chatScrollFrameRef.current);
@@ -730,27 +807,25 @@ export function SessionsScreen({
                         <span>{t("sessions.noSessions")}</span>
                       </div>
                     ) : null}
-                    {collapseSessionsByTask(sessions).map((session) => {
-                      const active = session.taskId
-                        ? session.taskId === activeSession?.taskId
-                        : session.id === activeSession?.id;
+                    {groupSessionsByEpic(
+                      collapseSessionsByTask(sessions),
+                      (taskId) => taskById.get(taskId)?.epicId ?? null,
+                      (id) => epicById.get(id)?.title ?? null,
+                    ).map((group) => {
+                      if (!group.epicId) return renderSessionRow(group.sessions[0]);
+                      const groupActive = group.sessions.some((session) =>
+                        session.taskId ? session.taskId === activeSession?.taskId : session.id === activeSession?.id,
+                      );
                       return (
-                        <button
-                          className={active ? "session-row active" : "session-row"}
-                          key={session.id}
-                          onClick={() => {
-                            setComposingNewSession(false);
-                            setActiveSessionId(session.id);
-                            onSelectTask(session.taskId);
-                          }}
-                          type="button"
-                        >
-                          <span className={`session-status-dot ${session.nextAction}`} />
-                          <span className="session-row-main">
-                            <strong>{session.title}</strong>
-                            <small>{session.provider ?? t("sessions.providerUnknown")} · {formatRelative(session.lastSignalAt, language)}</small>
-                          </span>
-                        </button>
+                        <details className="session-epic-group" key={group.epicId} open={groupActive || undefined}>
+                          <summary className="session-epic-summary">
+                            <span className="session-epic-title">{group.epicTitle ?? t("sessions.epicUntitled")}</span>
+                            <span className="session-epic-count">{group.sessions.length}</span>
+                          </summary>
+                          <div className="session-epic-children">
+                            {group.sessions.map((session) => renderSessionRow(session))}
+                          </div>
+                        </details>
                       );
                     })}
                   </div>
@@ -1560,6 +1635,18 @@ function isConfirmationMessage(text: string): boolean {
   return /^(확인|진행|시작|좋아|오케이|ok|okay|yes|y|go|proceed)$/i.test(text.trim());
 }
 
+// Epic title for a materialized plan: the goal's first meaningful line (the original ask, before
+// any "추가 요구사항" appended by follow-ups), trimmed to a sidebar-friendly length. Falls back to
+// the first task title when the goal is empty.
+function deriveEpicTitle(goalText: string, tasks: PlanTask[]): string {
+  const firstLine = goalText
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line && line !== "추가 요구사항:");
+  const base = firstLine || tasks[0]?.title || "AI 계획";
+  return base.length > 80 ? `${base.slice(0, 79)}…` : base;
+}
+
 function approvalLabel(type: string, language: AppLanguage): string {
   const ko = language === "ko";
   if (type === "PlanApproval") return ko ? "계획 승인" : "Plan approval";
@@ -1569,11 +1656,32 @@ function approvalLabel(type: string, language: AppLanguage): string {
   return type;
 }
 
-function requirementConfirmationText(requirement: string, language: AppLanguage): string {
-  if (language === "en") {
-    return `I'll hand this to the planner after your confirmation.\n\n${requirement}\n\nReply "ok" to proceed, or add missing details.`;
+// Render the orchestrator's structured reply for the chat. When not ready, lead with open questions
+// so the user knows what to answer; when ready, show the organized requirement and ask for confirmation.
+function orchestratorReplyText(reply: OrchestratorReply, language: AppLanguage): string {
+  const ko = language === "ko";
+  const sections: string[] = [];
+  if (reply.requirement.trim()) {
+    sections.push(`${ko ? "📋 정리된 요구사항" : "📋 Requirements so far"}\n${reply.requirement.trim()}`);
   }
-  return `아래 내용으로 계획자 AI에게 넘길까요?\n\n${requirement}\n\n진행하려면 "확인" 또는 "진행"이라고 답하고, 빠진 내용이 있으면 이어서 적어주세요.`;
+  if (reply.assumptions.length) {
+    const list = reply.assumptions.map((item) => `- ${item}`).join("\n");
+    sections.push(`${ko ? "🔎 가정 (확인 필요)" : "🔎 Assumptions (please check)"}\n${list}`);
+  }
+  if (!reply.ready && reply.questions.length) {
+    const list = reply.questions.map((item, index) => `${index + 1}. ${item}`).join("\n");
+    sections.push(`${ko ? "❓ 확인이 필요한 점" : "❓ Open questions"}\n${list}`);
+  }
+  sections.push(
+    reply.ready
+      ? ko
+        ? '이대로 계획자에게 넘길까요? 진행하려면 "확인" 또는 "진행"이라고 답하고, 수정할 내용이 있으면 이어서 적어주세요.'
+        : 'Hand this to the planner? Reply "ok" to proceed, or add corrections.'
+      : ko
+        ? "위 질문에 답하거나 빠진 내용을 알려주세요."
+        : "Answer the questions above or add the missing details.",
+  );
+  return sections.join("\n\n");
 }
 
 // Keep the previous reference when the freshly-fetched value is deeply equal, so a no-op poll
