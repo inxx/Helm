@@ -679,6 +679,7 @@ fn apply_runner_template(
             ai_connections: Some((template.connections)()),
             role_assignments: Some((template.assignments)()),
             role_policies: None,
+            automation_policy: None,
             conductor_config: None,
             worktree_root: None,
             worktree_setup: None,
@@ -2526,15 +2527,39 @@ struct AutomationPolicy {
     auto_handoff_enabled: bool,
 }
 
-fn project_automation_policy(_context: &ProjectContext, _project_id: &str) -> AutomationPolicy {
+fn project_automation_policy(context: &ProjectContext, project_id: &str) -> AutomationPolicy {
     // Planning approval is the user's automation boundary: after a Plan Document
     // is approved, Helm may prepare/run roles until Testing passes and the task
     // reaches MergeWaiting. Merge itself remains a manual decision.
-    AutomationPolicy {
+    // 기본값은 db::default_automation_policy와 동일해야 한다. 프로젝트 설정의
+    // automationPolicy가 있으면 필드별로 덮어쓰고, 설정/DB 오류 시 기본값으로 fallback한다.
+    let defaults = AutomationPolicy {
         background_queue_worker_enabled: true,
         supervisor_reconcile_enabled: true,
         require_explicit_host_run: false,
         auto_handoff_enabled: true,
+    };
+    // ponytail: 정책 읽기마다 짧은 read 커넥션을 연다. 데스크톱 규모(프로젝트 소수, 800ms 틱)
+    // 에선 무시 가능. 핫해지면 AppState에 캐시.
+    let Ok(conn) = db::open_existing_db(&context.db_path) else {
+        return defaults;
+    };
+    let Ok(settings) = db::effective_settings(&conn, project_id) else {
+        return defaults;
+    };
+    let policy = &settings.automation_policy;
+    let flag = |key: &str, fallback: bool| policy.get(key).and_then(|v| v.as_bool()).unwrap_or(fallback);
+    AutomationPolicy {
+        background_queue_worker_enabled: flag(
+            "backgroundQueueWorkerEnabled",
+            defaults.background_queue_worker_enabled,
+        ),
+        supervisor_reconcile_enabled: flag(
+            "supervisorReconcileEnabled",
+            defaults.supervisor_reconcile_enabled,
+        ),
+        require_explicit_host_run: flag("requireExplicitHostRun", defaults.require_explicit_host_run),
+        auto_handoff_enabled: flag("autoHandoffEnabled", defaults.auto_handoff_enabled),
     }
 }
 
@@ -3676,6 +3701,9 @@ fn project_settings_patch_from_app_settings(settings: &AppSettings) -> ProjectSe
         ai_connections: Some(settings.ai_connections.clone()),
         role_assignments: Some(settings.role_assignments.clone()),
         role_policies: Some(settings.role_policies.clone()),
+        // AppSettings는 automation_policy를 들고 있지 않다 — 미지정으로 두면 프로젝트 설정의
+        // default_automation_policy fallback이 적용된다.
+        automation_policy: None,
         conductor_config: Some(settings.conductor_config.clone()),
         worktree_root: Some(settings.worktree_root.clone()),
         worktree_setup: Some(settings.worktree_setup.clone()),

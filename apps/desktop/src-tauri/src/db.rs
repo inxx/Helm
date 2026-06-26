@@ -750,6 +750,9 @@ pub fn effective_settings(conn: &Connection, project_id: &str) -> CommandResult<
         role_policies: settings
             .remove("rolePolicies")
             .unwrap_or_else(default_role_policies),
+        automation_policy: settings
+            .remove("automationPolicy")
+            .unwrap_or_else(default_automation_policy),
         conductor_config: settings.remove("conductorConfig"),
         worktree_root: settings
             .remove("worktreeRoot")
@@ -820,6 +823,9 @@ pub fn update_settings(
     }
     if let Some(value) = patch.role_policies {
         values.push(("rolePolicies", normalize_role_policies(value)));
+    }
+    if let Some(value) = patch.automation_policy {
+        values.push(("automationPolicy", value));
     }
     if let Some(value) = patch.conductor_config {
         values.push(("conductorConfig", value.unwrap_or(Value::Null)));
@@ -11868,6 +11874,18 @@ fn default_role_assignments() -> Value {
     ])
 }
 
+/// 자동화 정책 기본값. 계획 승인이 자동화 경계: 승인 후 Testing 통과까지는 Helm이 role을
+/// 준비/실행하고, 머지는 사람 결정으로 남긴다. main.rs project_automation_policy의 fallback과
+/// 동일한 값이어야 한다(둘 다 이 4개 불린).
+fn default_automation_policy() -> Value {
+    json!({
+        "backgroundQueueWorkerEnabled": true,
+        "supervisorReconcileEnabled": true,
+        "requireExplicitHostRun": false,
+        "autoHandoffEnabled": true
+    })
+}
+
 fn default_role_policies() -> Value {
     json!(role_policy_role_ids()
         .into_iter()
@@ -12322,6 +12340,46 @@ mod tests {
     }
 
     #[test]
+    fn automation_policy_defaults_then_honors_override() {
+        let repo = test_repo();
+        let (conn, project) = open_test_project(&repo);
+
+        // 설정이 없으면 기본값: 계획 승인 후 자동 진행 on, host 실행 명시 불필요.
+        let defaults = effective_settings(&conn, &project.id).expect("default settings");
+        assert_eq!(defaults.automation_policy["autoHandoffEnabled"], json!(true));
+        assert_eq!(defaults.automation_policy["requireExplicitHostRun"], json!(false));
+
+        update_settings(
+            &conn,
+            &project.id,
+            ProjectSettingsPatch {
+                role_presets: None,
+                ai_connections: None,
+                role_assignments: None,
+                role_policies: None,
+                automation_policy: Some(json!({
+                    "autoHandoffEnabled": false,
+                    "requireExplicitHostRun": true
+                })),
+                conductor_config: None,
+                worktree_root: None,
+                worktree_setup: None,
+                jira_config: None,
+                obsidian_vault_path: None,
+                obsidian_artifact_path: None,
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("save automation policy override");
+
+        // override를 저장하면 effective_settings가 그 값을 돌려준다.
+        let overridden = effective_settings(&conn, &project.id).expect("overridden settings");
+        assert_eq!(overridden.automation_policy["autoHandoffEnabled"], json!(false));
+        assert_eq!(overridden.automation_policy["requireExplicitHostRun"], json!(true));
+    }
+
+    #[test]
     fn planning_session_revision_and_materialization_are_durable() {
         let repo = test_repo();
         let (mut conn, project) = open_test_project(&repo);
@@ -12348,6 +12406,7 @@ mod tests {
                 ai_connections: None,
                 role_assignments: None,
                 role_policies: None,
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -13413,6 +13472,7 @@ mod tests {
                         "enabled": true
                     }
                 ])),
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -13514,6 +13574,7 @@ mod tests {
                 ai_connections: None,
                 role_assignments: None,
                 role_policies: None,
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -13566,6 +13627,7 @@ mod tests {
                 ai_connections: None,
                 role_assignments: None,
                 role_policies: None,
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -13732,6 +13794,7 @@ mod tests {
                 ai_connections: None,
                 role_assignments: None,
                 role_policies: None,
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -13943,6 +14006,7 @@ mod tests {
                 ai_connections: None,
                 role_assignments: None,
                 role_policies: None,
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -14037,6 +14101,7 @@ mod tests {
                 ai_connections: None,
                 role_assignments: None,
                 role_policies: None,
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -14140,6 +14205,7 @@ mod tests {
                 ai_connections: None,
                 role_assignments: None,
                 role_policies: None,
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -14250,6 +14316,7 @@ mod tests {
                 ai_connections: None,
                 role_assignments: None,
                 role_policies: None,
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -14339,6 +14406,7 @@ mod tests {
                 ai_connections: None,
                 role_assignments: None,
                 role_policies: None,
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,
@@ -14609,6 +14677,7 @@ mod tests {
                 }
             ]),
             role_policies: default_role_policies(),
+            automation_policy: default_automation_policy(),
             conductor_config: None,
             worktree_root: None,
             worktree_setup: None,
@@ -14659,6 +14728,7 @@ mod tests {
                 }
             ]),
             role_policies: default_role_policies(),
+            automation_policy: default_automation_policy(),
             conductor_config: None,
             worktree_root: None,
             worktree_setup: None,
@@ -14725,6 +14795,7 @@ mod tests {
                 }
             ]),
             role_policies: default_role_policies(),
+            automation_policy: default_automation_policy(),
             conductor_config: None,
             worktree_root: None,
             worktree_setup: None,
@@ -14791,6 +14862,7 @@ mod tests {
                 }
             ]),
             role_policies: default_role_policies(),
+            automation_policy: default_automation_policy(),
             conductor_config: None,
             worktree_root: None,
             worktree_setup: None,
@@ -14852,6 +14924,7 @@ mod tests {
                 }
             ]),
             role_policies: default_role_policies(),
+            automation_policy: default_automation_policy(),
             conductor_config: None,
             worktree_root: None,
             worktree_setup: None,
@@ -15185,6 +15258,7 @@ mod tests {
                 ai_connections: None,
                 role_assignments: None,
                 role_policies: Some(Value::Array(policies)),
+                automation_policy: None,
                 conductor_config: None,
                 worktree_root: None,
                 worktree_setup: None,

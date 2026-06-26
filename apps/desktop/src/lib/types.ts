@@ -72,11 +72,19 @@ export interface OrchestratorSettings {
   model?: string | null;
 }
 
+export interface AutomationPolicy {
+  backgroundQueueWorkerEnabled: boolean;
+  supervisorReconcileEnabled: boolean;
+  requireExplicitHostRun: boolean;
+  autoHandoffEnabled: boolean;
+}
+
 export interface EffectiveSettings {
   rolePresets: unknown;
   aiConnections: AiConnection[];
   roleAssignments: RoleAssignment[];
   rolePolicies: RolePolicy[];
+  automationPolicy: AutomationPolicy;
   conductorConfig: ConductorConfig | null;
   worktreeRoot: string | null;
   worktreeSetup: unknown | null;
@@ -616,6 +624,7 @@ export interface ProjectSettingsPatch {
   aiConnections?: AiConnection[];
   roleAssignments?: RoleAssignment[];
   rolePolicies?: RolePolicy[];
+  automationPolicy?: AutomationPolicy;
   conductorConfig?: ConductorConfig | null;
   worktreeRoot?: string | null;
   worktreeSetup?: unknown | null;
