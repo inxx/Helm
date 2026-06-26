@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseOrchestratorReply, parsePlanTasks, stripPlanJson } from "./planParse.ts";
+import { dedupePlanTasks, parseOrchestratorReply, parsePlanTasks, stripPlanJson } from "./planParse.ts";
 
 test("parsePlanTasks reads a fenced json block, ignoring surrounding prose", () => {
   const text = "여기 계획입니다:\n```json\n{\"tasks\":[{\"title\":\"로그인 UI\",\"description\":\"폼 작성\",\"role\":\"coder\"}]}\n```\n끝.";
@@ -22,6 +22,17 @@ test("parsePlanTasks accepts a bare array", () => {
 test("parsePlanTasks drops entries without a usable title", () => {
   const tasks = parsePlanTasks('{"tasks":[{"title":"  "},{"description":"no title"},{"title":"keep"}]}');
   assert.deepEqual(tasks, [{ title: "keep", description: undefined, role: undefined }]);
+});
+
+test("dedupePlanTasks drops titles already present (normalized) and in-batch repeats", () => {
+  const tasks = [
+    { title: "리스트 패리티 반영" }, // already exists
+    { title: "  배너 슬라이드  타이틀 " }, // whitespace/case variant of existing
+    { title: "새 작업" },
+    { title: "새 작업" }, // in-batch repeat of the one above
+  ];
+  const fresh = dedupePlanTasks(tasks, ["리스트 패리티 반영", "배너 슬라이드 타이틀"]);
+  assert.deepEqual(fresh.map((task) => task.title), ["새 작업"]);
 });
 
 test("parsePlanTasks returns null on invalid or empty input", () => {

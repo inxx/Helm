@@ -6890,6 +6890,36 @@ pub fn find_pr_ref(conn: &Connection, task_id: &str) -> CommandResult<Option<(St
     }))
 }
 
+/// MergeWaiting 상태이면서 PR 참조가 달린 (task_id, pr_number) 목록.
+/// 외부 머지 감지 폴링이 GitHub와 대조할 후보다.
+pub fn tasks_awaiting_merge_with_pr(
+    conn: &Connection,
+    project_id: &str,
+) -> CommandResult<Vec<(String, i64)>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.id, r.ref_title FROM tasks t
+             JOIN task_external_refs r ON r.task_id = t.id
+             WHERE t.project_id = ?1 AND t.status = 'MergeWaiting'
+               AND r.ref_type = 'Url' AND r.ref_title LIKE 'PullRequest %'",
+        )
+        .map_err(|err| CommandError::database("머지 대기 태스크를 조회하지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|err| CommandError::database("머지 대기 태스크를 조회하지 못했습니다.", err))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (task_id, title) =
+            row.map_err(|err| CommandError::database("머지 대기 태스크를 조회하지 못했습니다.", err))?;
+        if let Ok(number) = title.trim_start_matches("PullRequest #").trim().parse::<i64>() {
+            out.push((task_id, number));
+        }
+    }
+    Ok(out)
+}
+
 pub fn insert_pr_ref(
     conn: &Connection,
     project_id: &str,
@@ -11643,6 +11673,44 @@ mod tests {
         .expect("phase9");
         apply_migration(conn, 10, "phase10_terminal_orca_parity", PHASE10_MIGRATION)
             .expect("phase10");
+    }
+
+    #[test]
+    fn tasks_awaiting_merge_with_pr_returns_only_mergewaiting_with_pr_number() {
+        let mut conn = Connection::open_in_memory().expect("in-memory db");
+        run_migrations(&mut conn).expect("migrate");
+        let ts = "2026-06-12T00:00:00Z";
+        let project_id = new_id();
+        conn.execute(
+            "INSERT INTO projects (id, root_path, name, base_branch, created_at, updated_at)
+             VALUES (?1, '/tmp/helm', 'Helm', 'main', ?2, ?2)",
+            params![&project_id, ts],
+        )
+        .expect("project");
+
+        // MergeWaiting + PR ref -> included.
+        let waiting = new_id();
+        // MergeWaiting, no PR ref -> excluded.
+        let waiting_no_pr = new_id();
+        // Coding + PR ref -> excluded (wrong status).
+        let coding = new_id();
+        for (id, status) in [
+            (&waiting, "MergeWaiting"),
+            (&waiting_no_pr, "MergeWaiting"),
+            (&coding, "Coding"),
+        ] {
+            conn.execute(
+                "INSERT INTO tasks (id, project_id, title, description, status, sort_order, created_at, updated_at, last_transition_at)
+                 VALUES (?1, ?2, 't', '', ?3, 0, ?4, ?4, ?4)",
+                params![id, &project_id, status, ts],
+            )
+            .expect("task");
+        }
+        insert_pr_ref(&conn, &project_id, &waiting, "https://x/pull/42", 42).expect("pr ref");
+        insert_pr_ref(&conn, &project_id, &coding, "https://x/pull/7", 7).expect("pr ref");
+
+        let result = tasks_awaiting_merge_with_pr(&conn, &project_id).expect("query");
+        assert_eq!(result, vec![(waiting, 42)]);
     }
 
     #[test]

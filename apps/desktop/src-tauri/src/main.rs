@@ -2540,7 +2540,25 @@ fn run_project_queue_worker(
     project_id: String,
     stop: Arc<AtomicBool>,
 ) {
+    // ponytail: 외부 머지 감지는 gh 호출이라 매 틱(800ms)은 과하다. 20s마다만 폴링.
+    let mut last_merge_poll: Option<Instant> = None;
     while !stop.load(Ordering::SeqCst) {
+        if last_merge_poll
+            .map(|t| t.elapsed() >= Duration::from_secs(20))
+            .unwrap_or(true)
+        {
+            last_merge_poll = Some(Instant::now());
+            if let Err(error) = reconcile_merged_prs(&app, &context, &project_id) {
+                let _ = app.emit(
+                    "agent-run://updated",
+                    json!({
+                        "projectId": project_id,
+                        "status": "MergedPrReconcileFailed",
+                        "error": command_error_summary(&error)
+                    }),
+                );
+            }
+        }
         let queued = db::open_existing_db(&context.db_path).and_then(|conn| {
             if db::has_running_agent_run(&conn, &project_id)? {
                 // 큐가 막혀 있으면, 세션 중 죽은 host run thread가 남긴 Running 좀비를 회수한다.
@@ -2617,6 +2635,47 @@ fn run_project_queue_worker(
             }
         }
     }
+}
+
+/// 외부(GitHub 웹/CLI)에서 머지된 PR을 감지해 MergeWaiting task를 Merged로 넘긴다.
+/// in-app 머지 버튼은 task 상태를 갱신하지 않으므로, 이 폴링이 유일한 외부 머지 반영 경로다.
+fn reconcile_merged_prs(
+    app: &AppHandle,
+    context: &ProjectContext,
+    project_id: &str,
+) -> CommandResult<()> {
+    let mut conn = db::open_existing_db(&context.db_path)?;
+    let awaiting = db::tasks_awaiting_merge_with_pr(&conn, project_id)?;
+    if awaiting.is_empty() {
+        return Ok(());
+    }
+    let merged = git::merged_pr_numbers(Path::new(&context.root_path));
+    if merged.is_empty() {
+        return Ok(());
+    }
+    for (task_id, number) in awaiting {
+        if !merged.contains(&number) {
+            continue;
+        }
+        db::update_task_status(
+            &mut conn,
+            project_id,
+            &task_id,
+            "Merged",
+            Some(format!("PR #{number} 외부 머지 감지")),
+        )?;
+        let _ = app.emit(
+            "agent-run://updated",
+            json!({
+                "projectId": project_id,
+                "taskId": task_id,
+                "status": "Merged",
+                "source": "merged-pr-reconcile",
+                "prNumber": number
+            }),
+        );
+    }
+    Ok(())
 }
 
 fn reconcile_project_next_role_gap(

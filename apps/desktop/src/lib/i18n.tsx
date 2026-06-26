@@ -167,6 +167,7 @@ export type MessageKey =
   | "sessions.deleteProject"
   | "sessions.noSessions"
   | "sessions.providerUnknown"
+  | "sessions.epicUntitled"
   | "sessions.addProject"
   | "sessions.chatAria"
   | "sessions.terminal"
@@ -351,6 +352,7 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "sessions.deleteProject": "Delete project",
     "sessions.noSessions": "No sessions yet.",
     "sessions.providerUnknown": "provider unknown",
+    "sessions.epicUntitled": "Untitled plan",
     "sessions.addProject": "Add project",
     "sessions.chatAria": "Session chat detail",
     "sessions.terminal": "Terminal",
@@ -534,6 +536,7 @@ const messages: Record<AppLanguage, Record<MessageKey, string>> = {
     "sessions.deleteProject": "프로젝트 삭제",
     "sessions.noSessions": "아직 세션이 없습니다.",
     "sessions.providerUnknown": "provider 미정",
+    "sessions.epicUntitled": "제목 없는 계획",
     "sessions.addProject": "프로젝트 추가",
     "sessions.chatAria": "세션 채팅 상세",
     "sessions.terminal": "터미널",

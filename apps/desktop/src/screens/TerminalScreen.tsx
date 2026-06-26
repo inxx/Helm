@@ -24,7 +24,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { shortenPath, type RecentProject } from "../lib/recents";
-import { createTerminalPane, terminalPanesForProject, type TerminalPaneState } from "../lib/terminalPanes";
+import { createTerminalPane, terminalPaneFromSession, type TerminalPaneState } from "../lib/terminalPanes";
 import type {
   NodeRuntimeSummary,
   ProjectSnapshot,
@@ -105,6 +105,7 @@ export const TerminalScreen = memo(function TerminalScreen({
   const autocompleteRefs = useRef(new Map<string, TerminalAutocompleteSuggestion>());
   const lastOutputSeqRefs = useRef(new Map<string, number>());
   const restoringPaneIds = useRef(new Set<string>());
+  const panesInitialized = useRef(false);
   const pendingOutputRefs = useRef(new Map<string, TerminalPtyOutput[]>());
   const savedScriptMenuRef = useRef<HTMLElement | null>(null);
   const [autocompleteByPane, setAutocompleteByPane] = useState<
@@ -152,18 +153,14 @@ export const TerminalScreen = memo(function TerminalScreen({
     };
   }, [savedScriptMenuOpen]);
 
+  // 활성 프로젝트 전환 시: 명령 히스토리와 빠른 명령만 다시 로드한다. pane은 프로젝트와 무관하게 유지된다.
   useEffect(() => {
     if (!snapshot) {
-      disposeAllPanes({ stopPty: false });
-      setPanes([]);
-      setActivePaneId(null);
+      setSavedScripts([]);
       return;
     }
     let cancelled = false;
     commandHistoryRef.current = loadTerminalCommandHistory(snapshot.project.id);
-    setPaneNames(loadTerminalPaneNames(snapshot.project.id));
-    setEditingPaneNameId(null);
-    setPaneNameDraft("");
     setSavedScripts([]);
     setSavedScriptsBusy(true);
     void api
@@ -177,15 +174,25 @@ export const TerminalScreen = memo(function TerminalScreen({
       .finally(() => {
         if (!cancelled) setSavedScriptsBusy(false);
       });
-    inputStateRefs.current.clear();
-    autocompleteRefs.current.clear();
-    setAutocompleteByPane({});
-    disposeAllPanes({ stopPty: false });
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot?.project.id]);
+
+  // pane은 모든 프로젝트에 걸쳐 한 번만 로드하고 프로젝트 전환에도 그대로 유지한다.
+  useEffect(() => {
+    if (!snapshot || panesInitialized.current) return;
+    panesInitialized.current = true;
+    setPaneNames(loadTerminalPaneNames());
+    let cancelled = false;
     void api
-      .listTerminalPtys(snapshot.project.id)
+      .listTerminalPtys()
       .then((sessions) => {
         if (cancelled) return;
-        const nextPanes = terminalPanesForProject(snapshot.project.id, snapshot.project.rootPath, sessions);
+        const nextPanes =
+          sessions.length > 0
+            ? sessions.map(terminalPaneFromSession)
+            : [createTerminalPane(snapshot.project.id, snapshot.project.rootPath, null)];
         setPanes(nextPanes);
         setActivePaneId(nextPanes[0]?.id ?? null);
       })
@@ -340,7 +347,12 @@ export const TerminalScreen = memo(function TerminalScreen({
     );
   }
 
-  const project = snapshot.project;
+  function paneProject(pane: TerminalPaneState): { name: string; rootPath: string } {
+    if (snapshot && pane.projectId === snapshot.project.id) return snapshot.project;
+    const recent = recents.find((candidate) => candidate.id === pane.projectId);
+    if (recent) return { name: recent.name, rootPath: recent.rootPath };
+    return snapshot?.project ?? { name: pane.cwd, rootPath: pane.cwd };
+  }
 
   function updatePane(id: string, patch: Partial<TerminalPaneState>) {
     setPanes((current) => current.map((pane) => (pane.id === id ? { ...pane, ...patch } : pane)));
@@ -363,13 +375,12 @@ export const TerminalScreen = memo(function TerminalScreen({
   }
 
   function commitRenamePane(paneId: string) {
-    if (!snapshot) return;
     const name = normalizeTerminalPaneName(paneNameDraft);
     const nextNames = { ...paneNames };
     if (name) nextNames[paneId] = name;
     else delete nextNames[paneId];
     setPaneNames(nextNames);
-    saveTerminalPaneNames(snapshot.project.id, nextNames);
+    saveTerminalPaneNames(nextNames);
     setEditingPaneNameId(null);
     setPaneNameDraft("");
   }
@@ -404,7 +415,7 @@ export const TerminalScreen = memo(function TerminalScreen({
   async function loadPaneDirectories(pane: TerminalPaneState) {
     if (!snapshot) return;
     try {
-      const directories = await api.listTerminalDirectories(snapshot.project.id, pane.cwd);
+      const directories = await api.listTerminalDirectories(pane.projectId ?? snapshot.project.id, pane.cwd);
       setDirectoriesByPane((current) => ({ ...current, [pane.id]: directories }));
       setControlError(null);
     } catch (err) {
@@ -424,11 +435,11 @@ export const TerminalScreen = memo(function TerminalScreen({
 
     const nextPanes = panes.filter((pane) => pane.id !== id);
     setPanes(nextPanes);
-    if (snapshot && paneNames[id]) {
+    if (paneNames[id]) {
       const nextNames = { ...paneNames };
       delete nextNames[id];
       setPaneNames(nextNames);
-      saveTerminalPaneNames(snapshot.project.id, nextNames);
+      saveTerminalPaneNames(nextNames);
     }
     if (selectedPaneId === id) {
       setActivePaneId(nextPanes[Math.min(targetIndex, nextPanes.length - 1)]?.id ?? null);
@@ -758,6 +769,7 @@ export const TerminalScreen = memo(function TerminalScreen({
     const autocomplete = autocompleteByPane[pane.id] ?? null;
     const cwdOptions = cwdOptionsForPane(pane, directoriesByPane[pane.id] ?? []);
     const isSelected = selectedPaneId === pane.id;
+    const paneOwner = paneProject(pane);
     const paneRuntimeMissing =
       pane.nodeBinPath !== null &&
       !nodeRuntimes.some((runtime) => runtime.binPath === pane.nodeBinPath);
@@ -781,8 +793,8 @@ export const TerminalScreen = memo(function TerminalScreen({
               aria-hidden="true"
             />
             <strong>pane {index + 1}</strong>
-            <span className="terminal-pane-project" title={project.rootPath}>
-              {project.name}
+            <span className="terminal-pane-project" title={paneOwner.rootPath}>
+              {paneOwner.name}
             </span>
             <button
               className="terminal-project-folder-button"
@@ -791,7 +803,7 @@ export const TerminalScreen = memo(function TerminalScreen({
               type="button"
             >
               <FolderOpen size={12} aria-hidden="true" />
-              <span>{shortenPath(project.rootPath)}</span>
+              <span>{shortenPath(paneOwner.rootPath)}</span>
             </button>
             <label className="terminal-pane-path" title={pane.cwd}>
               <Folder size={12} aria-hidden="true" />
@@ -1350,9 +1362,9 @@ function terminalCommandHistoryKey(projectId: string): string {
   return `helm.terminal.commandHistory.${projectId}`;
 }
 
-function loadTerminalPaneNames(projectId: string): Record<string, string> {
+function loadTerminalPaneNames(): Record<string, string> {
   try {
-    const raw = localStorage.getItem(terminalPaneNamesKey(projectId));
+    const raw = localStorage.getItem(terminalPaneNamesKey());
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
@@ -1366,16 +1378,16 @@ function loadTerminalPaneNames(projectId: string): Record<string, string> {
   }
 }
 
-function saveTerminalPaneNames(projectId: string, names: Record<string, string>): void {
+function saveTerminalPaneNames(names: Record<string, string>): void {
   try {
-    localStorage.setItem(terminalPaneNamesKey(projectId), JSON.stringify(names));
+    localStorage.setItem(terminalPaneNamesKey(), JSON.stringify(names));
   } catch {
     // pane 이름도 편의 기능이라 저장 실패가 터미널 사용을 막으면 안 된다.
   }
 }
 
-function terminalPaneNamesKey(projectId: string): string {
-  return `helm.terminal.paneNames.${projectId}`;
+function terminalPaneNamesKey(): string {
+  return "helm.terminal.paneNames";
 }
 
 function normalizeTerminalPaneName(value: string): string {

@@ -99,6 +99,24 @@ const EMPTY_COLUMN_MESSAGE_KEYS: Record<TaskStatus, Parameters<ReturnType<typeof
   Blocked: "tasks.column.Blocked.empty",
 };
 
+// 보드 컬럼. Merged와 Done은 한 컬럼("완료")으로 합쳐 보여준다 — Merged가 사실상 완료이고
+// Done은 PR 없는 폴백 종료라 사용자 관점에선 동일하다. key는 대표 상태(헤더/힌트/빈칸 문구용).
+const BOARD_COLUMNS: { key: TaskStatus; statuses: TaskStatus[] }[] = [
+  { key: "Planned", statuses: ["Planned"] },
+  { key: "Ready", statuses: ["Ready"] },
+  { key: "Coding", statuses: ["Coding"] },
+  { key: "PlanVerification", statuses: ["PlanVerification"] },
+  { key: "CodeReview", statuses: ["CodeReview"] },
+  { key: "Testing", statuses: ["Testing"] },
+  { key: "MergeWaiting", statuses: ["MergeWaiting"] },
+  { key: "Done", statuses: ["Merged", "Done"] },
+  { key: "Blocked", statuses: ["Blocked"] },
+];
+
+function columnKeyForStatus(status: TaskStatus): TaskStatus {
+  return BOARD_COLUMNS.find((column) => column.statuses.includes(status))?.key ?? status;
+}
+
 interface TaskBoardProps {
   tasks: TaskSummary[];
   taskRuns?: Record<string, AgentRunSummary[]>;
@@ -118,14 +136,22 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
 
   useEffect(() => {
     if (!focusStatus) return;
-    const column = boardRef.current?.querySelector<HTMLElement>(`[data-status="${focusStatus}"]`);
+    const column = boardRef.current?.querySelector<HTMLElement>(
+      `[data-status="${columnKeyForStatus(focusStatus)}"]`,
+    );
     column?.scrollIntoView({ block: "nearest", inline: "start" });
   }, [focusStatus]);
 
   return (
     <div className="task-board" data-focus-status={focusStatus ?? undefined} ref={boardRef}>
-      {TASK_STATUS_ORDER.map((status) => {
-        const columnTasks = tasksByStatus[status];
+      {BOARD_COLUMNS.map((column) => {
+        const status = column.key;
+        const columnTasks = column.statuses.flatMap((member) => tasksByStatus[member]);
+        if (column.statuses.length > 1) {
+          columnTasks.sort(
+            (a, b) => a.sortOrder - b.sortOrder || Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
+          );
+        }
         const stage = STATUS_STAGE[status];
         const columnTone = columnToneForTasks(columnTasks, taskRuns);
         return (
@@ -147,8 +173,10 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
               {columnTasks.map((task) => {
                 const externalRef = task.externalRefs[0];
                 const activeRun = activeRunForTask(taskRuns[task.id] ?? []);
+                // 합친 컬럼(완료) 안에서 Merged/Done 카드가 각자 라벨을 유지하도록 pill·flow는 task.status 기준.
+                const taskStage = STATUS_STAGE[task.status];
                 // 활성 run이 있으면 run 박스가 역할·상태를 보여주므로 flow 줄은 idle일 때만 쓴다.
-                const flowLabel = stage.next;
+                const flowLabel = taskStage.next;
                 const flowCaption = t("tasks.card.next");
                 const taskAriaLabel = taskCardAriaLabel(task, activeRun, flowLabel, t);
                 const projectLabel = projectLabels?.[task.projectId];
@@ -163,7 +191,7 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
                     type="button"
                   >
                     <div className="task-card-topline">
-                      <span className={`task-stage-pill ${stage.tone}`}>{stage.label}</span>
+                      <span className={`task-stage-pill ${taskStage.tone}`}>{taskStage.label}</span>
                       <small>{relativeTime(task.lastTransitionAt)}</small>
                     </div>
                     {projectLabel ? <span className="task-card-project">{projectLabel}</span> : null}

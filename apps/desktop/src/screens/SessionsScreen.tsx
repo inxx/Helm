@@ -486,6 +486,24 @@ export function SessionsScreen({
     if (!snapshot) return;
     const tasks = parsePlanTasks(turnText);
     if (!tasks) return;
+    // The planner re-runs statelessly on each follow-up and re-proposes tasks it already emitted,
+    // which is the "세션이 계속 생긴다" pile-up. Drop tasks whose title already exists in the project
+    // (and any in-batch repeats) before creating anything.
+    const freshTasks = dedupePlanTasks(tasks, snapshot.tasks.map((task) => task.title));
+    const skippedDupes = tasks.length - freshTasks.length;
+    if (freshTasks.length === 0) {
+      setOrchestratorMessages((items) => [
+        ...items,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: language === "ko"
+            ? `이미 만든 작업과 모두 중복이라 새로 만들지 않았습니다 (${skippedDupes}개 건너뜀).`
+            : `All ${skippedDupes} proposed task(s) already exist, so nothing new was created.`,
+        },
+      ]);
+      return;
+    }
     const proceed = window.confirm(language === "ko" ? "이대로 진행할까요? 설계자에게 넘겨 작업을 시작합니다." : "Proceed? This hands the requirement to the planner and starts the task.");
     if (!proceed) return;
     const projectId = snapshot.project.id;
@@ -494,13 +512,13 @@ export function SessionsScreen({
     // back to ungrouped tasks (epicId stays null) rather than dropping the work.
     let epicId: string | null = null;
     try {
-      epicId = (await api.createEpic(projectId, deriveEpicTitle(goalText, tasks))).id;
+      epicId = (await api.createEpic(projectId, deriveEpicTitle(goalText, freshTasks))).id;
     } catch {
       /* group-less fallback */
     }
     const created: string[] = [];
     const startFailed: string[] = [];
-    for (const task of tasks) {
+    for (const task of freshTasks) {
       try {
         const description = [task.description, task.role ? `(role: ${task.role})` : null].filter(Boolean).join("\n\n") || task.title;
         const newTask = await api.createTask(projectId, {
@@ -535,6 +553,9 @@ export function SessionsScreen({
           : (language === "ko" ? "작업 생성에 실패했습니다." : "Failed to create tasks."))
           + (startFailed.length
             ? (language === "ko" ? `\n\n⚠️ 실행을 시작하지 못한 작업:\n- ${startFailed.join("\n- ")}` : `\n\n⚠️ Failed to start:\n- ${startFailed.join("\n- ")}`)
+            : "")
+          + (skippedDupes
+            ? (language === "ko" ? `\n\n(중복 ${skippedDupes}개는 건너뜀)` : `\n\n(skipped ${skippedDupes} duplicate(s))`)
             : ""),
       },
     ]);
@@ -923,7 +944,13 @@ export function SessionsScreen({
                     title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
                     language={language}
                   >
-                    <p>{text}</p>
+                    {message.role === "assistant" ? (
+                      <div className="session-markdown">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+                      </div>
+                    ) : (
+                      <p>{text}</p>
+                    )}
                   </SessionMessage>
                 );
               })}
@@ -1095,7 +1122,13 @@ export function SessionsScreen({
                         title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
                         language={language}
                       >
-                        <p>{text}</p>
+                        {message.role === "assistant" ? (
+                          <div className="session-markdown">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+                          </div>
+                        ) : (
+                          <p>{text}</p>
+                        )}
                       </SessionMessage>
                     );
                   })}

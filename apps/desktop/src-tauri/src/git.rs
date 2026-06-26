@@ -223,6 +223,21 @@ pub fn merge_pull_request(root: &Path, number: i64) -> CommandResult<()> {
     )
 }
 
+/// 외부(GitHub 웹/CLI)에서 머지된 PR 번호 목록. gh가 없거나 인증 안 됐으면 빈 목록.
+/// ponytail: 단일 `gh pr list --state merged` 호출로 전부 커버. PR별 view는 안 한다.
+pub fn merged_pr_numbers(root: &Path) -> Vec<i64> {
+    let output = Command::new("gh")
+        .current_dir(root)
+        .args(["pr", "list", "--state", "merged", "--limit", "50", "--json", "number"])
+        .output();
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    let parsed: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap_or_default();
+    parsed.iter().filter_map(|v| v["number"].as_i64()).collect()
+}
+
 /// Open a PR from `head` into `base`. Returns the PR URL printed on stdout.
 /// `--head` is explicit so the PR never originates from `base` (e.g. main).
 /// 저장소의 PR 템플릿을 표준 위치에서 찾아 본문을 반환한다. 없으면 None.

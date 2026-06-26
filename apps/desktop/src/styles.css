@@ -795,6 +795,72 @@ h3 {
   padding-left: 10px;
 }
 
+.session-epic-group {
+  display: grid;
+  gap: 3px;
+}
+
+.session-epic-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  padding: 7px 10px;
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.session-epic-summary::-webkit-details-marker {
+  display: none;
+}
+
+.session-epic-summary::before {
+  content: "▸";
+  font-size: 9px;
+  color: var(--text-muted);
+  transition: transform 0.12s ease;
+}
+
+.session-epic-group[open] > .session-epic-summary::before {
+  transform: rotate(90deg);
+}
+
+.session-epic-summary:hover {
+  background: var(--surface);
+}
+
+.session-epic-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-epic-count {
+  flex: none;
+  min-width: 18px;
+  text-align: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.session-epic-children {
+  display: grid;
+  gap: 3px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border, var(--slate));
+  margin-left: 5px;
+}
+
 .session-row {
   display: grid;
   grid-template-columns: 8px minmax(0, 1fr);
@@ -947,7 +1013,7 @@ h3 {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--background);
-  color: var(--muted);
+  color: var(--text-muted);
   white-space: nowrap;
 }
 

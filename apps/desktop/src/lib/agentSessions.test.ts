@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collapseSessionsByTask, groupAgentSessionsForBoard, toAgentSessionBoardCard } from "./agentSessions.ts";
+import { collapseSessionsByTask, groupAgentSessionsForBoard, groupSessionsByEpic, toAgentSessionBoardCard } from "./agentSessions.ts";
 import type { AgentSessionSummary } from "./types";
 
 test("toAgentSessionBoardCard keeps board cards summary-only", () => {
@@ -65,6 +65,29 @@ test("collapseSessionsByTask keeps one row per task, individuals for null taskId
     collapsed.map((item) => item.id),
     ["tester-run", "other-task", "loose-1", "loose-2"],
   );
+});
+
+test("groupSessionsByEpic nests epic tasks, keeps solo rows, preserves recency order", () => {
+  const epicOf: Record<string, string | null> = { "task-a": "epic-1", "task-b": "epic-1", "task-c": null };
+  const groups = groupSessionsByEpic(
+    [
+      session({ id: "s-a", taskId: "task-a" }), // newest → epic-1 placed here
+      session({ id: "s-loose", taskId: null }),
+      session({ id: "s-b", taskId: "task-b" }), // same epic, joins existing group
+      session({ id: "s-c", taskId: "task-c" }), // task with no epic → solo
+    ],
+    (taskId) => epicOf[taskId] ?? null,
+    (id) => (id === "epic-1" ? "패리티 갭" : null),
+  );
+
+  assert.deepEqual(
+    groups.map((g) => g.epicId),
+    ["epic-1", null, null],
+  );
+  assert.equal(groups[0].epicTitle, "패리티 갭");
+  assert.deepEqual(groups[0].sessions.map((s) => s.id), ["s-a", "s-b"]);
+  assert.deepEqual(groups[1].sessions.map((s) => s.id), ["s-loose"]);
+  assert.deepEqual(groups[2].sessions.map((s) => s.id), ["s-c"]);
 });
 
 function session(overrides: Partial<AgentSessionSummary>): AgentSessionSummary {

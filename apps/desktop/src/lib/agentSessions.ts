@@ -76,6 +76,37 @@ export function collapseSessionsByTask(sessions: AgentSessionSummary[]): AgentSe
   return collapsed;
 }
 
+export interface SessionEpicGroup {
+  epicId: string | null;
+  epicTitle: string | null;
+  sessions: AgentSessionSummary[];
+}
+
+// Group sidebar sessions under their epic so one planning conversation (= one epic) shows as a
+// single collapsible parent with its task sessions nested, instead of N flat rows. Sessions must
+// arrive most-recent-first: a group is placed at its first-seen session, so the order stays by
+// recency. Sessions with no epic get a unique key and stay standalone rows.
+export function groupSessionsByEpic(
+  sessions: AgentSessionSummary[],
+  epicIdForTask: (taskId: string) => string | null,
+  epicTitleById: (epicId: string) => string | null,
+): SessionEpicGroup[] {
+  const order: string[] = [];
+  const groups = new Map<string, SessionEpicGroup>();
+  for (const session of sessions) {
+    const epicId = session.taskId ? epicIdForTask(session.taskId) : null;
+    const key = epicId ?? `solo:${session.id}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { epicId, epicTitle: epicId ? epicTitleById(epicId) : null, sessions: [] };
+      groups.set(key, group);
+      order.push(key);
+    }
+    group.sessions.push(session);
+  }
+  return order.map((key) => groups.get(key)!);
+}
+
 function providerLabel(session: AgentSessionSummary): string {
   const provider = session.provider?.trim();
   const model = session.model?.trim();
