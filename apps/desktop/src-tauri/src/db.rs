@@ -11430,6 +11430,13 @@ fn diff_consistency_check(
         .cloned()
         .collect::<Vec<_>>();
 
+    // 보고만 하고 실제 diff에 없는 파일(extra_files)이 진짜 위험(환각/잘못된 worktree)이다.
+    // 실제로 더 고쳤는데 changedFiles에 덜 적은 under-report(missing_files만 존재)는
+    // 정상 작업이므로 차단하지 않는다.
+    if extra_files.is_empty() {
+        return None;
+    }
+
     Some(DiffConsistencyCheck {
         actual_files: actual_files.into_iter().collect(),
         reported_files: reported_files.into_iter().collect(),
@@ -11653,6 +11660,34 @@ mod tests {
             },
         )
         .expect("create task")
+    }
+
+    fn git_file(path: &str) -> GitFileStatus {
+        GitFileStatus {
+            path: path.to_string(),
+            status: "M".to_string(),
+            staged: false,
+            renamed_from: None,
+        }
+    }
+
+    #[test]
+    fn diff_consistency_only_blocks_on_reported_files_absent_from_diff() {
+        let result = json!({ "status": "pass", "changedFiles": ["a.tsx"] });
+
+        // under-report: 실제로 더 고쳤지만 changedFiles에 덜 적음 → 통과(차단 안 함)
+        let actual = vec![git_file("a.tsx"), git_file("b.json"), git_file("c.json")];
+        assert!(diff_consistency_check("coder", Some(&result), &actual).is_none());
+
+        // 정확히 일치 → 통과
+        let actual = vec![git_file("a.tsx")];
+        assert!(diff_consistency_check("coder", Some(&result), &actual).is_none());
+
+        // over-report(환각/잘못된 worktree): 보고했지만 실제 diff에 없음 → 차단
+        let actual = vec![git_file("b.json")];
+        let check = diff_consistency_check("coder", Some(&result), &actual)
+            .expect("reported file absent from diff must block");
+        assert_eq!(check.extra_files, vec!["a.tsx".to_string()]);
     }
 
     #[test]
