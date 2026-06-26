@@ -2066,6 +2066,7 @@ pub fn prepare_role_context(
     context_pack.push_str(&build_upstream_dossiers_markdown(
         conn, root, project_id, task_id, role_id,
     ));
+    context_pack.push_str(&review_rework_feedback_markdown(conn, project_id, &task, role_id)?);
     let context_manifest = build_context_manifest(
         root,
         &task,
@@ -2287,7 +2288,7 @@ pub fn reconcile_next_role_gap(
         if has_active_run(conn, project_id, &task.id)? {
             continue;
         }
-        if has_role_run(conn, project_id, &task.id, role_id)? {
+        if has_role_run(conn, project_id, &task.id, role_id, &task.last_transition_at)? {
             continue;
         }
         return prepare_next_role_context(conn, root, project_id, &task.id).map(Some);
@@ -5043,6 +5044,17 @@ pub fn list_conversation_messages(
     collect_rows(rows, "대화 메시지를 읽지 못했습니다.")
 }
 
+/// 프로젝트 단위 대화 스레드를 전부 비운다. append-only라 개별 삭제 UI는 두지 않고
+/// "채팅 비우기" 한 번으로 전체를 지운다. task 삭제와 달리 run/event는 건드리지 않는다.
+pub fn clear_conversation_messages(conn: &Connection, project_id: &str) -> CommandResult<()> {
+    conn.execute(
+        "DELETE FROM conversation_messages WHERE project_id = ?1",
+        params![project_id],
+    )
+    .map_err(|err| CommandError::database("대화 메시지를 비우지 못했습니다.", err))?;
+    Ok(())
+}
+
 /// 대화 메시지를 스레드 끝에 덧붙인다. source_run_id가 이미 기록된 run이면(중복 폴링)
 /// INSERT OR IGNORE로 건너뛰고 None을 돌려준다.
 pub fn append_conversation_message(
@@ -5491,8 +5503,10 @@ pub fn decide_approval(
             "Blocked"
         }),
         // 리뷰 진행 승인: 승인 시 CodeReview 유지(approve_approval이 PR 생성+리뷰어 실행),
-        // 반려 시 Blocked로 보내 사용자 결정을 기다린다.
-        "ReviewApproval" if decision == "Rejected" => Some("Blocked"),
+        // 반려 시 Ready로 되돌려 추가 작업을 받는다. epic 게이트라 anchor뿐 아니라 함께
+        // 검토된 형제도 아래에서 일괄 Ready로 되돌린다. coder가 다시 돌고(반려 사유를 피드백으로
+        // 받음) → 재검토까지 자동으로 흐른다.
+        "ReviewApproval" if decision == "Rejected" => Some("Ready"),
         _ => None,
     };
     let task_before = if next_task_status.is_some() {
@@ -5544,7 +5558,7 @@ pub fn decide_approval(
             "decisionReason": reason
         }),
     )?;
-    if let (Some(status), Some(task)) = (next_task_status, task_before) {
+    if let (Some(status), Some(task)) = (next_task_status, task_before.as_ref()) {
         tx.execute(
             "UPDATE tasks
              SET status = ?1, status_reason = ?2, updated_at = ?3, last_transition_at = ?3
@@ -5566,6 +5580,38 @@ pub fn decide_approval(
                 "source": "approval"
             }),
         )?;
+
+        // epic 게이트 리뷰 반려: anchor와 함께 검토된 형제(CodeReview)도 일괄 Ready로 되돌려
+        // epic 전체가 추가 작업 → 재검토 사이클을 다시 탄다.
+        if approval.approval_type == "ReviewApproval" && decision == "Rejected" {
+            if let Some(epic_id) = task.epic_id.as_deref() {
+                let reworked = tx
+                    .execute(
+                        "UPDATE tasks
+                         SET status = 'Ready', status_reason = ?1, updated_at = ?2, last_transition_at = ?2
+                         WHERE project_id = ?3 AND epic_id = ?4 AND status = 'CodeReview' AND id != ?5",
+                        params![reason, timestamp, project_id, epic_id, task.id],
+                    )
+                    .map_err(|err| {
+                        CommandError::database("epic 형제 태스크 상태를 되돌리지 못했습니다.", err)
+                    })?;
+                if reworked > 0 {
+                    insert_audit(
+                        &tx,
+                        project_id,
+                        "Epic",
+                        Some(epic_id),
+                        "epic.review_rejected_rework",
+                        json!({
+                            "epicId": epic_id,
+                            "anchorTaskId": task.id,
+                            "siblingsReset": reworked,
+                            "decisionReason": reason
+                        }),
+                    )?;
+                }
+            }
+        }
     }
     tx.commit()
         .map_err(|err| CommandError::database("승인 결정을 저장하지 못했습니다.", err))?;
@@ -7801,18 +7847,22 @@ fn has_active_run(conn: &Connection, project_id: &str, task_id: &str) -> Command
     Ok(exists.is_some())
 }
 
+/// task가 현재 상태로 들어온 이후(since=last_transition_at) 해당 role run이 있었는지.
+/// "현재 사이클에서 이미 돌았는가"를 묻는 것이라, 상태를 되돌리면(예: 리뷰 반려로 Ready
+/// 복귀) 이전 사이클의 run은 세지 않아 파이프라인이 다시 흐른다. 과거 run·산출물은 보존한다.
 fn has_role_run(
     conn: &Connection,
     project_id: &str,
     task_id: &str,
     role_id: &str,
+    since: &str,
 ) -> CommandResult<bool> {
     let exists: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM agent_runs
-             WHERE project_id = ?1 AND task_id = ?2 AND role_id = ?3
+             WHERE project_id = ?1 AND task_id = ?2 AND role_id = ?3 AND created_at >= ?4
              LIMIT 1",
-            params![project_id, task_id, role_id],
+            params![project_id, task_id, role_id, since],
             |row| row.get(0),
         )
         .optional()
@@ -11485,6 +11535,52 @@ fn epic_gate_context_task(
     })
 }
 
+/// coder context에 직전 리뷰 반려 사유를 피드백으로 주입한다. epic(없으면 자기 task)의 가장
+/// 최근 ReviewApproval이 Rejected일 때만 — 즉 지금 추가 작업 사이클일 때만 붙인다. 이게 없으면
+/// coder가 같은 계획으로 같은 diff를 다시 만들어 재검토가 무의미해진다.
+fn review_rework_feedback_markdown(
+    conn: &Connection,
+    project_id: &str,
+    task: &TaskSummary,
+    role_id: &str,
+) -> CommandResult<String> {
+    if role_id != "coder" {
+        return Ok(String::new());
+    }
+    let latest: Option<(String, String)> = if let Some(epic_id) = task.epic_id.as_deref() {
+        conn.query_row(
+            "SELECT a.status, COALESCE(a.decision_reason, '')
+             FROM approvals a JOIN tasks t ON t.id = a.entity_id
+             WHERE a.project_id = ?1 AND a.approval_type = 'ReviewApproval' AND t.epic_id = ?2
+             ORDER BY COALESCE(a.decided_at, a.created_at) DESC LIMIT 1",
+            params![project_id, epic_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+    } else {
+        conn.query_row(
+            "SELECT status, COALESCE(decision_reason, '')
+             FROM approvals
+             WHERE project_id = ?1 AND approval_type = 'ReviewApproval' AND entity_id = ?2
+             ORDER BY COALESCE(decided_at, created_at) DESC LIMIT 1",
+            params![project_id, task.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+    }
+    .map_err(|err| CommandError::database("리뷰 반려 피드백을 확인하지 못했습니다.", err))?;
+
+    match latest {
+        Some((status, reason)) if status == "Rejected" && !reason.trim().is_empty() => Ok(format!(
+            "\n## 직전 리뷰 반려 피드백 (이번 추가 작업에 반드시 반영)\n\n\
+             리뷰어/사용자가 아래 사유로 직전 결과를 반려했다. 이번 실행에서 이 피드백을 반영해 \
+             추가 작업을 완료하라. 기존 worktree 변경 위에 이어서 작업한다.\n\n> {}\n\n",
+            reason.trim()
+        )),
+        _ => Ok(String::new()),
+    }
+}
+
 fn stub_summary(role_id: &str) -> String {
     format!(
         "# Stub {} Result\n\n이 실행은 실제 agent process 없이 생성된 Phase 2 검증용 결과입니다.\n\n- 역할: {}\n- 결과: pass\n",
@@ -11954,6 +12050,72 @@ mod tests {
             epic_task("b", 2, "PlanVerification"),
         ];
         assert!(!epic_barrier_met(&mixed, "CodeReview"));
+    }
+
+    #[test]
+    fn rejecting_review_approval_resets_epic_to_ready_for_rework() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let epic = create_epic(
+            &mut conn,
+            &project.id,
+            CreateEpicInput {
+                title: "배너 그룹 목록".to_string(),
+                plan_path: None,
+            },
+        )
+        .expect("epic");
+        let mk = |conn: &mut Connection, title: &str| {
+            create_task(
+                conn,
+                &project.id,
+                CreateTaskInput {
+                    epic_id: Some(epic.id.clone()),
+                    title: title.to_string(),
+                    description: Some("x".to_string()),
+                    external_refs: None,
+                    worktree_mode: Some("worktree".to_string()),
+                },
+            )
+            .expect("task")
+        };
+        let anchor = mk(&mut conn, "anchor");
+        let sibling = mk(&mut conn, "sibling");
+        // epic 게이트 통과 후 상태(둘 다 CodeReview)를 가정.
+        for id in [&anchor.id, &sibling.id] {
+            conn.execute(
+                "UPDATE tasks SET status='CodeReview' WHERE id=?1",
+                params![id],
+            )
+            .expect("set CodeReview");
+        }
+        // anchor에 epic 단일 ReviewApproval(Pending).
+        let approval_id = new_id();
+        let ts = now();
+        conn.execute(
+            "INSERT INTO approvals (id, project_id, entity_type, entity_id, approval_type, status,
+               requested_reason, decision_reason, requested_at, decided_at, created_at, updated_at)
+             VALUES (?1, ?2, 'Task', ?3, 'ReviewApproval', 'Pending', 'gate', NULL, ?4, NULL, ?4, ?4)",
+            params![approval_id, project.id, anchor.id, ts],
+        )
+        .expect("insert approval");
+
+        decide_approval(&mut conn, &project.id, &approval_id, "Rejected", "i18n 키 하나 더 보정 필요")
+            .expect("reject");
+
+        // anchor와 형제 모두 Blocked가 아니라 Ready로 돌아가 추가 작업 사이클을 다시 탄다.
+        assert_eq!(get_task(&conn, &anchor.id).expect("anchor").status, "Ready");
+        assert_eq!(get_task(&conn, &sibling.id).expect("sibling").status, "Ready");
+
+        // coder context에 반려 사유가 피드백으로 주입된다.
+        let feedback = review_rework_feedback_markdown(&conn, &project.id, &anchor, "coder")
+            .expect("feedback");
+        assert!(feedback.contains("i18n 키 하나 더 보정 필요"));
+        assert!(feedback.contains("리뷰 반려 피드백"));
+        // 게이트 role이 아닌 coder 외 역할엔 주입하지 않는다.
+        assert!(review_rework_feedback_markdown(&conn, &project.id, &anchor, "tester")
+            .expect("no feedback")
+            .is_empty());
     }
 
     #[test]
