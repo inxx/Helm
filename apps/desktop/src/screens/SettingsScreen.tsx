@@ -249,14 +249,16 @@ export function SettingsScreen({
   }, [roleAssignments, aiConnections]);
 
   // 프로젝트 기본 봇 + 각 리뷰어 connection의 자격증명 저장 상태를 한 번에 조회한다.
+  // snapshot 객체가 아니라 project.id에 의존해야 한다. 백그라운드 폴링마다 snapshot
+  // 레퍼런스가 바뀌어 [snapshot]에 걸면 입력 도중 status 재조회로 입력칸이 껌빡인다.
   useEffect(() => {
-    if (!snapshot) return;
+    if (!snapshotProjectId) return;
     const ids = ["", ...reviewerBotTargets.map((target) => target.id)];
     let cancelled = false;
     void Promise.all(
       ids.map((id) =>
         api
-          .githubAppCredentialsStatus(snapshot.project.id, id || undefined)
+          .githubAppCredentialsStatus(snapshotProjectId, id || undefined)
           .then((set) => [id, set] as const)
           .catch(() => [id, false] as const),
       ),
@@ -266,7 +268,7 @@ export function SettingsScreen({
     return () => {
       cancelled = true;
     };
-  }, [snapshot, reviewerBotTargets]);
+  }, [snapshotProjectId, reviewerBotTargets]);
 
   async function save() {
     setBusy(true);
@@ -1661,6 +1663,20 @@ export function SettingsScreen({
                               [target.id]: { ...(current[target.id] ?? { appId: "", key: "" }), key: event.target.value },
                             }))
                           }
+                        />
+                        <input
+                          type="file"
+                          accept=".pem,.key,application/x-pem-file"
+                          onChange={async (event) => {
+                            const file = event.target.files?.[0];
+                            event.target.value = ""; // 같은 파일 재선택 허용
+                            if (!file) return;
+                            const key = await file.text();
+                            setGithubAppInputs((current) => ({
+                              ...current,
+                              [target.id]: { ...(current[target.id] ?? { appId: "", key: "" }), key },
+                            }));
+                          }}
                         />
                       </label>
                       <div className="settings-actions">
