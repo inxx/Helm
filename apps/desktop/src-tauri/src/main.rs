@@ -2008,6 +2008,17 @@ fn run_host_role(
     result
 }
 
+#[tauri::command]
+fn list_role_lessons(
+    project_id: String,
+    status: Option<String>,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<db::RoleLessonSummary>> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::list_role_lessons(&conn, &project_id, status.as_deref())
+}
+
 fn emit_run_event(app: &AppHandle, event: &RunEventSummary) {
     let _ = app.emit("agent-run://event", event);
     if event.kind == "approval" || event.kind == "status" || event.kind == "result" {
@@ -3295,6 +3306,16 @@ fn approve_approval(
     let mut conn = db::open_existing_db(&context.db_path)?;
     let approval = db::decide_approval(&mut conn, &project_id, &approval_id, "Approved", &reason)?;
 
+    // 회고 학습 승인 → 회고 상태는 decide_approval이 이미 active로 전환했고, .lessons.md를 재생성한다(best-effort).
+    if approval.approval_type == "RoleLesson" {
+        let _ = db::refresh_role_lessons_file(
+            &conn,
+            &context.root_path,
+            &project_id,
+            &approval.entity_id,
+        );
+    }
+
     // 리뷰 진행 승인 → 이제 메인 대상 PR을 만들고 코드 리뷰어 실행을 시작한다.
     if approval.approval_type == "ReviewApproval" && approval.entity_type == "Task" {
         let log_run_id = db::list_agent_runs(&conn, &project_id, &approval.entity_id)?
@@ -3324,7 +3345,19 @@ fn reject_approval(
 ) -> CommandResult<ApprovalSummary> {
     let context = project_context(&state, &project_id)?;
     let mut conn = db::open_existing_db(&context.db_path)?;
-    db::decide_approval(&mut conn, &project_id, &approval_id, "Rejected", &reason)
+    let approval = db::decide_approval(&mut conn, &project_id, &approval_id, "Rejected", &reason)?;
+
+    // 회고 학습 반려 → decide_approval이 disabled로 전환했고, .lessons.md를 재생성한다(best-effort).
+    if approval.approval_type == "RoleLesson" {
+        let _ = db::refresh_role_lessons_file(
+            &conn,
+            &context.root_path,
+            &project_id,
+            &approval.entity_id,
+        );
+    }
+
+    Ok(approval)
 }
 
 fn open_project_from_path(
@@ -7289,6 +7322,7 @@ fn main() {
             prepare_repair_context,
             start_next_role_run,
             run_host_role,
+            list_role_lessons,
             retry_host_role,
             cancel_host_role,
             list_agent_runs,

@@ -404,7 +404,12 @@ export function SessionsScreen({
     // 승인 대기가 있으면 채팅 입력을 승인/반려 결정으로 먼저 해석한다 (버튼 대신 대화로 결정).
     const decision = parseApprovalDecision(goalText);
     if (decision && projectPendingApprovals.length > 0) {
-      await decideApprovalFromChat(projectPendingApprovals[0], decision.decision, decision.reason);
+      // 회고 학습 승인이 같은 대기 목록에 섞이므로, "승인/반려"는 task-flow 게이트(계획/리뷰/실행)를
+      // 우선 처리하고, 그게 없을 때만 회고 후보를 처리한다(잘못된 대상 승인 방지).
+      const target =
+        projectPendingApprovals.find((approval) => approval.approvalType !== "RoleLesson") ??
+        projectPendingApprovals[0];
+      await decideApprovalFromChat(target, decision.decision, decision.reason);
       return;
     }
 
@@ -1600,6 +1605,7 @@ function approvalLabel(type: string, language: AppLanguage): string {
   if (type === "ReviewApproval") return ko ? "리뷰 진행 승인" : "Review approval";
   if (type === "RunApproval") return ko ? "실행 승인" : "Run approval";
   if (type === "ManualStatusChange") return ko ? "수동 상태 변경" : "Manual status change";
+  if (type === "RoleLesson") return ko ? "회고 학습 승인" : "Role lesson";
   return type;
 }
 

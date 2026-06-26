@@ -705,9 +705,9 @@ export interface RunEventSummary {
 export interface ApprovalSummary {
   id: string;
   projectId: string;
-  entityType: "Task" | "AgentRun";
+  entityType: "Task" | "AgentRun" | "RoleLesson";
   entityId: string;
-  approvalType: "PlanApproval" | "ReviewApproval" | "RunApproval" | "ManualStatusChange";
+  approvalType: "PlanApproval" | "ReviewApproval" | "RunApproval" | "ManualStatusChange" | "RoleLesson";
   status: "Pending" | "Approved" | "Rejected" | "Expired";
   requestedReason: string;
   decisionReason: string | null;

@@ -28,7 +28,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 15;
+const SUPPORTED_SCHEMA_VERSION: i64 = 17;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
@@ -44,6 +44,8 @@ const PHASE12_MIGRATION: &str = include_str!("../migrations/0012_agent_run_host_
 const PHASE13_MIGRATION: &str = include_str!("../migrations/0013_review_approval.sql");
 const PHASE14_MIGRATION: &str = include_str!("../migrations/0014_task_worktree_mode.sql");
 const PHASE15_MIGRATION: &str = include_str!("../migrations/0015_conversation_messages.sql");
+const PHASE16_MIGRATION: &str = include_str!("../migrations/0016_role_retrospectives.sql");
+const PHASE17_MIGRATION: &str = include_str!("../migrations/0017_role_lesson_approval.sql");
 const TASK_STATUS_ORDER: &[&str] = &[
     "Planned",
     "Ready",
@@ -415,6 +417,14 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
         apply_migration(conn, 15, "phase15_conversation_messages", PHASE15_MIGRATION)?;
     } else if !table_exists(conn, "conversation_messages")? {
         apply_schema_patch(conn, PHASE15_MIGRATION)?;
+    }
+    if current_version < 16 {
+        apply_migration(conn, 16, "phase16_role_retrospectives", PHASE16_MIGRATION)?;
+    } else if !table_exists(conn, "role_retrospectives")? {
+        apply_schema_patch(conn, PHASE16_MIGRATION)?;
+    }
+    if current_version < 17 {
+        apply_migration(conn, 17, "phase17_role_lesson_approval", PHASE17_MIGRATION)?;
     }
     Ok(())
 }
@@ -2935,6 +2945,35 @@ fn finalize_host_run(
         return Err(err);
     }
 
+    // 회고 후보 캡처(best-effort): run이 끝날 때 산출물에서 lesson 후보를 pending으로 쌓는다.
+    // 실패해도 run finalize를 막지 않는다.
+    match capture_role_retrospective(
+        conn,
+        project_id,
+        &run.task_id,
+        run_id,
+        &run.role_id,
+        final_status,
+        artifact_path,
+    ) {
+        Ok(true) => {
+            let _ = append_and_emit_run_event(
+                conn,
+                project_id,
+                &run.task_id,
+                run_id,
+                "system",
+                "회고 후보가 등록되었습니다(승인 대기).",
+                json!({ "type": "retrospective.captured", "roleId": run.role_id }),
+                &mut event_sink,
+            );
+        }
+        Ok(false) => {}
+        Err(err) => {
+            eprintln!("retrospective capture failed: {}", err.message);
+        }
+    }
+
     let summary_text = fs::read_to_string(artifact_path.join("summary.md")).unwrap_or_default();
     let role_dossier_text =
         fs::read_to_string(artifact_path.join(role_dossier_artifact_name(&run.role_id)))
@@ -5392,6 +5431,21 @@ pub fn decide_approval(
         params![decision, reason, timestamp, approval_id, project_id],
     )
     .map_err(|err| CommandError::database("승인 결정을 저장하지 못했습니다.", err))?;
+    // 회고 학습 승인: approval과 회고 상태를 같은 트랜잭션에서 함께 전환한다(비원자성 방지).
+    // 파일(.lessons.md) 재생성은 파생 캐시라 command 계층에서 best-effort로 수행한다.
+    if approval.approval_type == "RoleLesson" {
+        let lesson_status = if decision == "Approved" {
+            "active"
+        } else {
+            "disabled"
+        };
+        tx.execute(
+            "UPDATE role_retrospectives SET status = ?1, updated_at = ?2 \
+             WHERE id = ?3 AND project_id = ?4",
+            params![lesson_status, timestamp, approval.entity_id, project_id],
+        )
+        .map_err(|err| CommandError::database("회고 상태를 저장하지 못했습니다.", err))?;
+    }
     let event_type = if decision == "Approved" {
         "approval.approved"
     } else {
@@ -10459,6 +10513,279 @@ fn resolve_role_policy(root: &Path, role_policies: &Value, role_id: &str) -> Res
     result
 }
 
+/// 컨텍스트 팩에 주입하는 역할 lesson 최대 개수. 프롬프트 블로트/과적합 방지.
+const ROLE_LESSON_LIMIT: i64 = 15;
+
+/// .helm/policies/{roleId}.lessons.md 경로(프로젝트 루트 상대). DB의 파생 캐시다.
+fn role_lessons_path(role_id: &str) -> String {
+    format!(".helm/policies/{role_id}.lessons.md")
+}
+
+/// 컨텍스트 팩에 주입할 역할 lesson 본문. 파일이 없으면 None(cold-start).
+fn resolve_role_lessons(root: &Path, role_id: &str) -> Option<String> {
+    let raw = fs::read_to_string(root.join(role_lessons_path(role_id))).ok()?;
+    let content = raw.trim();
+    if content.is_empty() {
+        return None;
+    }
+    Some(truncate_for_context(content, 4000))
+}
+
+/// "## Role Lessons" 섹션 본문. 위계를 명시한다 — 정책이 항상 우선, lesson은 경험칙.
+fn role_lessons_markdown(root: &Path, role_id: &str) -> String {
+    match resolve_role_lessons(root, role_id) {
+        Some(lessons) => format!(
+            "> 아래는 과거 실행에서 학습한 경험칙이다. 위 Role Policy와 충돌하면 항상 정책을 따른다.\n\n{lessons}"
+        ),
+        None => "학습된 경험칙 없음".to_string(),
+    }
+}
+
+/// run 산출물에서 lesson 후보 본문을 결정적으로 만든다(ponytail: v1은 LLM 증류 없이 캡처만).
+/// structured-result.json의 summary/blockers/suggestedNext를 우선 쓰고, 없으면 summary.md 앞부분.
+fn build_retrospective_lesson(artifact_path: &Path, outcome: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Ok(raw) = fs::read_to_string(artifact_path.join("structured-result.json")) {
+        if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+            if let Some(summary) = value.get("summary").and_then(Value::as_str) {
+                let summary = summary.trim();
+                if !summary.is_empty() {
+                    parts.push(summary.to_string());
+                }
+            }
+            let gate = value.get("gateResult");
+            if let Some(blockers) = gate
+                .and_then(|g| g.get("blockers"))
+                .and_then(Value::as_array)
+            {
+                let joined = blockers
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if !joined.is_empty() {
+                    parts.push(format!("blockers: {joined}"));
+                }
+            }
+            if let Some(next) = value.get("suggestedNext").and_then(Value::as_str) {
+                let next = next.trim();
+                if !next.is_empty() {
+                    parts.push(format!("suggestedNext: {next}"));
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        let summary = fs::read_to_string(artifact_path.join("summary.md")).unwrap_or_default();
+        let summary = summary.trim();
+        if !summary.is_empty() {
+            parts.push(summary.to_string());
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let lesson = format!("[{outcome}] {}", parts.join(" / "));
+    Some(truncate_for_context(&lesson, 800))
+}
+
+/// 회고 캡처는 해당 역할의 role policy가 enabled일 때만 동작한다.
+/// 별도 설정/토글 없이 기존 opt-in(role_policies)을 재사용한다 — 정책으로 거버닝하는 역할만 학습한다.
+fn retrospective_capture_enabled(conn: &Connection, project_id: &str, role_id: &str) -> bool {
+    let Ok(settings) = effective_settings(conn, project_id) else {
+        return false;
+    };
+    settings
+        .role_policies
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("roleId").and_then(Value::as_str) == Some(role_id))
+        })
+        .and_then(|policy| policy.get("enabled").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// run 종료 시 lesson 후보를 pending으로 캡처한다(best-effort, finalize를 막지 않음).
+/// 회고 row와 승인 row(RoleLesson)를 한 트랜잭션으로 함께 만들어 둘이 갈라지지 않게 한다.
+/// 모든 후보는 pending으로 시작하고 사람 승인 후에만 active가 된다(환각 강화 차단).
+/// 승인 row 덕분에 기존 채팅 승인 카드에 자동 노출된다.
+fn capture_role_retrospective(
+    conn: &mut Connection,
+    project_id: &str,
+    task_id: &str,
+    run_id: &str,
+    role_id: &str,
+    outcome: &str,
+    artifact_path: &Path,
+) -> CommandResult<bool> {
+    if !role_policy_role_ids().contains(&role_id) {
+        return Ok(false);
+    }
+    // 회고 캡처는 해당 역할의 role policy가 켜졌을 때만 동작한다(opt-in).
+    // 켜지 않으면 run마다 승인 카드가 쌓이는 노이즈가 없다.
+    if !retrospective_capture_enabled(conn, project_id, role_id) {
+        return Ok(false);
+    }
+    let Some(lesson) = build_retrospective_lesson(artifact_path, outcome) else {
+        return Ok(false);
+    };
+    let retro_id = new_id();
+    let approval_id = new_id();
+    let timestamp = now();
+    let tx = conn
+        .transaction()
+        .map_err(|err| CommandError::database("회고 후보를 저장하지 못했습니다.", err))?;
+    tx.execute(
+        "INSERT INTO role_retrospectives \
+         (id, project_id, task_id, run_id, role_id, outcome, lesson, tags, status, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', 'pending', ?8, ?8)",
+        params![
+            retro_id, project_id, task_id, run_id, role_id, outcome, lesson, timestamp
+        ],
+    )
+    .map_err(|err| CommandError::database("회고 후보를 저장하지 못했습니다.", err))?;
+    tx.execute(
+        "INSERT INTO approvals \
+         (id, project_id, entity_type, entity_id, approval_type, status, requested_reason, requested_at, created_at, updated_at) \
+         VALUES (?1, ?2, 'RoleLesson', ?3, 'RoleLesson', 'Pending', ?4, ?5, ?5, ?5)",
+        params![approval_id, project_id, retro_id, lesson, timestamp],
+    )
+    .map_err(|err| CommandError::database("회고 승인 요청을 저장하지 못했습니다.", err))?;
+    insert_audit(
+        &tx,
+        project_id,
+        "RoleLesson",
+        Some(&retro_id),
+        "approval.created",
+        json!({
+            "approvalId": approval_id,
+            "approvalType": "RoleLesson",
+            "entityType": "RoleLesson",
+            "entityId": retro_id,
+            "roleId": role_id
+        }),
+    )?;
+    tx.commit()
+        .map_err(|err| CommandError::database("회고 후보를 저장하지 못했습니다.", err))?;
+    Ok(true)
+}
+
+/// active lesson을 모아 .helm/policies/{roleId}.lessons.md를 재생성한다(DB가 원본, 파일은 파생 캐시).
+/// active가 0개면 파일을 삭제해 cold-start 상태로 되돌린다(soft-delete 롤백 자동 반영).
+fn regenerate_role_lessons_file(
+    conn: &Connection,
+    root: &Path,
+    project_id: &str,
+    role_id: &str,
+) -> CommandResult<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT lesson FROM role_retrospectives \
+             WHERE project_id = ?1 AND role_id = ?2 AND status = 'active' \
+             ORDER BY created_at DESC LIMIT ?3",
+        )
+        .map_err(|err| CommandError::database("회고 목록을 읽지 못했습니다.", err))?;
+    let lessons = stmt
+        .query_map(params![project_id, role_id, ROLE_LESSON_LIMIT], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|err| CommandError::database("회고 목록을 읽지 못했습니다.", err))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| CommandError::database("회고 목록을 읽지 못했습니다.", err))?;
+
+    let path = root.join(role_lessons_path(role_id));
+    if lessons.is_empty() {
+        let _ = fs::remove_file(&path);
+        return Ok(());
+    }
+    let body = lessons
+        .iter()
+        .map(|lesson| format!("- {}", lesson.trim().replace('\n', " ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = format!("# {role_id} 학습 경험칙 (자동 생성 — 직접 편집 금지)\n\n{body}\n");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| CommandError::io("정책 디렉터리를 만들지 못했습니다.", err))?;
+    }
+    fs::write(&path, content)
+        .map_err(|err| CommandError::io("회고 캐시 파일을 쓰지 못했습니다.", err))?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleLessonSummary {
+    pub id: String,
+    pub task_id: String,
+    pub run_id: String,
+    pub role_id: String,
+    pub outcome: String,
+    pub lesson: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+/// 회고 후보 목록을 조회한다. status가 주어지면 그 상태만, 없으면 pending+active(disabled 제외).
+pub fn list_role_lessons(
+    conn: &Connection,
+    project_id: &str,
+    status: Option<&str>,
+) -> CommandResult<Vec<RoleLessonSummary>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, task_id, run_id, role_id, outcome, lesson, status, created_at \
+             FROM role_retrospectives \
+             WHERE project_id = ?1 \
+               AND (?2 IS NULL AND status != 'disabled' OR status = ?2) \
+             ORDER BY created_at DESC",
+        )
+        .map_err(|err| CommandError::database("회고 목록을 읽지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id, status], |row| {
+            Ok(RoleLessonSummary {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                run_id: row.get(2)?,
+                role_id: row.get(3)?,
+                outcome: row.get(4)?,
+                lesson: row.get(5)?,
+                status: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })
+        .map_err(|err| CommandError::database("회고 목록을 읽지 못했습니다.", err))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| CommandError::database("회고 목록을 읽지 못했습니다.", err))?;
+    Ok(rows)
+}
+
+/// RoleLesson 승인 결정 후 .lessons.md를 재생성한다(회고 상태 전환은 decide_approval이 in-tx 처리).
+/// 파일은 DB의 파생 캐시이므로 command 계층에서 best-effort로 호출한다.
+pub fn refresh_role_lessons_file(
+    conn: &Connection,
+    root: &Path,
+    project_id: &str,
+    retro_id: &str,
+) -> CommandResult<()> {
+    let role_id: Option<String> = conn
+        .query_row(
+            "SELECT role_id FROM role_retrospectives WHERE id = ?1 AND project_id = ?2",
+            params![retro_id, project_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|err| CommandError::database("회고 역할을 읽지 못했습니다.", err))?;
+    if let Some(role_id) = role_id {
+        regenerate_role_lessons_file(conn, root, project_id, &role_id)?;
+    }
+    Ok(())
+}
+
 fn resolve_team_instruction_docs(root: &Path) -> Vec<TeamInstructionDoc> {
     let mut docs = ["AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md"]
         .into_iter()
@@ -10629,6 +10956,7 @@ fn build_context_pack_markdown(
          ### Forbidden\n\n{}\n\n\
          ## Role Dossier Contract\n\n{}\n\n\
          ## Role Policy\n\n{}\n\n\
+         ## Role Lessons\n\n{}\n\n\
          ## Team Instructions\n\n{}\n\n\
          ## Worktree Setup\n\n{}\n\n\
          ## External Refs\n\n{}\n\n\
@@ -10658,6 +10986,7 @@ fn build_context_pack_markdown(
         markdown_list(contract.forbidden.as_ref()),
         role_dossier_contract_markdown(role_id),
         role_policy_markdown(role_policy),
+        role_lessons_markdown(root, role_id),
         team_instruction_markdown(&team_docs),
         worktree_setup_markdown(worktree_setup),
         if refs.is_empty() {
@@ -12845,9 +13174,12 @@ mod tests {
 
         let planner = run_prepared_host_role(&mut conn, &repo, &project.id, &task.id, "planner");
         assert_eq!(planner.status, "Succeeded");
+        // 회고 학습 승인(RoleLesson)이 같은 pending 목록에 섞이므로 타입으로 명시 선택한다.
         let approval = list_approvals(&conn, &project.id, Some("Pending".to_string()))
             .expect("approvals")
-            .remove(0);
+            .into_iter()
+            .find(|approval| approval.approval_type == "PlanApproval")
+            .expect("pending plan approval");
         decide_approval(
             &mut conn,
             &project.id,
@@ -14176,5 +14508,158 @@ mod tests {
         let pending =
             list_approvals(&conn, &project.id, Some("Pending".to_string())).expect("approvals");
         assert!(pending.is_empty());
+    }
+
+    fn write_run_artifacts(root: &Path, summary: &str, structured: Option<&str>) -> PathBuf {
+        let dir = root.join(".helm/artifacts/runs").join(new_id());
+        fs::create_dir_all(&dir).expect("create artifact dir");
+        fs::write(dir.join("summary.md"), summary).expect("write summary");
+        if let Some(json) = structured {
+            fs::write(dir.join("structured-result.json"), json).expect("write structured");
+        }
+        dir
+    }
+
+    fn enable_retrospective_capture(conn: &Connection, project_id: &str) {
+        // 회고 캡처는 역할 policy가 enabled일 때만 동작하므로 5개 역할 정책을 켠다.
+        let policies = role_policy_role_ids()
+            .iter()
+            .map(|role_id| {
+                json!({
+                    "roleId": role_id,
+                    "enabled": true,
+                    "path": format!(".helm/policies/{role_id}.md")
+                })
+            })
+            .collect::<Vec<_>>();
+        update_settings(
+            conn,
+            project_id,
+            ProjectSettingsPatch {
+                role_presets: None,
+                ai_connections: None,
+                role_assignments: None,
+                role_policies: Some(Value::Array(policies)),
+                conductor_config: None,
+                worktree_root: None,
+                worktree_setup: None,
+                jira_config: None,
+                obsidian_vault_path: None,
+                obsidian_artifact_path: None,
+                token_budget: None,
+                artifact_retention_days: None,
+            },
+        )
+        .expect("enable retrospective capture");
+    }
+
+    fn pending_role_lesson_approval(conn: &Connection, project_id: &str) -> ApprovalSummary {
+        list_approvals(conn, project_id, Some("Pending".to_string()))
+            .expect("list approvals")
+            .into_iter()
+            .find(|approval| approval.approval_type == "RoleLesson")
+            .expect("role lesson approval present")
+    }
+
+    #[test]
+    fn role_lesson_approved_via_chat_path_injects_into_context() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        enable_retrospective_capture(&conn, &project.id);
+
+        let artifact = write_run_artifacts(
+            &repo.root,
+            "fallback summary",
+            Some(r#"{"summary":"타입 가드를 추가하라","suggestedNext":"테스트 보강"}"#),
+        );
+
+        // 1. 캡처: 회고(pending) + 승인(RoleLesson, Pending) row가 함께 생긴다.
+        let captured = capture_role_retrospective(
+            &mut conn, &project.id, "task-1", "run-1", "coder", "Succeeded", &artifact,
+        )
+        .expect("capture");
+        assert!(captured);
+
+        // 2. 게이트: 승인 전에는 .lessons.md가 없다(cold-start 유지). 승인 카드에 후보가 뜬다.
+        assert!(resolve_role_lessons(&repo.root, "coder").is_none());
+        let approval = pending_role_lesson_approval(&conn, &project.id);
+        assert!(approval.requested_reason.contains("타입 가드"));
+
+        // 3. 채팅 승인 경로: decide_approval이 회고를 active로 전환(in-tx), 이후 파일 재생성.
+        decide_approval(&mut conn, &project.id, &approval.id, "Approved", "ok").expect("approve");
+        refresh_role_lessons_file(&conn, &repo.root, &project.id, &approval.entity_id)
+            .expect("refresh");
+
+        let injected = resolve_role_lessons(&repo.root, "coder").expect("lessons present");
+        assert!(injected.contains("타입 가드"));
+        assert!(role_lessons_markdown(&repo.root, "coder").contains("정책을 따른다"));
+    }
+
+    #[test]
+    fn role_lesson_rejected_via_chat_path_stays_cold_start() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        enable_retrospective_capture(&conn, &project.id);
+
+        let artifact =
+            write_run_artifacts(&repo.root, "fallback", Some(r#"{"summary":"잘못된 교훈"}"#));
+        capture_role_retrospective(
+            &mut conn, &project.id, "task-1", "run-1", "tester", "Failed", &artifact,
+        )
+        .expect("capture");
+
+        let approval = pending_role_lesson_approval(&conn, &project.id);
+        decide_approval(&mut conn, &project.id, &approval.id, "Rejected", "no").expect("reject");
+        refresh_role_lessons_file(&conn, &repo.root, &project.id, &approval.entity_id)
+            .expect("refresh");
+
+        // 반려 → disabled → active 0개 → 파일 없음(cold-start 유지).
+        assert!(resolve_role_lessons(&repo.root, "tester").is_none());
+    }
+
+    #[test]
+    fn role_lesson_capture_skips_unknown_role_and_empty_artifacts() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        enable_retrospective_capture(&conn, &project.id);
+
+        // 알 수 없는 역할은 캡처하지 않는다(CHECK 제약 위반 방지).
+        let artifact = write_run_artifacts(&repo.root, "something", None);
+        let captured = capture_role_retrospective(
+            &mut conn, &project.id, "t", "r", "orchestrator", "Succeeded", &artifact,
+        )
+        .expect("capture unknown role");
+        assert!(!captured);
+
+        // 빈 산출물(summary 비고 structured 없음)은 후보를 만들지 않는다.
+        let empty = write_run_artifacts(&repo.root, "   ", None);
+        let captured =
+            capture_role_retrospective(&mut conn, &project.id, "t", "r", "coder", "Failed", &empty)
+                .expect("capture empty");
+        assert!(!captured);
+    }
+
+    #[test]
+    fn role_lesson_capture_is_opt_in_disabled_by_default() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        // 기본 비활성: 유효한 role + 내용이 있어도 캡처하지 않는다(노이즈 방지).
+        let artifact = write_run_artifacts(&repo.root, "fallback", Some(r#"{"summary":"교훈"}"#));
+        let captured =
+            capture_role_retrospective(&mut conn, &project.id, "t", "r", "coder", "Failed", &artifact)
+                .expect("capture");
+        assert!(!captured);
+        assert!(list_role_lessons(&conn, &project.id, None)
+            .expect("list")
+            .is_empty());
+    }
+
+    #[test]
+    fn role_lessons_markdown_is_cold_start_safe() {
+        let repo = test_repo();
+        assert_eq!(
+            role_lessons_markdown(&repo.root, "tester"),
+            "학습된 경험칙 없음"
+        );
     }
 }
