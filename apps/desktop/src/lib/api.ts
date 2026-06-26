@@ -105,6 +105,9 @@ export const api = {
   listConversationMessages(projectId: string) {
     return invoke<ConversationMessage[]>("list_conversation_messages", { projectId });
   },
+  clearConversationMessages(projectId: string) {
+    return invoke<void>("clear_conversation_messages", { projectId });
+  },
   appendConversationMessage(
     projectId: string,
     role: "user" | "assistant",

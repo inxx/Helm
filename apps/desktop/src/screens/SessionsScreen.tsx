@@ -144,6 +144,24 @@ export function SessionsScreen({
     }
   }
 
+  // 채팅 스레드 전체 비우기. append-only라 개별 삭제는 두지 않고 한 번에 지운다.
+  async function clearChat() {
+    if (!snapshot) return;
+    const proceed = window.confirm(
+      language === "ko"
+        ? "이 프로젝트의 채팅을 전부 지울까요?\n작업/run은 그대로 두고 대화 기록만 삭제됩니다."
+        : "Clear all chat for this project?\nThis removes only the conversation; tasks and runs are kept.",
+    );
+    if (!proceed) return;
+    try {
+      await api.clearConversationMessages(snapshot.project.id);
+      setOrchestratorMessages([]);
+      persistedRunIdsRef.current = new Set();
+    } catch (error) {
+      setLoadError(messageFromError(error, language === "ko" ? "채팅을 비우지 못했습니다." : "Failed to clear the chat."));
+    }
+  }
+
   const taskById = useMemo(
     () => new Map(snapshot?.tasks.map((task) => [task.id, task]) ?? []),
     [snapshot?.tasks],
@@ -958,6 +976,14 @@ export function SessionsScreen({
               onClick={() => setChatScopeTaskId(null)}
             >
               {language === "ko" ? "전체 채팅 보기" : "View full chat"}
+            </button>
+          ) : orchestratorMessages.length > 0 ? (
+            <button
+              type="button"
+              className="secondary-button session-scope-clear"
+              onClick={() => void clearChat()}
+            >
+              {language === "ko" ? "채팅 비우기" : "Clear chat"}
             </button>
           ) : null}
         </header>

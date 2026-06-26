@@ -71,6 +71,7 @@ function run(overrides: Partial<AgentRunSummary>): AgentRunSummary {
     latestEventAt: null,
     createdAt: "2026-06-22T05:30:00.000Z",
     updatedAt: "2026-06-22T05:30:00.000Z",
+    eventCount: 0,
     ...overrides,
   };
 }

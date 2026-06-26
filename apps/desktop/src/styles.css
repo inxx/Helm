@@ -3491,6 +3491,31 @@ textarea {
   font-weight: 600;
 }
 
+.task-card-barrier {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--line-soft);
+  border-left: 2px solid var(--amber);
+  padding: 7px 0 0 8px;
+}
+
+.task-card-barrier span {
+  color: var(--amber);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.task-card-barrier strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--soft);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .task-card-reason {
   border-left: 2px solid var(--amber);
   color: var(--soft);

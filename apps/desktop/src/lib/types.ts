@@ -666,6 +666,8 @@ export interface AgentRunSummary {
   latestEventAt: string | null;
   createdAt: string;
   updatedAt: string;
+  // stdout/stderr 제외한 의미 있는 run_events 개수 — 진행 신호용.
+  eventCount: number;
 }
 
 export interface AgentSessionSummary {

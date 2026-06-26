@@ -3252,6 +3252,16 @@ fn list_conversation_messages(
 }
 
 #[tauri::command]
+fn clear_conversation_messages(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let context = project_context(&state, &project_id)?;
+    let conn = db::open_existing_db(&context.db_path)?;
+    db::clear_conversation_messages(&conn, &project_id)
+}
+
+#[tauri::command]
 fn append_conversation_message(
     project_id: String,
     role: String,
@@ -7353,6 +7363,7 @@ fn main() {
             list_task_timeline,
             list_run_events,
             list_conversation_messages,
+            clear_conversation_messages,
             append_conversation_message,
             get_agent_run,
             read_run_artifact,

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
+import { epicBarrierWait, type EpicBarrierWait } from "../lib/epicBarrier";
 import { deriveRunLiveState, isRunActiveState, isRunAttentionState, selectVisibleRun } from "../lib/runLiveState";
 import { roleLabel } from "../lib/runnerReadiness";
 import { TASK_STATUS_ORDER } from "../lib/status";
@@ -171,8 +172,9 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
                 </div>
               ) : null}
               {columnTasks.map((task) => {
-                const externalRef = task.externalRefs[0];
                 const activeRun = activeRunForTask(taskRuns[task.id] ?? []);
+                // epic 게이트 anchor가 형제를 기다리는 중이면 idle처럼 보이는 대기를 가시화한다.
+                const barrierWait = activeRun ? null : epicBarrierWait(task, tasks);
                 // 합친 컬럼(완료) 안에서 Merged/Done 카드가 각자 라벨을 유지하도록 pill·flow는 task.status 기준.
                 const taskStage = STATUS_STAGE[task.status];
                 // 활성 run이 있으면 run 박스가 역할·상태를 보여주므로 flow 줄은 idle일 때만 쓴다.
@@ -191,36 +193,25 @@ export function TaskBoard({ tasks, taskRuns = {}, selectedTaskId, onSelectTask, 
                     type="button"
                   >
                     <div className="task-card-topline">
-                      <span className={`task-stage-pill ${taskStage.tone}`}>{taskStage.label}</span>
+                      <span className={`task-stage-pill ${activeRun ? runPillTone(activeRun) : taskStage.tone}`}>
+                        {activeRun ? runStatusLabel(activeRun) : taskStage.label}
+                        {activeRun && runProgressSuffix(activeRun) ? ` · ${runProgressSuffix(activeRun)}` : ""}
+                      </span>
                       <small>{relativeTime(task.lastTransitionAt)}</small>
                     </div>
                     {projectLabel ? <span className="task-card-project">{projectLabel}</span> : null}
                     <strong className="task-card-title">{task.title}</strong>
                     {task.description ? <span className="task-card-description">{task.description}</span> : null}
-                    {activeRun ? (
-                      <div className={`task-card-run ${runTone(activeRun)}`}>
-                        <span>{runStatusLabel(activeRun)}</span>
-                        <strong>
-                          {roleLabel(activeRun.roleId)}
-                          {runnerModelLabel(activeRun) ? (
-                            <span className="task-card-run-model"> · {runnerModelLabel(activeRun)}</span>
-                          ) : null}
-                        </strong>
-                        <small>{runHint(activeRun, t)}</small>
+                    {barrierWait ? (
+                      <div className="task-card-barrier" title={barrierWaitTitle(barrierWait)}>
+                        <span>게이트 대기 · 형제 {barrierWait.blocking.length}</span>
+                        <strong>{barrierWaitTitle(barrierWait)}</strong>
                       </div>
-                    ) : null}
-                    {!activeRun ? (
+                    ) : !activeRun ? (
                       <div className="task-card-flow">
                         <span>{flowCaption}</span>
                         <strong>{flowLabel}</strong>
                       </div>
-                    ) : null}
-                    {task.statusReason ? <span className="task-card-reason">{task.statusReason}</span> : null}
-                    {externalRef ? (
-                      <small className="task-card-ref">
-                        {externalRef.refTitle ? `${externalRef.refTitle} · ` : ""}
-                        {externalRef.refValue}
-                      </small>
                     ) : null}
                   </button>
                 );
@@ -237,14 +228,11 @@ function activeRunForTask(runs: AgentRunSummary[]): AgentRunSummary | null {
   return selectVisibleRun(runs);
 }
 
-function runHint(run: AgentRunSummary, t: ReturnType<typeof useI18n>["t"]): string {
-  const live = deriveRunLiveState(run);
-  if (live.state === "running") return live.summary;
-  if (live.state === "approval_pending") return t("tasks.run.approvalPending");
-  if (live.state === "quiet" || live.state === "stalled_candidate") return `${live.summary} · ${live.ageLabel}`;
-  if (live.state === "queued" || live.state === "starting") return live.summary;
-  if (run.failureKind) return humanizedFailureReason(run, t) ?? `${failureKindLabel(run.failureKind, t)} · ${t("tasks.run.retryPossible")}`;
-  return live.summary || (run.resultStatus ? `${run.resultStatus} · ${t("tasks.run.retryPossible")}` : t("tasks.run.checkDetails"));
+// 배리어를 막고 있는 형제 제목 요약. 길어지지 않게 2개까지만 보이고 나머지는 "외 N".
+function barrierWaitTitle(wait: EpicBarrierWait): string {
+  const names = wait.blocking.slice(0, 2).map((task) => task.title).join(", ");
+  const more = wait.blocking.length > 2 ? ` 외 ${wait.blocking.length - 2}` : "";
+  return `${names}${more}`;
 }
 
 function runStatusLabel(run: AgentRunSummary): string {
@@ -255,30 +243,33 @@ function runnerModelLabel(run: AgentRunSummary): string | null {
   return run.model ?? run.provider ?? null;
 }
 
-function runTone(run: AgentRunSummary): "running" | "queued" | "attention" | "done" {
-  return deriveRunLiveState(run).tone;
+// 진행률(%) 데이터가 없어, 실행 중인 run의 경과 시간 + 의미 있는 이벤트 수를 진행 신호로 보여준다.
+function runProgressSuffix(run: AgentRunSummary): string | null {
+  if (!isRunActiveState(run)) return null;
+  const parts: string[] = [];
+  const elapsed = elapsedLabel(run);
+  if (elapsed) parts.push(elapsed);
+  if (run.eventCount > 0) parts.push(`신호 ${run.eventCount}`);
+  return parts.length ? parts.join(" · ") : null;
 }
 
-function failureKindLabel(kind: string, t: ReturnType<typeof useI18n>["t"]): string {
-  if (kind === "needs_inspection") return t("tasks.failure.needsInspection");
-  if (kind === "blocking_gate") return t("tasks.failure.blockingGate");
-  if (kind === "diff_mismatch") return t("tasks.failure.diffMismatch");
-  if (kind === "schema_invalid") return t("tasks.failure.schemaInvalid");
-  if (kind === "timeout") return t("tasks.failure.timeout");
-  if (kind === "exit_failed") return t("tasks.failure.exitFailed");
-  if (kind === "canceled") return t("tasks.failure.canceled");
-  return kind;
+function elapsedLabel(run: AgentRunSummary): string | null {
+  const start = run.startedAt ?? run.claimedAt;
+  const startMs = start ? Date.parse(start) : Number.NaN;
+  if (!Number.isFinite(startMs)) return null;
+  const minutes = Math.floor(Math.max(0, Date.now() - startMs) / 60_000);
+  if (minutes < 1) return "1분 미만";
+  if (minutes < 60) return `${minutes}분`;
+  return `${Math.floor(minutes / 60)}시간`;
 }
 
-function humanizedFailureReason(run: AgentRunSummary, t: ReturnType<typeof useI18n>["t"]): string | null {
-  if (!run.failureReason) return null;
-  if (run.failureKind === "needs_inspection") {
-    return t("tasks.failure.needsInspectionReason");
-  }
-  if (run.failureKind === "blocking_gate") {
-    return t("tasks.failure.blockingGateReason");
-  }
-  return run.failureReason;
+// run tone을 상단 pill의 기존 톤 클래스로 매핑해 pill CSS를 그대로 재사용한다.
+function runPillTone(run: AgentRunSummary): StageTone {
+  const tone = deriveRunLiveState(run).tone;
+  if (tone === "running") return "active";
+  if (tone === "queued") return "ready";
+  if (tone === "attention") return "blocked";
+  return "done";
 }
 
 function taskCardAriaLabel(
