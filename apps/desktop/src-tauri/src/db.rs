@@ -28,7 +28,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SUPPORTED_SCHEMA_VERSION: i64 = 17;
+const SUPPORTED_SCHEMA_VERSION: i64 = 18;
 const PHASE1_MIGRATION: &str = include_str!("../migrations/0001_phase1.sql");
 const PHASE2_MIGRATION: &str = include_str!("../migrations/0002_phase2_runs_approvals.sql");
 const PHASE3A_MIGRATION: &str = include_str!("../migrations/0003_phase3a_worktrees.sql");
@@ -46,6 +46,7 @@ const PHASE14_MIGRATION: &str = include_str!("../migrations/0014_task_worktree_m
 const PHASE15_MIGRATION: &str = include_str!("../migrations/0015_conversation_messages.sql");
 const PHASE16_MIGRATION: &str = include_str!("../migrations/0016_role_retrospectives.sql");
 const PHASE17_MIGRATION: &str = include_str!("../migrations/0017_role_lesson_approval.sql");
+const PHASE18_MIGRATION: &str = include_str!("../migrations/0018_role_lesson_source.sql");
 const TASK_STATUS_ORDER: &[&str] = &[
     "Planned",
     "Ready",
@@ -425,6 +426,11 @@ pub fn run_migrations(conn: &mut Connection) -> CommandResult<()> {
     }
     if current_version < 17 {
         apply_migration(conn, 17, "phase17_role_lesson_approval", PHASE17_MIGRATION)?;
+    }
+    if current_version < 18 {
+        apply_migration(conn, 18, "phase18_role_lesson_source", PHASE18_MIGRATION)?;
+    } else if !table_has_column(conn, "role_retrospectives", "source")? {
+        apply_schema_patch(conn, PHASE18_MIGRATION)?;
     }
     Ok(())
 }
@@ -2633,6 +2639,7 @@ pub fn run_host_role(
         &run,
         &worktree,
         &artifact_path,
+        root,
         &command_args,
         &command_started_at,
         command_duration_ms,
@@ -2651,6 +2658,7 @@ fn finalize_host_run(
     run: &AgentRunSummary,
     worktree: &TaskWorktreeSummary,
     artifact_path: &Path,
+    root: &Path,
     command_args: &[String],
     command_started_at: &str,
     command_duration_ms: i64,
@@ -2955,8 +2963,9 @@ fn finalize_host_run(
         &run.role_id,
         final_status,
         artifact_path,
+        root,
     ) {
-        Ok(true) => {
+        Ok(RetroCapture::Pending) => {
             let _ = append_and_emit_run_event(
                 conn,
                 project_id,
@@ -2968,7 +2977,19 @@ fn finalize_host_run(
                 &mut event_sink,
             );
         }
-        Ok(false) => {}
+        Ok(RetroCapture::AutoApplied) => {
+            let _ = append_and_emit_run_event(
+                conn,
+                project_id,
+                &run.task_id,
+                run_id,
+                "system",
+                "고신뢰 회고 경험칙이 자동 적용되었습니다.",
+                json!({ "type": "retrospective.auto_applied", "roleId": run.role_id }),
+                &mut event_sink,
+            );
+        }
+        Ok(RetroCapture::Skipped) => {}
         Err(err) => {
             eprintln!("retrospective capture failed: {}", err.message);
         }
@@ -3146,6 +3167,7 @@ pub fn reattach_host_run(
         &run,
         &worktree,
         &artifact_path,
+        root,
         &command_args,
         &command_started_at,
         command_duration_ms,
@@ -10626,10 +10648,45 @@ fn retrospective_capture_enabled(conn: &Connection, project_id: &str, role_id: &
         .unwrap_or(false)
 }
 
-/// run 종료 시 lesson 후보를 pending으로 캡처한다(best-effort, finalize를 막지 않음).
+/// 회고 캡처 결과. 호출부가 적절한 run 이벤트를 emit하기 위해 구분한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetroCapture {
+    /// 캡처 안 함(미지원 역할/비활성/산출물 없음).
+    Skipped,
+    /// 후보를 pending으로 쌓음 — 사람 승인 대기.
+    Pending,
+    /// 고신뢰(Succeeded)라 사람 게이트 없이 바로 active로 적용함.
+    AutoApplied,
+}
+
+/// 회귀 안전장치: 직전에 자동 적용(source='auto')된 active lesson 1건을 비활성화한다.
+/// 사람이 승인한 lesson(source='manual')은 절대 건드리지 않는다 — 명시적 의도가 자동 롤백보다 우선.
+/// 1건만 되돌려(back off one step) 무관한 실패가 누적 lesson을 한꺼번에 날리는 thrash를 막는다.
+fn disable_latest_auto_lesson(
+    conn: &Connection,
+    project_id: &str,
+    role_id: &str,
+) -> CommandResult<bool> {
+    let timestamp = now();
+    let affected = conn
+        .execute(
+            "UPDATE role_retrospectives SET status = 'disabled', updated_at = ?1 \
+             WHERE id IN ( \
+                SELECT id FROM role_retrospectives \
+                WHERE project_id = ?2 AND role_id = ?3 AND status = 'active' AND source = 'auto' \
+                ORDER BY created_at DESC LIMIT 1 \
+             )",
+            params![timestamp, project_id, role_id],
+        )
+        .map_err(|err| CommandError::database("회고 자동 롤백에 실패했습니다.", err))?;
+    Ok(affected > 0)
+}
+
+/// run 종료 시 lesson 후보를 캡처한다(best-effort, finalize를 막지 않음).
 /// 회고 row와 승인 row(RoleLesson)를 한 트랜잭션으로 함께 만들어 둘이 갈라지지 않게 한다.
-/// 모든 후보는 pending으로 시작하고 사람 승인 후에만 active가 된다(환각 강화 차단).
-/// 승인 row 덕분에 기존 채팅 승인 카드에 자동 노출된다.
+/// 고신뢰(Succeeded)는 사람 게이트 없이 바로 active(source='auto')로 적용하고 .lessons.md를 재생성한다.
+/// 그 외 outcome은 pending으로 쌓여 사람 승인을 기다린다(노이즈/환각 강화 차단).
+/// 하드 실패(Failed)면 새 캡처와 별개로 직전 자동 lesson 1건을 회귀 안전장치로 비활성화한다.
 fn capture_role_retrospective(
     conn: &mut Connection,
     project_id: &str,
@@ -10638,38 +10695,62 @@ fn capture_role_retrospective(
     role_id: &str,
     outcome: &str,
     artifact_path: &Path,
-) -> CommandResult<bool> {
+    root: &Path,
+) -> CommandResult<RetroCapture> {
     if !role_policy_role_ids().contains(&role_id) {
-        return Ok(false);
+        return Ok(RetroCapture::Skipped);
     }
     // 회고 캡처는 해당 역할의 role policy가 켜졌을 때만 동작한다(opt-in).
     // 켜지 않으면 run마다 승인 카드가 쌓이는 노이즈가 없다.
     if !retrospective_capture_enabled(conn, project_id, role_id) {
-        return Ok(false);
+        return Ok(RetroCapture::Skipped);
     }
+
+    // 회귀 안전장치: 하드 실패(Failed, exit!=0)면 직전 자동 lesson을 back off한다.
+    // NeedsInspection/TimedOut/Canceled는 신호가 모호해 제외(thrash 방지). 새 캡처와 독립적이라
+    // 산출물이 비어 lesson을 못 만들어도 롤백은 수행한다.
+    if outcome == "Failed" && disable_latest_auto_lesson(conn, project_id, role_id)? {
+        regenerate_role_lessons_file(conn, root, project_id, role_id)?;
+    }
+
     let Some(lesson) = build_retrospective_lesson(artifact_path, outcome) else {
-        return Ok(false);
+        return Ok(RetroCapture::Skipped);
+    };
+    // 고신뢰 신호는 Succeeded 하나뿐 — 스키마/dossier/blocking gate/exit0/pass를 모두 통과한 상태.
+    let auto = outcome == "Succeeded";
+    let retro_status = if auto { "active" } else { "pending" };
+    let source = if auto { "auto" } else { "manual" };
+    let approval_status = if auto { "Approved" } else { "Pending" };
+    let timestamp = now();
+    let decided_at: Option<&str> = if auto { Some(timestamp.as_str()) } else { None };
+    let decision_reason: Option<&str> = if auto {
+        Some("auto: 고신뢰(Succeeded) 자동 적용")
+    } else {
+        None
     };
     let retro_id = new_id();
     let approval_id = new_id();
-    let timestamp = now();
     let tx = conn
         .transaction()
         .map_err(|err| CommandError::database("회고 후보를 저장하지 못했습니다.", err))?;
     tx.execute(
         "INSERT INTO role_retrospectives \
-         (id, project_id, task_id, run_id, role_id, outcome, lesson, tags, status, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', 'pending', ?8, ?8)",
+         (id, project_id, task_id, run_id, role_id, outcome, lesson, tags, status, source, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', ?8, ?9, ?10, ?10)",
         params![
-            retro_id, project_id, task_id, run_id, role_id, outcome, lesson, timestamp
+            retro_id, project_id, task_id, run_id, role_id, outcome, lesson, retro_status, source,
+            timestamp
         ],
     )
     .map_err(|err| CommandError::database("회고 후보를 저장하지 못했습니다.", err))?;
     tx.execute(
         "INSERT INTO approvals \
-         (id, project_id, entity_type, entity_id, approval_type, status, requested_reason, requested_at, created_at, updated_at) \
-         VALUES (?1, ?2, 'RoleLesson', ?3, 'RoleLesson', 'Pending', ?4, ?5, ?5, ?5)",
-        params![approval_id, project_id, retro_id, lesson, timestamp],
+         (id, project_id, entity_type, entity_id, approval_type, status, requested_reason, decision_reason, requested_at, decided_at, created_at, updated_at) \
+         VALUES (?1, ?2, 'RoleLesson', ?3, 'RoleLesson', ?4, ?5, ?6, ?7, ?8, ?7, ?7)",
+        params![
+            approval_id, project_id, retro_id, approval_status, lesson, decision_reason, timestamp,
+            decided_at
+        ],
     )
     .map_err(|err| CommandError::database("회고 승인 요청을 저장하지 못했습니다.", err))?;
     insert_audit(
@@ -10677,18 +10758,30 @@ fn capture_role_retrospective(
         project_id,
         "RoleLesson",
         Some(&retro_id),
-        "approval.created",
+        if auto {
+            "approval.approved"
+        } else {
+            "approval.created"
+        },
         json!({
             "approvalId": approval_id,
             "approvalType": "RoleLesson",
             "entityType": "RoleLesson",
             "entityId": retro_id,
-            "roleId": role_id
+            "roleId": role_id,
+            "auto": auto,
+            "status": approval_status
         }),
     )?;
     tx.commit()
         .map_err(|err| CommandError::database("회고 후보를 저장하지 못했습니다.", err))?;
-    Ok(true)
+    if auto {
+        // 자동 적용은 즉시 파일에 반영해야 다음 동일 역할 run 컨텍스트 팩에 주입된다.
+        regenerate_role_lessons_file(conn, root, project_id, role_id)?;
+        Ok(RetroCapture::AutoApplied)
+    } else {
+        Ok(RetroCapture::Pending)
+    }
 }
 
 /// active lesson을 모아 .helm/policies/{roleId}.lessons.md를 재생성한다(DB가 원본, 파일은 파생 캐시).
@@ -14625,7 +14718,7 @@ mod tests {
     }
 
     #[test]
-    fn role_lesson_approved_via_chat_path_injects_into_context() {
+    fn role_lesson_high_confidence_auto_applies_without_gate() {
         let repo = test_repo();
         let (mut conn, project) = open_test_project(&repo);
         enable_retrospective_capture(&conn, &project.id);
@@ -14636,26 +14729,55 @@ mod tests {
             Some(r#"{"summary":"타입 가드를 추가하라","suggestedNext":"테스트 보강"}"#),
         );
 
-        // 1. 캡처: 회고(pending) + 승인(RoleLesson, Pending) row가 함께 생긴다.
+        // 고신뢰(Succeeded): 사람 게이트 없이 바로 active로 적용되고 .lessons.md가 즉시 생긴다.
         let captured = capture_role_retrospective(
-            &mut conn, &project.id, "task-1", "run-1", "coder", "Succeeded", &artifact,
+            &mut conn, &project.id, "task-1", "run-1", "coder", "Succeeded", &artifact, &repo.root,
         )
         .expect("capture");
-        assert!(captured);
+        assert_eq!(captured, RetroCapture::AutoApplied);
 
-        // 2. 게이트: 승인 전에는 .lessons.md가 없다(cold-start 유지). 승인 카드에 후보가 뜬다.
-        assert!(resolve_role_lessons(&repo.root, "coder").is_none());
-        let approval = pending_role_lesson_approval(&conn, &project.id);
-        assert!(approval.requested_reason.contains("타입 가드"));
+        // pending 승인 카드는 뜨지 않는다(이미 Approved로 자동 결정).
+        let no_pending = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("list approvals")
+            .into_iter()
+            .all(|approval| approval.approval_type != "RoleLesson");
+        assert!(no_pending);
 
-        // 3. 채팅 승인 경로: decide_approval이 회고를 active로 전환(in-tx), 이후 파일 재생성.
-        decide_approval(&mut conn, &project.id, &approval.id, "Approved", "ok").expect("approve");
-        refresh_role_lessons_file(&conn, &repo.root, &project.id, &approval.entity_id)
-            .expect("refresh");
-
+        // 다음 동일 역할 run 컨텍스트 팩에 주입된다.
         let injected = resolve_role_lessons(&repo.root, "coder").expect("lessons present");
         assert!(injected.contains("타입 가드"));
         assert!(role_lessons_markdown(&repo.root, "coder").contains("정책을 따른다"));
+    }
+
+    #[test]
+    fn role_lesson_hard_failure_backs_off_latest_auto_lesson() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        enable_retrospective_capture(&conn, &project.id);
+
+        // 고신뢰 run 2건이 자동 적용된다.
+        let a = write_run_artifacts(&repo.root, "f", Some(r#"{"summary":"교훈 A"}"#));
+        capture_role_retrospective(
+            &mut conn, &project.id, "t", "r1", "coder", "Succeeded", &a, &repo.root,
+        )
+        .expect("capture A");
+        let b = write_run_artifacts(&repo.root, "f", Some(r#"{"summary":"교훈 B"}"#));
+        capture_role_retrospective(
+            &mut conn, &project.id, "t", "r2", "coder", "Succeeded", &b, &repo.root,
+        )
+        .expect("capture B");
+        let injected = resolve_role_lessons(&repo.root, "coder").expect("present");
+        assert!(injected.contains("교훈 A") && injected.contains("교훈 B"));
+
+        // 하드 실패(Failed): 직전 자동 lesson(교훈 B) 1건만 비활성화하고 파일에서 빠진다.
+        let f = write_run_artifacts(&repo.root, "f", Some(r#"{"summary":"실패 회고"}"#));
+        capture_role_retrospective(
+            &mut conn, &project.id, "t", "r3", "coder", "Failed", &f, &repo.root,
+        )
+        .expect("capture fail");
+        let after = resolve_role_lessons(&repo.root, "coder").expect("present");
+        assert!(after.contains("교훈 A"));
+        assert!(!after.contains("교훈 B"));
     }
 
     #[test]
@@ -14667,7 +14789,7 @@ mod tests {
         let artifact =
             write_run_artifacts(&repo.root, "fallback", Some(r#"{"summary":"잘못된 교훈"}"#));
         capture_role_retrospective(
-            &mut conn, &project.id, "task-1", "run-1", "tester", "Failed", &artifact,
+            &mut conn, &project.id, "task-1", "run-1", "tester", "Failed", &artifact, &repo.root,
         )
         .expect("capture");
 
@@ -14689,17 +14811,18 @@ mod tests {
         // 알 수 없는 역할은 캡처하지 않는다(CHECK 제약 위반 방지).
         let artifact = write_run_artifacts(&repo.root, "something", None);
         let captured = capture_role_retrospective(
-            &mut conn, &project.id, "t", "r", "orchestrator", "Succeeded", &artifact,
+            &mut conn, &project.id, "t", "r", "orchestrator", "Succeeded", &artifact, &repo.root,
         )
         .expect("capture unknown role");
-        assert!(!captured);
+        assert_eq!(captured, RetroCapture::Skipped);
 
         // 빈 산출물(summary 비고 structured 없음)은 후보를 만들지 않는다.
         let empty = write_run_artifacts(&repo.root, "   ", None);
-        let captured =
-            capture_role_retrospective(&mut conn, &project.id, "t", "r", "coder", "Failed", &empty)
-                .expect("capture empty");
-        assert!(!captured);
+        let captured = capture_role_retrospective(
+            &mut conn, &project.id, "t", "r", "coder", "Failed", &empty, &repo.root,
+        )
+        .expect("capture empty");
+        assert_eq!(captured, RetroCapture::Skipped);
     }
 
     #[test]
@@ -14708,10 +14831,11 @@ mod tests {
         let (mut conn, project) = open_test_project(&repo);
         // 기본 비활성: 유효한 role + 내용이 있어도 캡처하지 않는다(노이즈 방지).
         let artifact = write_run_artifacts(&repo.root, "fallback", Some(r#"{"summary":"교훈"}"#));
-        let captured =
-            capture_role_retrospective(&mut conn, &project.id, "t", "r", "coder", "Failed", &artifact)
-                .expect("capture");
-        assert!(!captured);
+        let captured = capture_role_retrospective(
+            &mut conn, &project.id, "t", "r", "coder", "Failed", &artifact, &repo.root,
+        )
+        .expect("capture");
+        assert_eq!(captured, RetroCapture::Skipped);
         assert!(list_role_lessons(&conn, &project.id, None)
             .expect("list")
             .is_empty());
