@@ -4653,18 +4653,35 @@ pub fn next_queued_agent_run(
     .map_err(|err| CommandError::database("대기 중인 실행을 읽지 못했습니다.", err))
 }
 
-pub fn has_running_agent_run(conn: &Connection, project_id: &str) -> CommandResult<bool> {
-    let exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM agent_runs
-             WHERE project_id = ?1 AND status = 'Running'
-             LIMIT 1",
-            params![project_id],
-            |row| row.get(0),
+pub fn count_running_agent_runs(conn: &Connection, project_id: &str) -> CommandResult<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM agent_runs WHERE project_id = ?1 AND status = 'Running'",
+        params![project_id],
+        |row| row.get(0),
+    )
+    .map_err(|err| CommandError::database("실행 중인 role run 수를 확인하지 못했습니다.", err))
+}
+
+/// 현재 Running인 run들이 점유 중인 worktree 경로 목록.
+/// in-place(current_branch) run은 모두 프로젝트 root를 가리키므로 경로가 겹쳐
+/// 자연히 직렬로 묶이고, 서로 다른 worktree를 가진 run만 병렬 dispatch된다.
+pub fn running_run_worktree_paths(
+    conn: &Connection,
+    project_id: &str,
+) -> CommandResult<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT tw.worktree_path
+               FROM agent_runs ar
+               JOIN task_worktrees tw
+                 ON tw.project_id = ar.project_id AND tw.task_id = ar.task_id
+              WHERE ar.project_id = ?1 AND ar.status = 'Running'",
         )
-        .optional()
-        .map_err(|err| CommandError::database("실행 중인 role run을 확인하지 못했습니다.", err))?;
-    Ok(exists.is_some())
+        .map_err(|err| CommandError::database("실행 중인 worktree를 조회하지 못했습니다.", err))?;
+    let rows = stmt
+        .query_map(params![project_id], |row| row.get::<_, String>(0))
+        .map_err(|err| CommandError::database("실행 중인 worktree를 조회하지 못했습니다.", err))?;
+    collect_rows(rows, "실행 중인 worktree를 조회하지 못했습니다.")
 }
 
 pub fn list_task_timeline(
@@ -5137,8 +5154,8 @@ pub fn reconcile_interrupted_runs(
 const STALE_RUN_GRACE_SECONDS: i64 = 120;
 
 /// 앱이 떠 있는 동안 host run thread가 finalize에 도달하지 못하고 죽거나 hang하면
-/// agent_runs row가 'Running'으로 영구히 남아 `has_running_agent_run`이 큐 워커를
-/// 무기한 교착시킨다(시작 시에만 도는 `reconcile_interrupted_runs`로는 못 잡는다).
+/// agent_runs row가 'Running'으로 영구히 남아 `count_running_agent_runs`가 큐 워커의
+/// 동시 한도를 영구 점유한다(시작 시에만 도는 `reconcile_interrupted_runs`로는 못 잡는다).
 /// 마지막 활동(heartbeat, 없으면 started_at)이 role timeout + grace 보다 오래 멈췄고
 /// 살아있는 host_pid도 없는 Running run을 좀비로 보고 NeedsInspection으로 회수한다.
 /// NeedsInspection은 retry 가능 상태라 사용자가 재시도 버튼으로 다시 돌릴 수 있다.
@@ -14433,6 +14450,52 @@ mod tests {
         // 방금 heartbeat을 찍은 run은 살아있는 것으로 보고 건드리지 않는다.
         let fresh = get_agent_run(&conn, &fresh_id).expect("fresh run");
         assert_eq!(fresh.status, "Running");
+    }
+
+    #[test]
+    fn running_run_worktree_paths_reports_only_running_runs_paths() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        let task_a = create_test_task(&mut conn, &project.id);
+        let task_b = create_test_task(&mut conn, &project.id);
+
+        for (task_id, path) in [(&task_a.id, "/wt/a"), (&task_b.id, "/wt/b")] {
+            conn.execute(
+                "INSERT INTO task_worktrees (
+                   id, project_id, task_id, branch_name, worktree_path, base_branch, head_hash,
+                   status, created_at, updated_at
+                 )
+                 VALUES (?1, ?2, ?3, 'helm/x', ?4, 'main', NULL, 'Active', ?5, ?5)",
+                params![new_id(), project.id, task_id, path, now()],
+            )
+            .expect("insert worktree");
+        }
+
+        // task_a만 Running, task_b는 Queued.
+        conn.execute(
+            "INSERT INTO agent_runs (
+               id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+               stdout_log_path, stderr_log_path, created_at, updated_at
+             )
+             VALUES (?1, ?2, ?3, 'coder', 'Running', ?4, 's.md', 'r.json', 'o.log', 'e.log', ?5, ?5)",
+            params![new_id(), project.id, task_a.id, ".helm/a", now()],
+        )
+        .expect("running run");
+        conn.execute(
+            "INSERT INTO agent_runs (
+               id, project_id, task_id, role_id, status, artifact_dir, summary_path, result_path,
+               stdout_log_path, stderr_log_path, created_at, updated_at
+             )
+             VALUES (?1, ?2, ?3, 'coder', 'Queued', ?4, 's.md', 'r.json', 'o.log', 'e.log', ?5, ?5)",
+            params![new_id(), project.id, task_b.id, ".helm/b", now()],
+        )
+        .expect("queued run");
+
+        assert_eq!(count_running_agent_runs(&conn, &project.id).expect("count"), 1);
+        assert_eq!(
+            running_run_worktree_paths(&conn, &project.id).expect("paths"),
+            vec!["/wt/a".to_string()]
+        );
     }
 
     #[test]

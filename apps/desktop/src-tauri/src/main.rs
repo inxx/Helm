@@ -2546,6 +2546,10 @@ fn stop_project_queue_worker(state: &State<'_, AppState>, project_id: &str) {
     }
 }
 
+// ponytail: 프로젝트당 동시 host run 한도. 2면 충분, 더 필요하면 SettingsScreen에 노출.
+// 같은 worktree를 공유하는 run(특히 in-place 모드)은 한도와 무관하게 직렬로 묶인다.
+const MAX_CONCURRENT_RUNS: i64 = 2;
+
 fn run_project_queue_worker(
     app: AppHandle,
     context: ProjectContext,
@@ -2572,7 +2576,7 @@ fn run_project_queue_worker(
             }
         }
         let queued = db::open_existing_db(&context.db_path).and_then(|conn| {
-            if db::has_running_agent_run(&conn, &project_id)? {
+            if db::count_running_agent_runs(&conn, &project_id)? >= MAX_CONCURRENT_RUNS {
                 // 큐가 막혀 있으면, 세션 중 죽은 host run thread가 남긴 Running 좀비를 회수한다.
                 let reaped = db::reap_stale_running_runs(&conn, &project_id)?;
                 for run_id in &reaped {
@@ -2586,12 +2590,30 @@ fn run_project_queue_worker(
                         }),
                     );
                 }
-                // 회수 후에도 살아있는 run이 있으면 이번 사이클은 양보한다.
-                if db::has_running_agent_run(&conn, &project_id)? {
+                // 회수 후에도 한도가 차 있으면 이번 사이클은 양보한다.
+                if db::count_running_agent_runs(&conn, &project_id)? >= MAX_CONCURRENT_RUNS {
                     return Ok(None);
                 }
             }
-            db::next_queued_agent_run(&conn, &project_id)
+            // 다음 대기 run이 이미 Running인 run과 같은 worktree(=같은 체크아웃)를 쓰면
+            // 동시 실행 시 서로 덮어쓴다 — 이번 사이클은 양보한다. in-place run은 모두
+            // 프로젝트 root를 공유하므로 이 규칙만으로 자동 직렬화된다.
+            match db::next_queued_agent_run(&conn, &project_id)? {
+                Some(run) => {
+                    let candidate = db::get_task_worktree(&conn, &project_id, &run.task_id)?
+                        .map(|wt| wt.worktree_path);
+                    if let Some(path) = &candidate {
+                        if db::running_run_worktree_paths(&conn, &project_id)?
+                            .iter()
+                            .any(|p| p == path)
+                        {
+                            return Ok(None);
+                        }
+                    }
+                    Ok(Some(run))
+                }
+                None => Ok(None),
+            }
         });
         match queued {
             Ok(Some(run)) => {
