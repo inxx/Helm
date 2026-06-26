@@ -393,13 +393,15 @@ export const TerminalScreen = memo(function TerminalScreen({
   async function restartPane(pane: TerminalPaneState, patch: Partial<TerminalPaneState> = {}) {
     const nextPane = { ...pane, ...patch };
     disposePane(pane.id, { stopPty: false });
-    updatePane(pane.id, { ...patch, running: false, error: null, exitCode: null });
+    // 기존 세션을 먼저 끝내야 한다. updatePane을 먼저 하면 re-render로 ensureTerminal이 다시 돌아
+    // 아직 살아있는 옛 세션 스냅샷을 재채택하고 cwd를 이전 값으로 덮어쓴다.
     try {
       await api.stopTerminalPty(pane.id);
     } catch (err) {
       updatePane(pane.id, { running: false, error: errorMessage(err) });
       return;
     }
+    updatePane(pane.id, { ...patch, running: false, error: null, exitCode: null });
     requestAnimationFrame(() => ensureTerminal(nextPane));
   }
 
