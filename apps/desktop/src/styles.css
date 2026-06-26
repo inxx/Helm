@@ -1267,6 +1267,13 @@ h3 {
   padding: 14px;
 }
 
+.session-context-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .session-context-row {
   display: flex;
   flex-direction: column;

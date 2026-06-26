@@ -61,10 +61,15 @@ export function SessionsScreen({
   const [busyPhase, setBusyPhase] = useState<"orchestrator" | "planner">("orchestrator");
   // 새 작업을 현재 체크아웃된 브랜치에서 in-place로 할지, 새 워크트리에서 할지.
   const [worktreeMode, setWorktreeMode] = useState<"current_branch" | "worktree">("current_branch");
+  // 계획자가 쪼갠 테스크를 어느 Epic("작업") 아래에 쌓을지. 같은 작업의 후속 지시는 같은 Epic에
+  // 계속 누적하고, "새 작업"(+)을 누르면 null로 비워 다음 계획부터 새 Epic을 만든다. 프로젝트를
+  // 열 때 가장 최근 Epic으로 초기화해 재시작 후에도 후속 작업이 이어진다.
+  const [currentEpicId, setCurrentEpicId] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [deletingSession, setDeletingSession] = useState(false);
-  const [events, setEvents] = useState<RunEventSummary[]>([]);
-  const [runAlert, setRunAlert] = useState<{ roleId: string; status: string; failureKind: string | null; failureReason: string | null; at: string | null } | null>(null);
+  // 프로젝트 안에서 막힌(NeedsInspection/Failed) 작업들의 알림. 채팅이 task 선택과 무관한
+  // 단일 스레드이므로 선택된 task 하나가 아니라 프로젝트 전체 기준으로 모은다.
+  const [runAlerts, setRunAlerts] = useState<Array<{ taskId: string; taskTitle: string; roleId: string; failureKind: string | null; failureReason: string | null; at: string | null }>>([]);
   const [orchestratorMessages, setOrchestratorMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string; sourceRunId?: string | null }>>([]);
   // 이미 스레드에 적은 작업자 run 요약(source_run_id)을 기억해 3초 폴링마다 중복으로 덧붙이지 않는다.
   // 프로젝트를 바꿀 때만 비운다.
@@ -79,7 +84,6 @@ export function SessionsScreen({
   const [activityRefreshKey, setActivityRefreshKey] = useState(0);
   const [stoppingTerminalId, setStoppingTerminalId] = useState<string | null>(null);
   const [mergeApproving, setMergeApproving] = useState(false);
-  const [changeRequest, setChangeRequest] = useState("");
   const [requestingChanges, setRequestingChanges] = useState(false);
   const [composingNewSession, setComposingNewSession] = useState(false);
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
@@ -96,8 +100,12 @@ export function SessionsScreen({
     persistedRunIdsRef.current = new Set();
     if (!snapshot) {
       setOrchestratorMessages([]);
+      setCurrentEpicId(null);
       return;
     }
+    // 가장 최근 Epic을 "현재 작업"으로 잡아, 재시작 후에도 후속 지시가 같은 Epic에 쌓이게 한다.
+    const latestEpic = [...snapshot.epics].sort((a, b) => timestampValue(b.createdAt) - timestampValue(a.createdAt))[0];
+    setCurrentEpicId(latestEpic?.id ?? null);
     let disposed = false;
     void api
       .listConversationMessages(snapshot.project.id)
@@ -156,15 +164,12 @@ export function SessionsScreen({
   }, [activeSessionId, composingNewSession, selectedTaskId, sessions]);
   const selectedTask = selectedTaskId ? taskById.get(selectedTaskId) ?? null : null;
   const activeTask = activeSession?.taskId ? taskById.get(activeSession.taskId) ?? selectedTask : selectedTask;
-  const activeApprovalEntityIds = [activeTask?.id, activeSession?.sourceRunId].filter(Boolean) as string[];
-  const activePendingApprovals =
-    activeApprovalEntityIds.length > 0
-      ? snapshot?.approvals.filter(
-          (approval) => approval.status === "Pending" && activeApprovalEntityIds.includes(approval.entityId),
-        ) ?? []
-      : [];
-  const activeRunWorking = Boolean(activeSession && isSessionWorking(activeSession));
-  const latestActivity = events.at(-1) ?? null;
+  // 채팅이 프로젝트 단위 단일 스레드이므로 승인/머지/진행 표시는 선택된 task 하나가 아니라
+  // 프로젝트 전체의 대기 항목을 기준으로 모은다(작업자 진행은 스레드에 요약만 누적된다).
+  const projectPendingApprovals =
+    snapshot?.approvals.filter((approval) => approval.status === "Pending") ?? [];
+  const mergeWaitingTasks = snapshot?.tasks.filter((task) => task.status === "MergeWaiting") ?? [];
+  const workingSession = sessions.find((session) => isSessionWorking(session)) ?? null;
   // Orchestrator turn is in flight but no visible assistant text yet.
   const lastOrchestratorMessage = orchestratorMessages.at(-1);
   const hasVisibleAssistantReply =
@@ -269,76 +274,79 @@ export function SessionsScreen({
     };
   }, []);
 
+  // 작업자 run 요약은 프로젝트 단위 단일 스레드에 누적한다. 채팅이 task 선택과 무관하므로
+  // 선택된 task 하나가 아니라 진행 중인 모든 task의 완료 run 요약을 끌어온다. 이미 끝난(Merged/Done)
+  // task의 요약은 프로젝트를 열 때 conversation_messages에서 한 번 로드되므로 다시 폴링하지 않는다.
+  // ponytail: 진행 중 task만 폴링. 완료 직전 마지막 요약은 직전 폴링에서 이미 잡혀 들어간다.
   useEffect(() => {
-    const taskId = activeTask?.id;
-    if (!snapshot || !taskId) {
-      setEvents([]);
-      setRunAlert(null);
+    if (!snapshot) {
+      setRunAlerts([]);
+      return;
+    }
+    const projectId = snapshot.project.id;
+    const activeTasks = snapshot.tasks.filter((task) => task.status !== "Merged" && task.status !== "Done");
+    if (activeTasks.length === 0) {
+      setRunAlerts((prev) => keepIfEqual(prev, []));
       return;
     }
     let disposed = false;
-    const projectId = snapshot.project.id;
-    // Accumulate the whole task transcript: every role run's events + summary, in run order,
-    // so handing off to the next role appends history instead of replacing it.
-    void api
-      .listAgentRuns(projectId, taskId)
-      .then(async (runs) => {
+    void Promise.all(
+      activeTasks.map(async (task) => {
+        const runs = await api.listAgentRuns(projectId, task.id).catch(() => []);
         const ordered = [...runs].sort((a, b) => timestampValue(a.createdAt) - timestampValue(b.createdAt));
-        const perRun = await Promise.all(
+        const summaries = await Promise.all(
           ordered.map(async (run) => ({
-            run,
-            events: await api.listRunEvents(projectId, run.id).catch(() => []),
-            summary: await api.readRunArtifact(projectId, run.id, "summary.md").catch(() => null),
+            runId: run.id,
+            roleId: run.roleId,
+            text: (await api.readRunArtifact(projectId, run.id, "summary.md").catch(() => null))?.trim() ?? "",
           })),
         );
+        return { task, latest: ordered.at(-1), summaries: summaries.filter((entry) => entry.text) };
+      }),
+    )
+      .then((perTask) => {
         if (disposed) return;
-        // Polling re-fetches the whole transcript every few seconds. Bail when the data is
-        // unchanged (return the prev reference) so identical polls don't churn the DOM and make
-        // chat blocks blink/reorder.
-        const nextEvents = perRun.flatMap((entry) => entry.events);
-        setEvents((prev) => keepIfEqual(prev, nextEvents));
-        // 완료된 작업자 run 요약을 한 채팅 스레드에 누적한다. source_run_id로 멱등 — 같은 run은
-        // 폴링이 반복돼도 한 번만 적힌다(메모리 ref + 백엔드 UNIQUE 이중 가드).
-        const nextSummaries = perRun
-          .filter((entry) => entry.summary?.trim())
-          .map((entry) => ({ runId: entry.run.id, roleId: entry.run.roleId, text: entry.summary!.trim() }));
-        for (const summary of nextSummaries) {
-          if (persistedRunIdsRef.current.has(summary.runId)) continue;
-          persistedRunIdsRef.current.add(summary.runId);
-          appendMessage(
-            "assistant",
-            `**${roleLabel(summary.roleId, language)} · ${t("sessions.summaryTitle")}**\n\n${summary.text}`,
-            summary.runId,
-          );
+        // 완료된 작업자 run 요약을 스레드에 누적. source_run_id로 멱등 — 같은 run은 폴링이 반복돼도
+        // 한 번만 적힌다(메모리 ref + 백엔드 UNIQUE 이중 가드).
+        for (const { summaries } of perTask) {
+          for (const summary of summaries) {
+            if (persistedRunIdsRef.current.has(summary.runId)) continue;
+            persistedRunIdsRef.current.add(summary.runId);
+            appendMessage(
+              "assistant",
+              `**${roleLabel(summary.roleId, language)} · ${t("sessions.summaryTitle")}**\n\n${summary.text}`,
+              summary.runId,
+            );
+          }
         }
-        // Surface the latest run's blocking reason: a NeedsInspection/Failed run leaves the task
-        // silently stuck (e.g. coder reported edits that aren't in the worktree diff). Show it.
-        const latest = ordered.at(-1);
-        const nextAlert =
-          latest && (latest.status === "NeedsInspection" || latest.status === "Failed")
-            ? { roleId: latest.roleId, status: latest.status, failureKind: latest.failureKind, failureReason: latest.failureReason, at: latest.finishedAt ?? latest.updatedAt }
-            : null;
-        setRunAlert((prev) => keepIfEqual(prev, nextAlert));
+        // 막힌(NeedsInspection/Failed) task는 조용히 멈춘다(예: coder가 보고한 변경이 worktree diff에 없음).
+        // 프로젝트 전체에서 모아 스레드 하단에 노출한다.
+        const nextAlerts = perTask
+          .filter((entry) => entry.latest && (entry.latest.status === "NeedsInspection" || entry.latest.status === "Failed"))
+          .map((entry) => ({
+            taskId: entry.task.id,
+            taskTitle: entry.task.title,
+            roleId: entry.latest!.roleId,
+            failureKind: entry.latest!.failureKind,
+            failureReason: entry.latest!.failureReason,
+            at: entry.latest!.finishedAt ?? entry.latest!.updatedAt,
+          }));
+        setRunAlerts((prev) => keepIfEqual(prev, nextAlerts));
       })
       .catch(() => {
-        if (!disposed) {
-          setEvents([]);
-          setRunAlert(null);
-        }
+        if (!disposed) setRunAlerts((prev) => keepIfEqual(prev, []));
       });
     return () => {
       disposed = true;
     };
-  }, [activeTask?.id, activityRefreshKey, snapshot?.project.id]);
+  }, [snapshot?.project.id, snapshot?.tasks, activityRefreshKey]);
 
-  // 전사는 한 task의 모든 role run(planner → coder → plan_verifier → …)을 누적하는데,
-  // run 이벤트는 각자의 run id로 들어온다. 세션의 source run id 하나에만 묶으면 핸드오프
-  // 이후 코더·plan_verifier 신호를 놓쳐 채팅이 얼어붙는다. active task의 run 신호 전부에
-  // 반응하고, 승인 대기처럼 "working" run이 없는 구간을 위해 백업 폴링도 둔다. keepIfEqual이
-  // 동일 폴링을 무비용으로 만든다.
+  // 채팅이 프로젝트 단위 단일 스레드라, 선택된 task 하나가 아니라 프로젝트의 모든 run 신호에
+  // 반응해 요약/알림 폴링(activityRefreshKey)을 깨운다. 진행 중인 task가 하나라도 있으면 승인
+  // 대기처럼 "working" run이 없는 구간을 위해 백업 폴링도 둔다. keepIfEqual이 동일 폴링을 무비용으로 만든다.
+  const hasActiveTask = (snapshot?.tasks ?? []).some((task) => task.status !== "Merged" && task.status !== "Done");
   useEffect(() => {
-    const taskId = activeTask?.id;
-    if (!snapshot || !taskId) return;
+    if (!snapshot) return;
     const projectId = snapshot.project.id;
     let disposed = false;
     const bump = () => {
@@ -346,26 +354,24 @@ export function SessionsScreen({
       setActivityRefreshKey((value) => value + 1);
       setReloadKey((value) => value + 1);
     };
-    const matchesTask = (payload: { projectId?: string; taskId?: string }) =>
-      payload.projectId === projectId && (!payload.taskId || payload.taskId === taskId);
+    const matchesProject = (payload: { projectId?: string }) => payload.projectId === projectId;
 
     let cleanupEvent: (() => void) | null = null;
     let cleanupUpdated: (() => void) | null = null;
     void listen<RunEventSummary>("agent-run://event", (event) => {
-      if (!disposed && matchesTask(event.payload)) bump();
+      if (!disposed && matchesProject(event.payload)) bump();
     }).then((unlisten) => {
       if (disposed) unlisten();
       else cleanupEvent = unlisten;
     });
     void listen<{ projectId?: string; taskId?: string; runId?: string }>("agent-run://updated", (event) => {
-      if (!disposed && matchesTask(event.payload)) bump();
+      if (!disposed && matchesProject(event.payload)) bump();
     }).then((unlisten) => {
       if (disposed) unlisten();
       else cleanupUpdated = unlisten;
     });
 
-    const settled = activeTask?.status === "Merged" || activeTask?.status === "Done";
-    const timer = settled ? null : window.setInterval(bump, 3_000);
+    const timer = hasActiveTask ? window.setInterval(bump, 3_000) : null;
 
     return () => {
       disposed = true;
@@ -373,7 +379,7 @@ export function SessionsScreen({
       cleanupUpdated?.();
       if (timer !== null) window.clearInterval(timer);
     };
-  }, [activeTask?.id, activeTask?.status, snapshot?.project.id]);
+  }, [snapshot?.project.id, hasActiveTask]);
 
   if (!snapshot) {
     return (
@@ -397,8 +403,8 @@ export function SessionsScreen({
 
     // 승인 대기가 있으면 채팅 입력을 승인/반려 결정으로 먼저 해석한다 (버튼 대신 대화로 결정).
     const decision = parseApprovalDecision(goalText);
-    if (decision && activePendingApprovals.length > 0) {
-      await decideApprovalFromChat(activePendingApprovals[0], decision.decision, decision.reason);
+    if (decision && projectPendingApprovals.length > 0) {
+      await decideApprovalFromChat(projectPendingApprovals[0], decision.decision, decision.reason);
       return;
     }
 
@@ -529,14 +535,18 @@ export function SessionsScreen({
     // 사용자는 이미 채팅에서 "확인"으로 요구사항을 승인했다(handOffToPlanner 진입 조건).
     // 여기서 다시 window.confirm을 띄우면 같은 결정을 두 번 묻는 셈이라 제거한다 — 단일 승인 게이트.
     const projectId = snapshot.project.id;
-    // One planning conversation → one epic; every materialized task hangs off it so the sidebar
-    // shows a single parent group instead of N flat sessions. If the epic fails to create, fall
-    // back to ungrouped tasks (epicId stays null) rather than dropping the work.
-    let epicId: string | null = null;
-    try {
-      epicId = (await api.createEpic(projectId, deriveEpicTitle(goalText, freshTasks))).id;
-    } catch {
-      /* group-less fallback */
+    // 같은 작업의 후속 지시는 같은 Epic 아래로 계속 쌓는다: 현재 작업 중인 Epic(currentEpicId)이
+    // 아직 존재하면 재사용하고, 없거나 "새 작업"으로 비워졌으면 새 Epic을 만든다. Epic 생성이
+    // 실패하면 묶지 않고(epicId=null) 진행한다.
+    let epicId: string | null =
+      currentEpicId && snapshot.epics.some((epic) => epic.id === currentEpicId) ? currentEpicId : null;
+    if (!epicId) {
+      try {
+        epicId = (await api.createEpic(projectId, deriveEpicTitle(goalText, freshTasks))).id;
+        setCurrentEpicId(epicId);
+      } catch {
+        /* group-less fallback */
+      }
     }
     const created: string[] = [];
     const startFailed: string[] = [];
@@ -585,18 +595,18 @@ export function SessionsScreen({
   // Delete the active work session: removes the task and (via the backend command) its runs,
   // events, evidence, approvals, plus the on-disk git worktree and local branch. Clearing
   // activeSessionId below also resets the orchestrator chat bubbles via the effect above.
-  async function deleteSession() {
-    if (!snapshot || !activeTask || deletingSession) return;
+  async function deleteSession(task: TaskSummary) {
+    if (!snapshot || deletingSession) return;
     const proceed = window.confirm(
       language === "ko"
-        ? `"${activeTask.title}" 작업 세션을 삭제할까요?\n연결된 run/event/근거와 git worktree·로컬 브랜치까지 함께 삭제됩니다.`
-        : `Delete the work session "${activeTask.title}"?\nThis also removes its runs/events/evidence and the git worktree and local branch.`,
+        ? `"${task.title}" 작업 세션을 삭제할까요?\n연결된 run/event/근거와 git worktree·로컬 브랜치까지 함께 삭제됩니다.`
+        : `Delete the work session "${task.title}"?\nThis also removes its runs/events/evidence and the git worktree and local branch.`,
     );
     if (!proceed) return;
     setDeletingSession(true);
     setLoadError(null);
     try {
-      await api.deleteTask(snapshot.project.id, activeTask.id);
+      await api.deleteTask(snapshot.project.id, task.id);
       setActiveSessionId(null);
       await onRefresh();
       setReloadKey((value) => value + 1);
@@ -610,18 +620,18 @@ export function SessionsScreen({
   // Manual merge gate: tasks auto-run through the tester, then stop at MergeWaiting. The user
   // approves the merge here, which commits + pushes the worktree branch (same backend command the
   // Tasks view uses).
-  async function approveMerge() {
-    if (!snapshot || !activeTask || mergeApproving) return;
+  async function approveMerge(task: TaskSummary) {
+    if (!snapshot || mergeApproving) return;
     const proceed = window.confirm(
       language === "ko"
-        ? `"${activeTask.title}" 작업을 머지 승인할까요?\nworktree 변경사항을 커밋하고 origin에 push합니다.`
-        : `Approve merge for "${activeTask.title}"?\nThis commits the worktree changes and pushes to origin.`,
+        ? `"${task.title}" 작업을 머지 승인할까요?\nworktree 변경사항을 커밋하고 origin에 push합니다.`
+        : `Approve merge for "${task.title}"?\nThis commits the worktree changes and pushes to origin.`,
     );
     if (!proceed) return;
     setMergeApproving(true);
     setLoadError(null);
     try {
-      await api.approveTaskCompletionWithGit(snapshot.project.id, activeTask.id);
+      await api.approveTaskCompletionWithGit(snapshot.project.id, task.id);
       await onRefresh();
       setReloadKey((value) => value + 1);
     } catch (error) {
@@ -634,17 +644,16 @@ export function SessionsScreen({
   // Merge-gate "request changes": attach the feedback as a task instruction, reopen the task at
   // the coder stage, and re-run. Auto-handoff replays coder → … → MergeWaiting with the feedback
   // visible in the runner's context pack. Reuses existing commands — no dedicated backend path.
-  async function requestChanges() {
-    if (!snapshot || !activeTask || requestingChanges) return;
-    const feedback = changeRequest.trim();
-    if (!feedback) return;
+  async function requestChanges(task: TaskSummary, feedback: string) {
+    if (!snapshot || requestingChanges) return;
+    const trimmed = feedback.trim();
+    if (!trimmed) return;
     setRequestingChanges(true);
     setLoadError(null);
     try {
-      await api.appendTaskInstruction(snapshot.project.id, activeTask.id, feedback);
-      await api.updateTaskStatus(snapshot.project.id, activeTask.id, "Ready", language === "ko" ? "머지 전 수정 요청으로 재작업" : "Reopened for pre-merge changes");
-      await api.startNextRoleRun(snapshot.project.id, activeTask.id);
-      setChangeRequest("");
+      await api.appendTaskInstruction(snapshot.project.id, task.id, trimmed);
+      await api.updateTaskStatus(snapshot.project.id, task.id, "Ready", language === "ko" ? "머지 전 수정 요청으로 재작업" : "Reopened for pre-merge changes");
+      await api.startNextRoleRun(snapshot.project.id, task.id);
       await onRefresh();
       setReloadKey((value) => value + 1);
     } catch (error) {
@@ -730,6 +739,8 @@ export function SessionsScreen({
     setComposingNewSession(true);
     setActiveSessionId(null);
     onSelectTask(null);
+    // "새 작업" → 다음 계획자 산출물은 기존 Epic이 아니라 새 Epic 아래로 묶는다.
+    setCurrentEpicId(null);
     window.setTimeout(() => composerRef.current?.focus(), 0);
   }
 
@@ -880,324 +891,175 @@ export function SessionsScreen({
       </aside>
 
       <section className="session-chat" aria-label={t("sessions.chatAria")}>
-        {activeSession || activeTask ? (
-          <>
-            <header className="session-chat-header">
-              <div>
-                <h1>{activeSession?.title ?? activeTask?.title}</h1>
-                <p>
-                  {activeSession?.provider ?? t("sessions.providerUnknown")}
-                  {activeSession?.model ? ` · ${activeSession.model}` : ""}
-                </p>
-              </div>
-              {activeTask ? (
-                <button
-                  type="button"
-                  className="secondary-button session-delete-button"
-                  onClick={() => void deleteSession()}
-                  disabled={deletingSession}
-                >
-                  {deletingSession
-                    ? language === "ko"
-                      ? "삭제 중…"
-                      : "Deleting…"
-                    : language === "ko"
-                      ? "세션 삭제"
-                      : "Delete session"}
-                </button>
-              ) : null}
-            </header>
-            <div className="session-chat-scroll" ref={chatScrollRef}>
-              <SessionMessage role="assistant" icon="bot" title={t("sessions.assistantTitle")} timestamp={activeSession?.lastSignalAt ?? null} language={language}>
-                <p>{t("sessions.introMessage")}</p>
-              </SessionMessage>
-              <SessionMessage role="user" icon="user" title={t("sessions.requestTitle")} timestamp={activeTask?.createdAt ?? activeSession?.createdAt ?? null} language={language}>
-                <strong>{activeTask?.title ?? activeSession?.title}</strong>
-                {activeTask?.description ? <p>{activeTask.description}</p> : null}
-              </SessionMessage>
-              {activeSession ? (
-                <SessionMessage role="assistant" icon="bot" title={t("sessions.progressTitle")} timestamp={activeSession.lastSignalAt ?? activeSession.updatedAt} language={language}>
-                  <p>{sessionStatusCopy(activeSession, language)}</p>
-                </SessionMessage>
-              ) : (
-                <SessionMessage role="assistant" icon="bot" title={t("sessions.waitingTitle")} timestamp={activeTask?.updatedAt ?? null} language={language}>
-                  <p>{t("sessions.noLinkedRun")}</p>
-                </SessionMessage>
-              )}
-              {events.filter(isContentEvent).map((event) => (
-                <SessionMessage
-                  icon={event.kind === "artifact" ? "file" : "bot"}
-                  key={event.id}
-                  role={event.kind === "stdout" || event.kind === "stderr" ? "tool" : "assistant"}
-                  timestamp={event.createdAt}
-                  title={event.kind}
-                  language={language}
-                >
-                  <p>{event.message}</p>
-                </SessionMessage>
-              ))}
-              {orchestratorMessages.map((message) => {
-                const text = message.role === "assistant" ? stripPlanJson(message.content) : message.content;
-                if (!text) return null;
-                return (
-                  <SessionMessage
-                    icon={message.role === "user" ? "user" : "bot"}
-                    key={message.id}
-                    role={message.role}
-                    timestamp={null}
-                    title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
-                    language={language}
-                  >
-                    {message.role === "assistant" ? (
-                      <div className="session-markdown">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
-                      </div>
-                    ) : (
-                      <p>{text}</p>
-                    )}
-                  </SessionMessage>
-                );
-              })}
-              {orchestratorPending ? <OrchestratorPending language={language} phase={busyPhase} /> : null}
-              {runAlert ? (
-                <SessionMessage
-                  icon="bot"
-                  role="tool"
-                  timestamp={runAlert.at}
-                  title={language === "ko" ? "막힘 · 점검 필요" : "Blocked · needs inspection"}
-                  language={language}
-                >
-                  <p>{blockReasonCopy(runAlert.failureKind, runAlert.failureReason, language)}</p>
-                  {runAlert.failureKind === "diff_mismatch" ? (
-                    <p>
-                      {language === "ko"
-                        ? "에이전트가 보고한 변경 파일이 worktree의 실제 git diff에 없습니다. coder를 재실행하거나 Git 화면에서 worktree 변경사항을 직접 확인하세요."
-                        : "The agent's reported changes are not in the worktree's actual git diff. Re-run the coder, or inspect the worktree in the Git view."}
-                    </p>
-                  ) : null}
-                </SessionMessage>
-              ) : null}
-              {activeTask?.status === "MergeWaiting" ? (
-                <SessionMessage
-                  icon="bot"
-                  role="assistant"
-                  timestamp={activeTask.updatedAt}
-                  title={language === "ko" ? "머지 승인 대기" : "Waiting for merge approval"}
-                  language={language}
-                >
-                  <p>
-                    {language === "ko"
-                      ? "테스트까지 모두 통과했습니다. 승인하면 worktree 변경사항을 커밋하고 origin에 push합니다."
-                      : "All checks including tests passed. Approving commits the worktree changes and pushes to origin."}
-                  </p>
-                  <p>
-                    {language === "ko"
-                      ? "수정할 부분이 있으면 아래에 적어 다시 작업시킬 수 있습니다."
-                      : "If anything needs fixing, describe it below to send it back for rework."}
-                  </p>
-                  <textarea
-                    className="session-change-request"
-                    disabled={mergeApproving || requestingChanges}
-                    onChange={(event) => setChangeRequest(event.target.value)}
-                    placeholder={language === "ko" ? "수정 요청 내용 (선택)" : "Revision request (optional)"}
-                    rows={2}
-                    value={changeRequest}
-                  />
-                  <div className="composer-buttons">
-                    <button
-                      className="primary-button loading-button"
-                      disabled={mergeApproving || requestingChanges}
-                      onClick={() => void approveMerge()}
-                      type="button"
-                    >
-                      {mergeApproving ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
-                      <span>{mergeApproving ? (language === "ko" ? "커밋/푸시 중…" : "Committing…") : (language === "ko" ? "머지 승인" : "Approve merge")}</span>
-                    </button>
-                    <button
-                      className="secondary-button loading-button"
-                      disabled={mergeApproving || requestingChanges || !changeRequest.trim()}
-                      onClick={() => void requestChanges()}
-                      type="button"
-                    >
-                      {requestingChanges ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Pencil size={14} aria-hidden />}
-                      <span>{requestingChanges ? (language === "ko" ? "재작업 시작 중…" : "Reopening…") : (language === "ko" ? "수정 요청" : "Request changes")}</span>
-                    </button>
-                  </div>
-                </SessionMessage>
-              ) : null}
-              {activeRunWorking ? (
-                <SessionMessage icon="bot" role="assistant" timestamp={activeSession?.lastSignalAt ?? null} title={language === "ko" ? "진행 중" : "Working"} language={language}>
-                  <SessionWorkingIndicator
-                    language={language}
-                    latestActivity={latestActivity}
-                    session={activeSession}
-                  />
-                </SessionMessage>
-              ) : null}
-              {/* 승인 카드는 항상 목록 맨 아래(입력창 바로 위)에 둔다 — 자동 스크롤이
-                  맨 아래로 따라가므로 위쪽에 두면 사용자가 보지 못하고 지나친다. */}
-              {activePendingApprovals.map((approval) => (
-                <SessionMessage key={approval.id} role="assistant" icon="bot" title={t("sessions.approvalTitle")} timestamp={activeSession?.lastSignalAt ?? activeTask?.updatedAt ?? null} language={language}>
-                  <p>
-                    <strong>{approvalLabel(approval.approvalType, language)}</strong>
-                    {approval.requestedReason ? ` — ${approval.requestedReason}` : ""}
-                  </p>
-                  <p>
-                    {language === "ko"
-                      ? '아래 입력창에 "승인" 또는 "반려"를 입력하세요. 뒤에 결정 사유를 덧붙일 수 있습니다.'
-                      : 'Type "approve" or "reject" in the box below. You can add a reason after it.'}
-                  </p>
-                </SessionMessage>
-              ))}
-            </div>
-            <form
-              className="session-orchestrator-composer"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submitOrchestratorInstruction();
-              }}
-            >
-              <textarea
-                ref={composerRef}
-                disabled={orchestratorBusy}
-                onChange={(event) => setOrchestratorInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-                  event.preventDefault();
-                  void submitOrchestratorInstruction();
-                }}
-                placeholder={t("sessions.composerPlaceholder")}
-                rows={2}
-                value={orchestratorInput}
-              />
-              <div className="composer-buttons">
-                <label
-                  className="composer-worktree-toggle"
-                  title={
-                    language === "ko"
-                      ? "체크 시 새 작업마다 워크트리를 만듭니다. 해제 시 현재 체크아웃된 브랜치에서 작업합니다(보호 브랜치면 새 브랜치 생성)."
-                      : "Checked: create a worktree per task. Unchecked: work in the current branch (a new branch is created on protected branches)."
-                  }
-                >
-                  <input
-                    type="checkbox"
-                    checked={worktreeMode === "worktree"}
-                    disabled={orchestratorBusy}
-                    onChange={(event) =>
-                      setWorktreeMode(event.target.checked ? "worktree" : "current_branch")
-                    }
-                  />
-                  <span>{language === "ko" ? "새 워크트리" : "New worktree"}</span>
-                </label>
-                {orchestratorBusy ? (
-                  <button className="primary-button loading-button" onClick={() => void cancelOrchestratorTurn()} type="button">
-                    <Square size={14} aria-hidden />
-                    <span>{t("sessions.stop")}</span>
-                  </button>
-                ) : (
-                  <button className="primary-button loading-button" disabled={!orchestratorInput.trim()} type="submit">
-                    <Send size={14} aria-hidden />
-                    <span>{t("sessions.send")}</span>
-                  </button>
-                )}
-              </div>
-            </form>
-          </>
+        {/* 가운데는 프로젝트 단위 오케스트레이터 스레드 하나로 고정한다. 사이드바에서 task를 골라도
+            여기 대화는 바뀌지 않고(우측 패널 컨텍스트만 갱신), 작업자 진행은 스레드에 요약으로만 쌓인다. */}
+        <header className="session-chat-header">
+          <div>
+            <h1>{snapshot.project.name}</h1>
+            <p>{t("sessions.assistantTitle")}</p>
+          </div>
+        </header>
+        {orchestratorMessages.length === 0 && !orchestratorPending ? (
+          <div className="session-chat-empty">
+            <MessageSquare size={20} />
+            <h2>{t("sessions.emptyChat.title")}</h2>
+            <p>{t("sessions.emptyChat.description")}</p>
+          </div>
         ) : (
-          <>
-            {orchestratorMessages.length === 0 ? (
-              <div className="session-chat-empty">
-                <MessageSquare size={20} />
-                <h2>{t("sessions.emptyChat.title")}</h2>
-                <p>{t("sessions.emptyChat.description")}</p>
-              </div>
-            ) : (
-              <div className="session-chat-scroll" ref={chatScrollRef}>
-                <div className="session-chat-thread">
-                  {orchestratorMessages.map((message) => {
-                    const text = message.role === "assistant" ? stripPlanJson(message.content) : message.content;
-                    if (!text) return null;
-                    return (
-                      <SessionMessage
-                        icon={message.role === "user" ? "user" : "bot"}
-                        key={message.id}
-                        role={message.role}
-                        timestamp={null}
-                        title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
-                        language={language}
-                      >
-                        {message.role === "assistant" ? (
-                          <div className="session-markdown">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
-                          </div>
-                        ) : (
-                          <p>{text}</p>
-                        )}
-                      </SessionMessage>
-                    );
-                  })}
-                  {orchestratorPending ? <OrchestratorPending language={language} phase={busyPhase} /> : null}
-                </div>
-              </div>
-            )}
-            <form
-              className="session-orchestrator-composer"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submitOrchestratorInstruction();
-              }}
-            >
-              <textarea
-                ref={composerRef}
-                disabled={orchestratorBusy}
-                onChange={(event) => setOrchestratorInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-                  event.preventDefault();
-                  void submitOrchestratorInstruction();
-                }}
-                placeholder={t("sessions.composerPlaceholder")}
-                rows={2}
-                value={orchestratorInput}
-              />
-              <div className="composer-buttons">
-                <label
-                  className="composer-worktree-toggle"
-                  title={
-                    language === "ko"
-                      ? "체크 시 새 작업마다 워크트리를 만듭니다. 해제 시 현재 체크아웃된 브랜치에서 작업합니다(보호 브랜치면 새 브랜치 생성)."
-                      : "Checked: create a worktree per task. Unchecked: work in the current branch (a new branch is created on protected branches)."
-                  }
+          <div className="session-chat-scroll" ref={chatScrollRef}>
+            <SessionMessage role="assistant" icon="bot" title={t("sessions.assistantTitle")} timestamp={null} language={language}>
+              <p>{t("sessions.introMessage")}</p>
+            </SessionMessage>
+            {orchestratorMessages.map((message) => {
+              const text = message.role === "assistant" ? stripPlanJson(message.content) : message.content;
+              if (!text) return null;
+              return (
+                <SessionMessage
+                  icon={message.role === "user" ? "user" : "bot"}
+                  key={message.id}
+                  role={message.role}
+                  timestamp={null}
+                  title={message.role === "user" ? t("sessions.requestTitle") : t("sessions.assistantTitle")}
+                  language={language}
                 >
-                  <input
-                    type="checkbox"
-                    checked={worktreeMode === "worktree"}
-                    disabled={orchestratorBusy}
-                    onChange={(event) =>
-                      setWorktreeMode(event.target.checked ? "worktree" : "current_branch")
-                    }
-                  />
-                  <span>{language === "ko" ? "새 워크트리" : "New worktree"}</span>
-                </label>
-                {orchestratorBusy ? (
-                  <button className="primary-button loading-button" onClick={() => void cancelOrchestratorTurn()} type="button">
-                    <Square size={14} aria-hidden />
-                    <span>{t("sessions.stop")}</span>
-                  </button>
-                ) : (
-                  <button className="primary-button loading-button" disabled={!orchestratorInput.trim()} type="submit">
-                    <Send size={14} aria-hidden />
-                    <span>{t("sessions.send")}</span>
-                  </button>
-                )}
-              </div>
-            </form>
-          </>
+                  {message.role === "assistant" ? (
+                    <div className="session-markdown">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+                    </div>
+                  ) : (
+                    <p>{text}</p>
+                  )}
+                </SessionMessage>
+              );
+            })}
+            {orchestratorPending ? <OrchestratorPending language={language} phase={busyPhase} /> : null}
+            {/* 진행/막힘/머지/승인 카드는 항상 스레드 맨 아래(입력창 바로 위)에 둔다 — 자동 스크롤이
+                맨 아래로 따라가므로 위쪽에 두면 사용자가 보지 못하고 지나친다. */}
+            {workingSession ? (
+              <SessionMessage icon="bot" role="assistant" timestamp={workingSession.lastSignalAt ?? null} title={language === "ko" ? "진행 중" : "Working"} language={language}>
+                <SessionWorkingIndicator language={language} session={workingSession} />
+              </SessionMessage>
+            ) : null}
+            {runAlerts.map((alert) => (
+              <SessionMessage
+                key={alert.taskId}
+                icon="bot"
+                role="tool"
+                timestamp={alert.at}
+                title={`${language === "ko" ? "막힘 · 점검 필요" : "Blocked · needs inspection"} — ${alert.taskTitle}`}
+                language={language}
+              >
+                <p>{blockReasonCopy(alert.failureKind, alert.failureReason, language)}</p>
+                {alert.failureKind === "diff_mismatch" ? (
+                  <p>
+                    {language === "ko"
+                      ? "에이전트가 보고한 변경 파일이 worktree의 실제 git diff에 없습니다. coder를 재실행하거나 Git 화면에서 worktree 변경사항을 직접 확인하세요."
+                      : "The agent's reported changes are not in the worktree's actual git diff. Re-run the coder, or inspect the worktree in the Git view."}
+                  </p>
+                ) : null}
+              </SessionMessage>
+            ))}
+            {mergeWaitingTasks.map((task) => (
+              <MergeApprovalCard
+                key={task.id}
+                task={task}
+                language={language}
+                busy={mergeApproving || requestingChanges}
+                approving={mergeApproving}
+                requesting={requestingChanges}
+                onApprove={() => void approveMerge(task)}
+                onRequestChanges={(feedback) => void requestChanges(task, feedback)}
+              />
+            ))}
+            {projectPendingApprovals.map((approval) => (
+              <SessionMessage key={approval.id} role="assistant" icon="bot" title={t("sessions.approvalTitle")} timestamp={null} language={language}>
+                <p>
+                  <strong>{approvalLabel(approval.approvalType, language)}</strong>
+                  {approval.requestedReason ? ` — ${approval.requestedReason}` : ""}
+                </p>
+                <p>
+                  {language === "ko"
+                    ? '아래 입력창에 "승인" 또는 "반려"를 입력하세요. 뒤에 결정 사유를 덧붙일 수 있습니다.'
+                    : 'Type "approve" or "reject" in the box below. You can add a reason after it.'}
+                </p>
+              </SessionMessage>
+            ))}
+          </div>
         )}
+        <form
+          className="session-orchestrator-composer"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submitOrchestratorInstruction();
+          }}
+        >
+          <textarea
+            ref={composerRef}
+            disabled={orchestratorBusy}
+            onChange={(event) => setOrchestratorInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+              event.preventDefault();
+              void submitOrchestratorInstruction();
+            }}
+            placeholder={t("sessions.composerPlaceholder")}
+            rows={2}
+            value={orchestratorInput}
+          />
+          <div className="composer-buttons">
+            <label
+              className="composer-worktree-toggle"
+              title={
+                language === "ko"
+                  ? "체크 시 새 작업마다 워크트리를 만듭니다. 해제 시 현재 체크아웃된 브랜치에서 작업합니다(보호 브랜치면 새 브랜치 생성)."
+                  : "Checked: create a worktree per task. Unchecked: work in the current branch (a new branch is created on protected branches)."
+              }
+            >
+              <input
+                type="checkbox"
+                checked={worktreeMode === "worktree"}
+                disabled={orchestratorBusy}
+                onChange={(event) =>
+                  setWorktreeMode(event.target.checked ? "worktree" : "current_branch")
+                }
+              />
+              <span>{language === "ko" ? "새 워크트리" : "New worktree"}</span>
+            </label>
+            {orchestratorBusy ? (
+              <button className="primary-button loading-button" onClick={() => void cancelOrchestratorTurn()} type="button">
+                <Square size={14} aria-hidden />
+                <span>{t("sessions.stop")}</span>
+              </button>
+            ) : (
+              <button className="primary-button loading-button" disabled={!orchestratorInput.trim()} type="submit">
+                <Send size={14} aria-hidden />
+                <span>{t("sessions.send")}</span>
+              </button>
+            )}
+          </div>
+        </form>
       </section>
 
       <aside className="session-context-panel" aria-label={language === "ko" ? "환경" : "Environment"}>
-        <h3>Environment</h3>
+        <div className="session-context-header">
+          <h3>Environment</h3>
+          {activeTask ? (
+            <button
+              type="button"
+              className="secondary-button session-delete-button"
+              onClick={() => void deleteSession(activeTask)}
+              disabled={deletingSession}
+            >
+              {deletingSession
+                ? language === "ko"
+                  ? "삭제 중…"
+                  : "Deleting…"
+                : language === "ko"
+                  ? "테스크 삭제"
+                  : "Delete task"}
+            </button>
+          ) : null}
+        </div>
         <ContextRow className="full-value" label="Branch" value={activeSession?.branch ?? snapshot.repository.currentBranch ?? "-"} />
         <ContextRow className="full-value" label="Worktree" value={activeSession?.worktreePath ?? "-"} />
         <ContextRow label="Changed files" value={changedFileCountLabel(changedFiles, activeSession)} />
@@ -1474,11 +1336,9 @@ function formatElapsed(seconds: number, language: AppLanguage): string {
 
 function SessionWorkingIndicator({
   language,
-  latestActivity,
   session,
 }: {
   language: AppLanguage;
-  latestActivity: RunEventSummary | null;
   session: AgentSessionSummary | null;
 }) {
   const [seconds, setSeconds] = useState(0);
@@ -1487,11 +1347,6 @@ function SessionWorkingIndicator({
     return () => clearInterval(id);
   }, []);
   const statusLabel = sessionWorkingLabel(session, language);
-  const activityLabel = latestActivity
-    ? `${latestActivity.kind}: ${latestActivity.message}`
-    : language === "ko"
-      ? "아직 새 이벤트가 없습니다."
-      : "No new event yet.";
   return (
     <div className="session-working-indicator">
       <span className="session-working-spinner" aria-hidden="true" />
@@ -1500,10 +1355,73 @@ function SessionWorkingIndicator({
           {statusLabel}
           <span className="session-working-dots" aria-hidden="true" />
         </strong>
-        <p>{activityLabel}</p>
         <p>{formatElapsed(seconds, language)}</p>
       </div>
     </div>
+  );
+}
+
+// 머지 게이트 카드: 수정 요청 textarea는 task마다 독립이라 카드 단위로 로컬 상태를 둔다.
+function MergeApprovalCard({
+  task,
+  language,
+  busy,
+  approving,
+  requesting,
+  onApprove,
+  onRequestChanges,
+}: {
+  task: TaskSummary;
+  language: AppLanguage;
+  busy: boolean;
+  approving: boolean;
+  requesting: boolean;
+  onApprove: () => void;
+  onRequestChanges: (feedback: string) => void;
+}) {
+  const [feedback, setFeedback] = useState("");
+  return (
+    <SessionMessage
+      icon="bot"
+      role="assistant"
+      timestamp={task.updatedAt}
+      title={`${language === "ko" ? "머지 승인 대기" : "Waiting for merge approval"} — ${task.title}`}
+      language={language}
+    >
+      <p>
+        {language === "ko"
+          ? "테스트까지 모두 통과했습니다. 승인하면 worktree 변경사항을 커밋하고 origin에 push합니다."
+          : "All checks including tests passed. Approving commits the worktree changes and pushes to origin."}
+      </p>
+      <p>
+        {language === "ko"
+          ? "수정할 부분이 있으면 아래에 적어 다시 작업시킬 수 있습니다."
+          : "If anything needs fixing, describe it below to send it back for rework."}
+      </p>
+      <textarea
+        className="session-change-request"
+        disabled={busy}
+        onChange={(event) => setFeedback(event.target.value)}
+        placeholder={language === "ko" ? "수정 요청 내용 (선택)" : "Revision request (optional)"}
+        rows={2}
+        value={feedback}
+      />
+      <div className="composer-buttons">
+        <button className="primary-button loading-button" disabled={busy} onClick={onApprove} type="button">
+          {approving ? <Loader2 className="loading-icon" size={14} aria-hidden /> : null}
+          <span>{approving ? (language === "ko" ? "커밋/푸시 중…" : "Committing…") : (language === "ko" ? "머지 승인" : "Approve merge")}</span>
+        </button>
+        <button
+          className="secondary-button loading-button"
+          disabled={busy || !feedback.trim()}
+          onClick={() => onRequestChanges(feedback)}
+          type="button"
+        >
+          {requesting ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Pencil size={14} aria-hidden />}
+          <span>{requesting ? (language === "ko" ? "재작업 시작 중…" : "Reopening…") : (language === "ko" ? "수정 요청" : "Request changes")}</span>
+        </button>
+      </div>
+    </SessionMessage>
   );
 }
 
@@ -1526,29 +1444,6 @@ function ContextRow({
       </strong>
     </div>
   );
-}
-
-function sessionStatusCopy(session: AgentSessionSummary, language: AppLanguage): string {
-  if (language === "en") {
-    if (session.nextAction === "approval") return "User approval is required. Helm will not continue before approval.";
-    if (session.nextAction === "watch") return "A worker is running. Events and artifacts will accumulate in the timeline below.";
-    if (session.nextAction === "review") return "The run has finished. Review changed files and verification results next.";
-    if (session.nextAction === "retry") return "The run failed or was canceled. Check the reason and decide whether to retry.";
-    if (session.nextAction === "start") return "Waiting to start. Details will appear once a worker claims the session.";
-    return "Inspect the session details.";
-  }
-  if (session.nextAction === "approval") return "사용자 승인이 필요합니다. 승인 전에는 다음 단계로 진행하지 않습니다.";
-  if (session.nextAction === "watch") return "작업자가 실행 중입니다. 이벤트와 산출물은 아래 타임라인에 누적됩니다.";
-  if (session.nextAction === "review") return "실행이 끝났습니다. 변경 파일과 검증 결과를 확인할 차례입니다.";
-  if (session.nextAction === "retry") return "실행 실패 또는 취소 상태입니다. 실패 이유를 확인하고 재시도 여부를 결정해야 합니다.";
-  if (session.nextAction === "start") return "실행 대기 상태입니다. 작업자가 세션을 가져가면 상세 이벤트가 표시됩니다.";
-  return "세션 상세를 확인합니다.";
-}
-
-// Lifecycle plumbing (status/system/artifact creation notices) is noise in the chat; show only
-// events that carry real agent output. The run summary already renders separately as a summary block.
-function isContentEvent(event: RunEventSummary): boolean {
-  return event.kind === "stdout" || event.kind === "stderr" || event.kind === "result";
 }
 
 function blockReasonCopy(failureKind: string | null, failureReason: string | null, language: AppLanguage): string {
@@ -1683,11 +1578,18 @@ function isConfirmationMessage(text: string): boolean {
 // Epic title for a materialized plan: the goal's first meaningful line (the original ask, before
 // any "추가 요구사항" appended by follow-ups), trimmed to a sidebar-friendly length. Falls back to
 // the first task title when the goal is empty.
+// Epic 제목은 사이드바 그룹명으로 보이므로, 확정 요구사항의 마크다운 마커(##, -, * 등)를 벗기고
+// "목표/범위/제약" 같은 섹션 라벨 줄은 건너뛰어 실제 내용 첫 줄을 제목으로 삼는다.
 function deriveEpicTitle(goalText: string, tasks: PlanTask[]): string {
+  const sectionLabels = new Set([
+    "목표", "범위", "제약", "요약", "완료 조건", "추가 요구사항:",
+    "goal", "goals", "scope", "constraints", "summary",
+  ]);
+  const stripMarkdown = (line: string) => line.replace(/^[#>*\-\s]+/, "").trim();
   const firstLine = goalText
     .split("\n")
-    .map((line) => line.trim())
-    .find((line) => line && line !== "추가 요구사항:");
+    .map(stripMarkdown)
+    .find((line) => line && !sectionLabels.has(line.toLowerCase()));
   const base = firstLine || tasks[0]?.title || "AI 계획";
   return base.length > 80 ? `${base.slice(0, 79)}…` : base;
 }
