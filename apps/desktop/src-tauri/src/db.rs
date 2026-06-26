@@ -10695,8 +10695,8 @@ fn disable_latest_auto_lesson(
 
 /// run 종료 시 lesson 후보를 캡처한다(best-effort, finalize를 막지 않음).
 /// 회고 row와 승인 row(RoleLesson)를 한 트랜잭션으로 함께 만들어 둘이 갈라지지 않게 한다.
-/// 고신뢰(Succeeded)는 사람 게이트 없이 바로 active(source='auto')로 적용하고 .lessons.md를 재생성한다.
-/// 그 외 outcome은 pending으로 쌓여 사람 승인을 기다린다(노이즈/환각 강화 차단).
+/// Succeeded/NeedsInspection은 사람 게이트 없이 바로 active(source='auto')로 적용하고 .lessons.md를 재생성한다.
+/// 하드 실패/중단(Failed/TimedOut/Canceled)만 pending으로 쌓여 사람 승인을 기다린다(노이즈/환각 강화 차단).
 /// 하드 실패(Failed)면 새 캡처와 별개로 직전 자동 lesson 1건을 회귀 안전장치로 비활성화한다.
 fn capture_role_retrospective(
     conn: &mut Connection,
@@ -10727,15 +10727,16 @@ fn capture_role_retrospective(
     let Some(lesson) = build_retrospective_lesson(artifact_path, outcome) else {
         return Ok(RetroCapture::Skipped);
     };
-    // 고신뢰 신호는 Succeeded 하나뿐 — 스키마/dossier/blocking gate/exit0/pass를 모두 통과한 상태.
-    let auto = outcome == "Succeeded";
+    // 자동 적용: 명확한 성공(Succeeded) + 점검필요(NeedsInspection)까지.
+    // 하드 실패/중단(Failed/TimedOut/Canceled)은 신호가 약해 사람 승인 게이트를 유지한다.
+    let auto = outcome == "Succeeded" || outcome == "NeedsInspection";
     let retro_status = if auto { "active" } else { "pending" };
     let source = if auto { "auto" } else { "manual" };
     let approval_status = if auto { "Approved" } else { "Pending" };
     let timestamp = now();
     let decided_at: Option<&str> = if auto { Some(timestamp.as_str()) } else { None };
-    let decision_reason: Option<&str> = if auto {
-        Some("auto: 고신뢰(Succeeded) 자동 적용")
+    let decision_reason: Option<String> = if auto {
+        Some(format!("auto: {outcome} 자동 적용"))
     } else {
         None
     };
@@ -14819,6 +14820,34 @@ mod tests {
         let injected = resolve_role_lessons(&repo.root, "coder").expect("lessons present");
         assert!(injected.contains("타입 가드"));
         assert!(role_lessons_markdown(&repo.root, "coder").contains("정책을 따른다"));
+    }
+
+    #[test]
+    fn role_lesson_needs_inspection_also_auto_applies() {
+        let repo = test_repo();
+        let (mut conn, project) = open_test_project(&repo);
+        enable_retrospective_capture(&conn, &project.id);
+
+        let artifact =
+            write_run_artifacts(&repo.root, "fallback", Some(r#"{"summary":"점검 교훈"}"#));
+
+        // NeedsInspection도 사람 게이트 없이 바로 active로 적용된다.
+        let captured = capture_role_retrospective(
+            &mut conn, &project.id, "task-1", "run-1", "coder", "NeedsInspection", &artifact,
+            &repo.root,
+        )
+        .expect("capture");
+        assert_eq!(captured, RetroCapture::AutoApplied);
+
+        // 승인 카드는 뜨지 않는다.
+        let no_pending = list_approvals(&conn, &project.id, Some("Pending".to_string()))
+            .expect("list approvals")
+            .into_iter()
+            .all(|approval| approval.approval_type != "RoleLesson");
+        assert!(no_pending);
+        assert!(resolve_role_lessons(&repo.root, "coder")
+            .expect("lessons present")
+            .contains("점검 교훈"));
     }
 
     #[test]
