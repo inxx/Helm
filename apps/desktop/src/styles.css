@@ -949,6 +949,11 @@ h3 {
   flex-shrink: 0;
 }
 
+.session-scope-clear {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .session-chat-scroll {
   display: flex;
   min-height: 0;

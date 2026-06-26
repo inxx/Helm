@@ -66,6 +66,8 @@ export function SessionsScreen({
   // 열 때 가장 최근 Epic으로 초기화해 재시작 후에도 후속 작업이 이어진다.
   const [currentEpicId, setCurrentEpicId] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  // 가운데 채팅 필터: null이면 오케스트레이터 주도 전체 채팅, taskId가 있으면 그 하위 작업 관련 내용만 본다.
+  const [chatScopeTaskId, setChatScopeTaskId] = useState<string | null>(null);
   const [deletingSession, setDeletingSession] = useState(false);
   // 프로젝트 안에서 막힌(NeedsInspection/Failed) 작업들의 알림. 채팅이 task 선택과 무관한
   // 단일 스레드이므로 선택된 task 하나가 아니라 프로젝트 전체 기준으로 모은다.
@@ -97,6 +99,7 @@ export function SessionsScreen({
   useEffect(() => {
     setOrchestratorBusy(false);
     setPendingOrchestratorRequirement(null);
+    setChatScopeTaskId(null);
     persistedRunIdsRef.current = new Set();
     if (!snapshot) {
       setOrchestratorMessages([]);
@@ -176,6 +179,40 @@ export function SessionsScreen({
     lastOrchestratorMessage?.role === "assistant" && stripPlanJson(lastOrchestratorMessage.content).length > 0;
   const orchestratorPending = orchestratorBusy && !hasVisibleAssistantReply;
 
+  // 작업자 run 요약 메시지(source_run_id)를 어느 task에 속하는지 되짚는 맵. session이 sourceRunId↔taskId를
+  // 들고 있으므로 그걸로 역추적한다. 하위 채팅 필터에 쓴다.
+  const runToTask = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const session of sessions) {
+      if (session.sourceRunId && session.taskId) map.set(session.sourceRunId, session.taskId);
+    }
+    return map;
+  }, [sessions]);
+  const scopeTask = chatScopeTaskId ? taskById.get(chatScopeTaskId) ?? null : null;
+  // 하위 채팅이 선택되면 그 task에 속한 run 요약만, 아니면 프로젝트 전체 스레드를 보여준다.
+  const visibleMessages = useMemo(() => {
+    if (!chatScopeTaskId) return orchestratorMessages;
+    return orchestratorMessages.filter(
+      (message) => message.sourceRunId && runToTask.get(message.sourceRunId) === chatScopeTaskId,
+    );
+  }, [orchestratorMessages, chatScopeTaskId, runToTask]);
+  // 진행/막힘/머지/승인 카드도 하위 채팅에서는 해당 task 것만 노출한다.
+  const approvalTaskId = (approval: ApprovalSummary): string | null =>
+    approval.entityType === "Task"
+      ? approval.entityId
+      : approval.entityType === "AgentRun"
+        ? runToTask.get(approval.entityId) ?? null
+        : null;
+  const scopedWorkingSession =
+    chatScopeTaskId ? (workingSession?.taskId === chatScopeTaskId ? workingSession : null) : workingSession;
+  const scopedRunAlerts = chatScopeTaskId ? runAlerts.filter((alert) => alert.taskId === chatScopeTaskId) : runAlerts;
+  const scopedMergeTasks = chatScopeTaskId
+    ? mergeWaitingTasks.filter((task) => task.id === chatScopeTaskId)
+    : mergeWaitingTasks;
+  const scopedApprovals = chatScopeTaskId
+    ? projectPendingApprovals.filter((approval) => approvalTaskId(approval) === chatScopeTaskId)
+    : projectPendingApprovals;
+
   useEffect(() => {
     if (!snapshot) {
       setSessions([]);
@@ -244,7 +281,7 @@ export function SessionsScreen({
   useEffect(() => {
     pinnedToBottomRef.current = true;
     scrollChatToBottom();
-  }, [activeSession?.id, activeTask?.id]);
+  }, [activeSession?.id, activeTask?.id, chatScopeTaskId]);
 
   // 폴링으로 메시지/요약/승인 카드가 늘어나도 항상 맨 아래로 따라간다. 단, 사용자가
   // 위로 스크롤해 둔 상태면 방해하지 않는다. 개수 기반 deps는 내용이 in-place로 자라는
@@ -398,6 +435,8 @@ export function SessionsScreen({
     if (!snapshot || !goalText || orchestratorBusy) return;
     setLoadError(null);
     setOrchestratorInput("");
+    // 지시는 프로젝트 단위 오케스트레이터 스레드로 가므로, 보낸 메시지가 보이도록 전체 채팅으로 되돌린다.
+    setChatScopeTaskId(null);
     const priorMessages = orchestratorMessages;
     appendMessage("user", goalText);
 
@@ -743,6 +782,7 @@ export function SessionsScreen({
   function startNewSession() {
     setComposingNewSession(true);
     setActiveSessionId(null);
+    setChatScopeTaskId(null);
     onSelectTask(null);
     // "새 작업" → 다음 계획자 산출물은 기존 Epic이 아니라 새 Epic 아래로 묶는다.
     setCurrentEpicId(null);
@@ -761,6 +801,8 @@ export function SessionsScreen({
           setComposingNewSession(false);
           setActiveSessionId(session.id);
           onSelectTask(session.taskId);
+          // 하위 채팅 클릭 → 가운데 채팅을 이 작업 관련 내용만으로 좁힌다.
+          setChatScopeTaskId(session.taskId);
         }}
         type="button"
       >
@@ -873,7 +915,13 @@ export function SessionsScreen({
                       );
                       return (
                         <details className="session-epic-group" key={group.epicId} open={groupActive || undefined}>
-                          <summary className="session-epic-summary">
+                          <summary
+                            className="session-epic-summary"
+                            onClick={() => {
+                              // 목표(Epic) 클릭 → 오케스트레이터 주도 전체 채팅으로 되돌린다(토글은 그대로 동작).
+                              setChatScopeTaskId(null);
+                            }}
+                          >
                             <span className="session-epic-title">{group.epicTitle ?? t("sessions.epicUntitled")}</span>
                             <span className="session-epic-count">{group.sessions.length}</span>
                           </summary>
@@ -896,26 +944,37 @@ export function SessionsScreen({
       </aside>
 
       <section className="session-chat" aria-label={t("sessions.chatAria")}>
-        {/* 가운데는 프로젝트 단위 오케스트레이터 스레드 하나로 고정한다. 사이드바에서 task를 골라도
-            여기 대화는 바뀌지 않고(우측 패널 컨텍스트만 갱신), 작업자 진행은 스레드에 요약으로만 쌓인다. */}
+        {/* 기본은 프로젝트 단위 오케스트레이터 전체 스레드. 사이드바에서 하위 작업(채팅)을 고르면
+            그 작업 관련 내용만으로 좁혀 보고, 목표(Epic) 또는 "전체 채팅 보기"로 전체로 돌아온다. */}
         <header className="session-chat-header">
           <div>
             <h1>{snapshot.project.name}</h1>
-            <p>{t("sessions.assistantTitle")}</p>
+            <p>{scopeTask ? scopeTask.title : t("sessions.assistantTitle")}</p>
           </div>
+          {chatScopeTaskId ? (
+            <button
+              type="button"
+              className="secondary-button session-scope-clear"
+              onClick={() => setChatScopeTaskId(null)}
+            >
+              {language === "ko" ? "전체 채팅 보기" : "View full chat"}
+            </button>
+          ) : null}
         </header>
-        {orchestratorMessages.length === 0 && !orchestratorPending ? (
+        {visibleMessages.length === 0 && !orchestratorPending && !scopedWorkingSession ? (
           <div className="session-chat-empty">
             <MessageSquare size={20} />
-            <h2>{t("sessions.emptyChat.title")}</h2>
-            <p>{t("sessions.emptyChat.description")}</p>
+            <h2>{chatScopeTaskId ? (language === "ko" ? "이 작업의 활동이 아직 없습니다" : "No activity for this task yet") : t("sessions.emptyChat.title")}</h2>
+            <p>{chatScopeTaskId ? (language === "ko" ? "작업자 진행 요약이 생기면 여기에 표시됩니다." : "Worker progress summaries will appear here.") : t("sessions.emptyChat.description")}</p>
           </div>
         ) : (
           <div className="session-chat-scroll" ref={chatScrollRef}>
-            <SessionMessage role="assistant" icon="bot" title={t("sessions.assistantTitle")} timestamp={null} language={language}>
-              <p>{t("sessions.introMessage")}</p>
-            </SessionMessage>
-            {orchestratorMessages.map((message) => {
+            {chatScopeTaskId ? null : (
+              <SessionMessage role="assistant" icon="bot" title={t("sessions.assistantTitle")} timestamp={null} language={language}>
+                <p>{t("sessions.introMessage")}</p>
+              </SessionMessage>
+            )}
+            {visibleMessages.map((message) => {
               const text = message.role === "assistant" ? stripPlanJson(message.content) : message.content;
               if (!text) return null;
               return (
@@ -940,12 +999,12 @@ export function SessionsScreen({
             {orchestratorPending ? <OrchestratorPending language={language} phase={busyPhase} /> : null}
             {/* 진행/막힘/머지/승인 카드는 항상 스레드 맨 아래(입력창 바로 위)에 둔다 — 자동 스크롤이
                 맨 아래로 따라가므로 위쪽에 두면 사용자가 보지 못하고 지나친다. */}
-            {workingSession ? (
-              <SessionMessage icon="bot" role="assistant" timestamp={workingSession.lastSignalAt ?? null} title={language === "ko" ? "진행 중" : "Working"} language={language}>
-                <SessionWorkingIndicator language={language} session={workingSession} />
+            {scopedWorkingSession ? (
+              <SessionMessage icon="bot" role="assistant" timestamp={scopedWorkingSession.lastSignalAt ?? null} title={language === "ko" ? "진행 중" : "Working"} language={language}>
+                <SessionWorkingIndicator language={language} session={scopedWorkingSession} />
               </SessionMessage>
             ) : null}
-            {runAlerts.map((alert) => (
+            {scopedRunAlerts.map((alert) => (
               <SessionMessage
                 key={alert.taskId}
                 icon="bot"
@@ -964,7 +1023,7 @@ export function SessionsScreen({
                 ) : null}
               </SessionMessage>
             ))}
-            {mergeWaitingTasks.map((task) => (
+            {scopedMergeTasks.map((task) => (
               <MergeApprovalCard
                 key={task.id}
                 task={task}
@@ -976,7 +1035,7 @@ export function SessionsScreen({
                 onRequestChanges={(feedback) => void requestChanges(task, feedback)}
               />
             ))}
-            {projectPendingApprovals.map((approval) => (
+            {scopedApprovals.map((approval) => (
               <SessionMessage key={approval.id} role="assistant" icon="bot" title={t("sessions.approvalTitle")} timestamp={null} language={language}>
                 <p>
                   <strong>{approvalLabel(approval.approvalType, language)}</strong>
