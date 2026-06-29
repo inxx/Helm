@@ -4,20 +4,36 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-const GATES = [
-  "planning",
-  "claude-plan-review",
-  "plan-debate",
-  "plan-approved",
-  "implementing-sonnet",
-  "local-validation",
-  "codex-review",
-  "claude-review",
-  "gemini-review",
-  "review-agreed",
-  "pr-opened",
-  "waiting-user-merge",
-];
+// claude판과 codex판 스킬이 같은 스크립트를 공유하되 구현/리뷰 게이트가 다르므로 --flow로 분기한다.
+const FLOW_GATES = {
+  claude: [
+    "planning",
+    "claude-plan-review",
+    "plan-debate",
+    "plan-approved",
+    "implementing",
+    "local-validation",
+    "claude-review",
+    "gemini-review",
+    "review-agreed",
+    "pr-opened",
+    "waiting-user-merge",
+  ],
+  codex: [
+    "planning",
+    "claude-plan-review",
+    "plan-debate",
+    "plan-approved",
+    "implementing-sonnet",
+    "local-validation",
+    "codex-review",
+    "claude-review",
+    "gemini-review",
+    "review-agreed",
+    "pr-opened",
+    "waiting-user-merge",
+  ],
+};
 
 const STATE_TO_TASK_STATUS = {
   pending: "Planned",
@@ -29,8 +45,10 @@ const STATE_TO_TASK_STATUS = {
 const [command, ...rest] = process.argv.slice(2);
 const options = parseOptions(rest);
 const dbPath = resolve(options.db ?? ".helm/helm.sqlite");
+const GATES = FLOW_GATES[options.flow ?? "claude"];
 
 if (!command || command === "help" || options.help) usage(0);
+if (!GATES) fail(`알 수 없는 flow: ${options.flow} (claude|codex)`);
 if (!existsSync(dbPath)) fail(`DB가 없습니다: ${dbPath}`);
 
 if (command === "init") {
@@ -139,8 +157,8 @@ function parseOptions(args) {
 
 function usage(code) {
   console.log(`Usage:
-  node scripts/helm-board.mjs init [--db .helm/helm.sqlite] [--project-id id]
-  node scripts/helm-board.mjs set <gate> <pending|in_progress|done|blocked> [--evidence text]
+  node scripts/helm-board.mjs init [--db .helm/helm.sqlite] [--project-id id] [--flow claude|codex]
+  node scripts/helm-board.mjs set <gate> <pending|in_progress|done|blocked> [--evidence text] [--flow claude|codex]
   node scripts/helm-board.mjs list`);
   process.exit(code);
 }
