@@ -18,8 +18,11 @@ import { EditorScreen } from "./screens/EditorScreen";
 type Screen = "sessions" | "tasks" | "git" | "jira" | "terminal" | "editor" | "settings";
 type BootStatus = "restoring" | "ready";
 
+// Helm은 관측 보드로 운용한다: Claude/Codex를 직접 몰고 Helm은 "뭐 했는지 보는 창".
+// 오케스트레이터 채팅("sessions")은 nav에서 내렸다(삭제 아님 — 컴포넌트는 남아있고
+// TasksScreen의 task→채팅 버튼으로 여전히 열 수 있다). 다시 1급으로 올리려면 아래에
+// `{ id: "sessions", labelKey: "nav.chat", icon: MessageSquare },` 한 줄을 복구하면 된다.
 const navItemDefinitions: Array<{ id: Screen; labelKey: MessageKey; icon: typeof MessageSquare }> = [
-  { id: "sessions", labelKey: "nav.chat", icon: MessageSquare },
   { id: "tasks", labelKey: "nav.tasks", icon: ListChecks },
   { id: "git", labelKey: "nav.git", icon: GitBranch },
   { id: "jira", labelKey: "nav.jira", icon: Ticket },
@@ -29,7 +32,7 @@ const navItemDefinitions: Array<{ id: Screen; labelKey: MessageKey; icon: typeof
 ];
 
 export function App() {
-  const [screen, setScreen] = useState<Screen>("sessions");
+  const [screen, setScreen] = useState<Screen>("tasks");
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [recents, setRecents] = useState<RecentProject[]>(() => loadRecents());
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -38,7 +41,7 @@ export function App() {
   const [bootStatus, setBootStatus] = useState<BootStatus>("restoring");
   // 방문한 화면은 마운트 상태로 유지하고 CSS로만 숨긴다 — 탭 전환 시 무거운 재마운트를
   // 없애 전환을 즉시 처리하고(비치볼 방지), 로딩은 각 화면이 스스로 보여준다.
-  const [mounted, setMounted] = useState<Set<Screen>>(() => new Set<Screen>(["sessions"]));
+  const [mounted, setMounted] = useState<Set<Screen>>(() => new Set<Screen>(["tasks"]));
   const [language, setLanguage] = useState<AppLanguage>("en");
   const navItems = useMemo(
     () =>
@@ -64,7 +67,7 @@ export function App() {
         saveRecents(launch.recentProjects);
 
         if (launch.snapshot) {
-          hydrateSnapshot(launch.snapshot, "sessions");
+          hydrateSnapshot(launch.snapshot, "tasks");
         } else if (launch.restoreError) {
           setError(launch.restoreError.message);
         }
@@ -132,7 +135,7 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [snapshot?.project.id, busy]);
 
-  function hydrateSnapshot(next: ProjectSnapshot, nextScreen: Screen = "sessions") {
+  function hydrateSnapshot(next: ProjectSnapshot, nextScreen: Screen = "tasks") {
     setSnapshot(next);
     setSelectedTaskId(null);
     setScreen(nextScreen);
@@ -158,7 +161,7 @@ export function App() {
     options: { preserveRecentPosition?: boolean; nextScreen?: Screen } = {},
   ) {
     const next = await api.openProject(path);
-    hydrateSnapshot(next, options.nextScreen ?? "sessions");
+    hydrateSnapshot(next, options.nextScreen ?? "tasks");
     const nextRecents = upsertRecent(recents, next.project, {
       preserveExistingPosition: options.preserveRecentPosition,
     });
@@ -227,7 +230,7 @@ export function App() {
       if (snapshot?.project.id === projectId) {
         setSnapshot(null);
         setSelectedTaskId(null);
-        setScreen("sessions");
+        setScreen("tasks");
       }
     } catch (err) {
       setError(errorMessage(err));
