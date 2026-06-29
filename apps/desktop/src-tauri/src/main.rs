@@ -7382,7 +7382,39 @@ ERROR: You've hit your usage limit. To get more access now, send a request to yo
     }
 }
 
+/// GUI(Finder/Dock)로 실행하면 PATH가 /usr/bin:/bin:/usr/sbin:/sbin로 제한돼,
+/// Homebrew에 설치된 `gh`(예: /opt/homebrew/bin/gh) 같은 bare 셸아웃이 조용히 실패한다.
+/// (`git`은 /usr/bin/git이라 동작 → "git 화면은 되는데 PR만 빈 목록"이 된다.)
+/// 흔한 사용자 bin 디렉터리를 PATH 앞에 보강해 gh/git/node 셸아웃이 모두 해석되게 한다.
+// ponytail: 정적 후보 목록. nvm 등 버전별 경로가 더 필요해지면 로그인 셸 PATH를 읽어 합친다.
+fn augment_path_for_gui_launch() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates = [
+        "/opt/homebrew/bin".to_string(),
+        "/opt/homebrew/sbin".to_string(),
+        "/usr/local/bin".to_string(),
+        format!("{home}/.local/bin"),
+    ];
+    let current = std::env::var("PATH").unwrap_or_default();
+    let prefix: Vec<String> = candidates
+        .into_iter()
+        .filter(|cand| {
+            std::path::Path::new(cand).is_dir() && !current.split(':').any(|p| p == cand.as_str())
+        })
+        .collect();
+    if prefix.is_empty() {
+        return;
+    }
+    let new_path = if current.is_empty() {
+        prefix.join(":")
+    } else {
+        format!("{}:{}", prefix.join(":"), current)
+    };
+    std::env::set_var("PATH", new_path);
+}
+
 fn main() {
+    augment_path_for_gui_launch();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
