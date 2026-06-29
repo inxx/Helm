@@ -484,6 +484,113 @@ fn run_planner_conversation_blocking(
 }
 
 #[tauri::command]
+async fn run_planner_consultation(
+    project_id: String,
+    input: PlannerConversationInput,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<PlannerConversationResult>> {
+    let context = project_context(&state, &project_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        run_planner_consultation_blocking(project_id, input, context)
+    })
+    .await
+    .map_err(|err| CommandError::io("planner 협의 thread가 중단되었습니다.", err))?
+}
+
+fn run_planner_consultation_blocking(
+    project_id: String,
+    input: PlannerConversationInput,
+    context: ProjectContext,
+) -> CommandResult<Vec<PlannerConversationResult>> {
+    let conn = db::open_existing_db(&context.db_path)?;
+    let settings = db::effective_settings(&conn, &project_id)?;
+    let prompt = build_planner_prompt(&context.root_path, &input);
+
+    // 협의 대상 모델은 plan_verifier(계획 검토자) 역할 배정을 그대로 따른다 — 고정값 없음.
+    let selections = settings
+        .role_assignments
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("roleId").and_then(Value::as_str) == Some("plan_verifier"))
+        })
+        .map(assignment_selections)
+        .unwrap_or_default();
+    if selections.is_empty() {
+        return Err(CommandError::validation(
+            "계획 검토자(plan_verifier) 역할에 배정된 AI 연결이 없습니다. 설정에서 모델을 배정하세요.",
+        ));
+    }
+
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    let mut failures = Vec::new();
+    for selection in &selections {
+        let Some(connection_id) = selection.get("connectionId").and_then(Value::as_str) else {
+            continue;
+        };
+        if connection_id.is_empty() || !seen.insert(connection_id.to_string()) {
+            continue;
+        }
+        let Some(connection) = settings.ai_connections.as_array().and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(connection_id))
+        }) else {
+            failures.push(format!("{connection_id}: AI CLI 연결을 찾을 수 없습니다."));
+            continue;
+        };
+        match resolve_planning_command_for_connection(
+            &context.root_path,
+            &input,
+            &prompt,
+            selection,
+            connection,
+        ) {
+            Ok(command) => results.push(run_single_planning_command(&context.root_path, command)),
+            Err(error) => {
+                failures.push(format!("{connection_id}: {}", command_error_summary(&error)))
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Err(CommandError::with_details(
+            "ValidationFailed",
+            "실행 가능한 계획 검토자 연결이 없습니다.",
+            failures.join("\n"),
+        ));
+    }
+
+    Ok(results)
+}
+
+fn run_single_planning_command(
+    root_path: &Path,
+    command: PlanningCommandSpec,
+) -> PlannerConversationResult {
+    match run_direct_command_with_timeout_env(
+        root_path,
+        &command.command,
+        Duration::from_secs(command.timeout_seconds),
+        &command.env,
+    ) {
+        Ok(output) => planner_result_from_output(command, output),
+        Err(error) => PlannerConversationResult {
+            connection_id: command.connection_id,
+            provider: command.provider,
+            command: command.command,
+            response_text: String::new(),
+            stderr: command_error_summary(&error),
+            exit_code: -1,
+            timed_out: false,
+            elapsed_ms: 0,
+        },
+    }
+}
+
+#[tauri::command]
 async fn run_orchestrator_conversation(
     project_id: String,
     input: OrchestratorConversationInput,
@@ -7304,6 +7411,7 @@ fn main() {
             get_effective_settings,
             update_project_settings,
             run_planner_conversation,
+            run_planner_consultation,
             run_orchestrator_conversation,
             list_planning_sessions,
             create_planning_session,

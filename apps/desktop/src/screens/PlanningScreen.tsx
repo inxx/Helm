@@ -1,4 +1,4 @@
-import { CheckCircle2, Loader2, Sparkles } from "lucide-react";
+import { CheckCircle2, Loader2, Sparkles, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useToast } from "../components/ToastProvider";
 import { api } from "../lib/api";
@@ -152,7 +152,7 @@ export function PlanningScreen({
   const [jiraRef, setJiraRef] = useState("");
   const [importJson, setImportJson] = useState("");
   const [sessions, setSessions] = useState<PlanningSessionStub[]>([]);
-  const [plannerOperation, setPlannerOperation] = useState<"planner" | "approve" | "import" | null>(null);
+  const [plannerOperation, setPlannerOperation] = useState<"planner" | "approve" | "import" | "consult" | null>(null);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [loadedSessions, setLoadedSessions] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -258,6 +258,7 @@ export function PlanningScreen({
   const approvingPlan = plannerOperation === "approve";
   const startingPlanner = plannerOperation === "planner";
   const importingPlan = plannerOperation === "import";
+  const consultingPlanner = plannerOperation === "consult";
 
   function startNewPlan() {
     cancelPlannerRefinement();
@@ -682,6 +683,53 @@ export function PlanningScreen({
     });
   }
 
+  async function consultReviewers() {
+    if (!activeSession || plannerOperation) return;
+    const sessionId = activeSession.id;
+    const goalText = activeSession.draft.summary?.trim() || activeSession.title;
+    const note = plannerRequest.trim();
+    setPlannerOperation("consult");
+    setError(null);
+    try {
+      const results = await api.runPlannerConsultation(projectSnapshot.project.id, {
+        message: note || "이 계획 문서를 검토하고 리스크·누락·대안을 알려주세요.",
+        goalText,
+        currentDraftJson: activeSession.draft,
+      });
+      setSessions((current) =>
+        current.map((item) =>
+          item.id === sessionId
+            ? {
+                ...item,
+                updatedLabel: "방금 전",
+                messages: [
+                  ...item.messages,
+                  ...results.map((result, index) => ({
+                    id: `${sessionId}-consult-${index}-${result.connectionId}`,
+                    role: "planner" as const,
+                    content: consultMessageContent(result),
+                    createdLabel: "방금 전",
+                    pending: false,
+                  })),
+                ],
+              }
+            : item,
+        ),
+      );
+      showToast({
+        tone: "success",
+        title: "검토 의견 도착",
+        description: `검토자 모델 ${results.length}개 의견을 계획 스레드에 추가했습니다.`,
+      });
+    } catch (err) {
+      const message = errorMessage(err);
+      setError(message);
+      showToast({ tone: "error", title: "검토 의견 실패", description: message });
+    } finally {
+      setPlannerOperation(null);
+    }
+  }
+
   async function runPlannerPlanMode(
     message: string,
     goalText: string,
@@ -987,6 +1035,18 @@ export function PlanningScreen({
                       ? jiraChecks.summary
                       : "대화로 계획 문서를 고정하고 승인 후에만 Helm Task를 생성합니다."}
                 </span>
+                {activeSession ? (
+                  <button
+                    type="button"
+                    className={consultingPlanner ? "secondary-button loading-button is-loading" : "secondary-button loading-button"}
+                    onClick={() => void consultReviewers()}
+                    disabled={Boolean(plannerOperation)}
+                    title="설정의 계획 검토자(plan_verifier) 역할에 배정된 모델들에게 의견을 받습니다."
+                  >
+                    {consultingPlanner ? <Loader2 className="loading-icon" size={14} aria-hidden /> : <Users size={14} aria-hidden />}
+                    {consultingPlanner ? "의견 받는 중..." : "검토자에게 의견 받기"}
+                  </button>
+                ) : null}
                 <button
                   type="submit"
                   className={startingPlanner ? "primary-button loading-button is-loading" : "primary-button loading-button"}
@@ -1653,6 +1713,14 @@ function plannerDraftCandidate(value: unknown, depth = 0): Record<string, unknow
 
 function looksLikePlannerDraft(value: Record<string, unknown>): boolean {
   return typeof value.title === "string" && typeof value.summary === "string" && (Array.isArray(value.tasks) || Array.isArray(value.epics));
+}
+
+function consultMessageContent(result: PlannerConversationResult): string {
+  const label = `[${result.connectionId}]`;
+  const body = result.responseText.trim();
+  if (body) return `${label} ${body}`;
+  const reason = result.stderr.trim() || (result.timedOut ? "응답 시간 초과" : "응답 없음");
+  return `${label} 검토 실패: ${reason}`;
 }
 
 function plannerTasks(value: Record<string, unknown>): PlannerDraftTask[] {

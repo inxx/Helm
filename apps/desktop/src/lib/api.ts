@@ -99,6 +99,9 @@ export const api = {
   runPlannerConversation(projectId: string, input: PlannerConversationInput) {
     return invoke<PlannerConversationResult>("run_planner_conversation", { projectId, input });
   },
+  runPlannerConsultation(projectId: string, input: PlannerConversationInput) {
+    return invoke<PlannerConversationResult[]>("run_planner_consultation", { projectId, input });
+  },
   runOrchestratorConversation(projectId: string, input: OrchestratorConversationInput) {
     return invoke<PlannerConversationResult>("run_orchestrator_conversation", { projectId, input });
   },
